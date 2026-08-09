@@ -1,0 +1,17 @@
+/**
+ * Wraps com.github.jknack.handlebars.Handlebars (bundled in libs/) for .hbs views.
+ * A new Handlebars instance is created per render() call — no template/compile
+ * caching — matching this project's "simple v1" stance elsewhere (StaticFiles
+ * doesn't cache file reads either). Fine for a lightweight app; worth revisiting
+ * if this ever needs to serve high-traffic view rendering.
+ */
+class {
+
+	function render( templatePath, data ) {
+		var handlebars = createObject( "java", "com.github.jknack.handlebars.Handlebars" ).init()
+		var templateSource = fileRead( templatePath )
+		var compiled = handlebars.compileInline( templateSource )
+		return compiled.apply( data )
+	}
+
+}

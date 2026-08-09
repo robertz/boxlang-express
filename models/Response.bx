@@ -109,10 +109,17 @@ class {
 	}
 
 	/**
-	 * Render a .bxm view from the configured views directory (app.set("views", dir))
-	 * and send it as the response body. `data` is available inside the template as
-	 * the `data` struct — interpolation there needs a <bx:output> block, same as
-	 * classic CFML <cfoutput>.
+	 * Render a view from the configured views directory (app.set("views", dir)) and
+	 * send it as the response body. Supports two engines, picked by the view's file
+	 * extension:
+	 *   .bxm — native BoxLang template (include + savecontent). `data` is available
+	 *          inside it as the `data` struct — interpolation needs a <bx:output>
+	 *          block, same as classic CFML <cfoutput>.
+	 *   .hbs — Handlebars (models/HandlebarsEngine.bx), `data` is the render context
+	 *          directly, so template variables are {{data.whatever}} — or {{whatever}}
+	 *          if you pass your view data as the top-level struct.
+	 * A view with no extension gets one appended based on app.set("view engine", ...),
+	 * defaulting to "bxm" — mirrors Express's view-engine setting.
 	 */
 	function render( view, data = {} ) {
 		var viewsDir = variables.settings[ "views" ] ?: javacast( "null", "" )
@@ -123,7 +130,11 @@ class {
 			)
 		}
 
-		var viewFile = view.right( 4 ) == ".bxm" ? view : view & ".bxm"
+		var viewFile = view
+		if ( viewFile.right( 4 ) != ".bxm" && viewFile.right( 4 ) != ".hbs" ) {
+			viewFile &= "." & ( variables.settings[ "view engine" ] ?: "bxm" )
+		}
+
 		var viewsRoot = createObject( "java", "java.io.File" ).init( viewsDir ).getCanonicalFile().toPath()
 		var candidate = viewsRoot.resolve( viewFile ).normalize()
 		var realCandidate = ""
@@ -143,8 +154,12 @@ class {
 		var templatePath = realCandidate.toString()
 		var output = ""
 
-		bx:savecontent variable="output" {
-			include "#templatePath#"
+		if ( viewFile.right( 4 ) == ".hbs" ) {
+			output = new HandlebarsEngine().render( templatePath, data )
+		} else {
+			bx:savecontent variable="output" {
+				include "#templatePath#"
+			}
 		}
 
 		type( "text/html; charset=utf-8" )

@@ -59,6 +59,10 @@ class extends="testbox.system.BaseSpec" {
 			res.render( "greeting", { name: req.params.name } )
 		} )
 
+		variables.app.get( "/greet-hbs/:name", ( req, res ) => {
+			res.render( "greeting.hbs", { data: { name: req.params.name, things: [ "a", "b", "c" ] } } )
+		} )
+
 		var apiRouter = new "../../models/Router"()
 		apiRouter.get( "/ping", ( req, res ) => {
 			res.json( { pong: true } )
@@ -127,6 +131,14 @@ class extends="testbox.system.BaseSpec" {
 				expect( result.statusCode ).toBe( 200 )
 				expect( result.contentType ).toInclude( "text/html" )
 				expect( result.body ).toInclude( "Hello, Ada!" )
+			} )
+
+			it( "renders a .hbs view via Handlebars, including a loop", function() {
+				var result = variables.client.get( variables.baseUrl & "/greet-hbs/Grace" )
+				expect( result.statusCode ).toBe( 200 )
+				expect( result.contentType ).toInclude( "text/html" )
+				expect( result.body ).toInclude( "Hello, Grace!" )
+				expect( result.body ).toInclude( "Things: a, b, c" )
 			} )
 
 			it( "sends a status with its reason phrase via res.sendStatus()", function() {

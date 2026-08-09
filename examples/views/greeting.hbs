@@ -1,0 +1,9 @@
+<!doctype html>
+<html>
+<head><title>BoxExpress (Handlebars)</title></head>
+<body>
+	<h1>Hello, {{data.name}}!</h1>
+	<p>You are {{data.age}} years old.</p>
+	<p>Your favorite things: {{#each data.things}}{{this}}{{#unless @last}}, {{/unless}}{{/each}}</p>
+</body>
+</html>

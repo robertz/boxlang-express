@@ -76,6 +76,7 @@ curl -i localhost:3000/set-cookie
 curl -i localhost:3000/go-home
 curl localhost:3000/slow    # run a few of these in parallel to see concurrent handling
 curl localhost:3000/greet/Ada
+curl localhost:3000/greet-hbs/Ada
 ```
 
 Inside this repo, `examples/` and `tests/` reference the library via relative
@@ -146,18 +147,23 @@ sent".
 
 ### Views (`res.render`)
 
-Renders a `.bxm` template (BoxLang's server-page format — think `.cfm`) from a
-configured views directory and sends the result as `text/html`:
+Renders a view from a configured views directory and sends the result as
+`text/html`. Two engines, picked by the view file's extension:
 
 ```js
 app.set( "views", expandPath( "./views" ) )
 
 app.get( "/greet/:name", ( req, res ) => {
-	res.render( "greeting", { name: req.params.name, age: 30 } )
+	res.render( "greeting", { name: req.params.name, age: 30 } )        // -> views/greeting.bxm
+} )
+
+app.get( "/greet-hbs/:name", ( req, res ) => {
+	res.render( "greeting.hbs", { data: { name: req.params.name } } )   // -> views/greeting.hbs
 } )
 ```
 
-`views/greeting.bxm`:
+**`.bxm`** — BoxLang's native server-page format (think `.cfm`), run via
+`include` + `savecontent`. `views/greeting.bxm`:
 
 ```html
 <bx:output>
@@ -166,21 +172,37 @@ app.get( "/greet/:name", ( req, res ) => {
 </bx:output>
 ```
 
-Two things worth knowing:
+`data` is whatever struct you pass as `render()`'s second argument —
+reference its keys as `data.whatever`. `#var#` interpolation only happens
+inside a `<bx:output>` block, exactly like `<cfoutput>` in classic CFML —
+plain text outside one is left as literal `#...#`, unevaluated.
 
-- `data` is whatever struct you pass as the second argument to `render()` —
-  reference its keys as `data.whatever` in the template.
-- `#var#` interpolation in a `.bxm` file only happens inside a `<bx:output>`
-  block, exactly like `<cfoutput>` in classic CFML — plain text outside one is
-  left as literal `#...#`, unevaluated.
+**`.hbs`** — [Handlebars](https://handlebarsjs.com/) via the bundled
+[handlebars.java](https://github.com/jknack/handlebars.java) (`libs/`, ~1MB —
+vendored in this repo, nothing extra to install). `views/greeting.hbs`:
+
+```handlebars
+<h1>Hello, {{data.name}}!</h1>
+<p>Things: {{#each data.things}}{{this}}{{#unless @last}}, {{/unless}}{{/each}}</p>
+```
+
+Here `data` is whatever you passed to `render()`, but as the Handlebars
+*render context* rather than a magic variable — `{{data.name}}` only works
+because the struct you passed has a top-level `data` key (see the route
+above); pass your view struct directly and reference `{{name}}` instead if
+you'd rather skip that nesting.
+
+A view with no extension gets `.bxm` appended by default — change that with
+`app.set("view engine", "hbs")` to make `.hbs` the default instead, same
+idea as Express's view-engine setting.
 
 `render()` throws if `app.set("views", ...)` was never called. `view` is
 resolved and checked against the views directory's real (symlink-resolved)
-path before anything is `include`d — a request for `res.render(req.query.tpl)`
-with `tpl=../../etc/passwd` throws instead of including whatever that
-resolves to, but treat any user input reaching `render()`'s first argument as
-something to validate yourself regardless; this just stops the obvious
-traversal case.
+path before either engine touches the file — a request for
+`res.render(req.query.tpl)` with `tpl=../../etc/passwd` throws instead of
+rendering whatever that resolves to, but treat any user input reaching
+`render()`'s first argument as something to validate yourself regardless;
+this just stops the obvious traversal case.
 
 ### Middleware
 
@@ -281,9 +303,9 @@ Two more BoxLang-specific things that shaped how these are written:
 ## Scope (v1)
 
 Routing, middleware chaining, mountable routers, params/query parsing, opt-in
-JSON/urlencoded body parsing, static file serving, `.bxm` view rendering, and
-default 404/500 handling. Not included (possible future extensions):
-sessions and multipart file-upload parsing.
+JSON/urlencoded body parsing, static file serving, `.bxm`/Handlebars view
+rendering, and default 404/500 handling. Not included (possible future
+extensions): sessions and multipart file-upload parsing.
 
 ## A BoxLang gotcha worth knowing
 
