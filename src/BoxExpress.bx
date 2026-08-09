@@ -1,0 +1,87 @@
+/**
+ * BoxExpress: an Express.js-style API for building lightweight HTTP servers in BoxLang.
+ *
+ *   app = new BoxExpress()
+ *   app.get( "/", ( req, res ) => res.send( "Hello World" ) )
+ *   app.listen( 3000, () => println( "listening on 3000" ) )
+ */
+class {
+
+	function init() {
+		variables.router = new Router()
+		variables.httpServer = javacast( "null", "" )
+		this.settings = {}
+		return this
+	}
+
+	function get( path ) {
+		variables.router.get( argumentCollection = arguments )
+		return this
+	}
+
+	function post( path ) {
+		variables.router.post( argumentCollection = arguments )
+		return this
+	}
+
+	function put( path ) {
+		variables.router.put( argumentCollection = arguments )
+		return this
+	}
+
+	function patch( path ) {
+		variables.router.patch( argumentCollection = arguments )
+		return this
+	}
+
+	function delete( path ) {
+		variables.router.delete( argumentCollection = arguments )
+		return this
+	}
+
+	function all( path ) {
+		variables.router.all( argumentCollection = arguments )
+		return this
+	}
+
+	function use( pathOrHandler, handlerOrRouter ) {
+		variables.router.use( argumentCollection = arguments )
+		return this
+	}
+
+	function set( name, value ) {
+		this.settings[ name ] = value
+		return this
+	}
+
+	function getSetting( name ) {
+		return this.settings[ name ] ?: javacast( "null", "" )
+	}
+
+	function listen( port, callback ) {
+		var addr = createObject( "java", "java.net.InetSocketAddress" ).init( port )
+		variables.httpServer = createObject( "java", "com.sun.net.httpserver.HttpServer" ).create( addr, 0 )
+
+		var bridge = new HttpBridge( variables.router )
+		var proxy = createDynamicProxy( bridge, [ "com.sun.net.httpserver.HttpHandler" ] )
+
+		variables.httpServer.createContext( "/", proxy )
+		variables.httpServer.setExecutor( createObject( "java", "java.util.concurrent.Executors" ).newVirtualThreadPerTaskExecutor() )
+		variables.httpServer.start()
+
+		if ( !isNull( callback ) ) {
+			callback( port )
+		}
+
+		return this
+	}
+
+	function close() {
+		if ( isNull( variables.httpServer ) ) {
+			return this
+		}
+		variables.httpServer.stop( 0 )
+		return this
+	}
+
+}

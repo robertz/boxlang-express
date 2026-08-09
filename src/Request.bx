@@ -1,0 +1,83 @@
+/**
+ * Wraps a com.sun.net.httpserver.HttpExchange as an Express-style request object.
+ */
+class {
+
+	function init( exchange ) {
+		variables.exchange = exchange
+
+		var uri = exchange.getRequestURI()
+
+		this.method = exchange.getRequestMethod().ucase()
+		this.path = uri.getPath()
+		this.originalUrl = uri.getPath() & ( len( uri.getQuery() ?: "" ) ? "?" & uri.getQuery() : "" )
+		this.query = _parseQueryString( uri.getQuery() )
+		this.params = {}
+		this.body = {}
+		this.headers = _buildHeaderStruct( exchange.getRequestHeaders() )
+		this.cookies = _parseCookies( this.headers[ "Cookie" ] ?: "" )
+		this.ip = _resolveIp( exchange )
+
+		return this
+	}
+
+	function get( name ) {
+		return this.headers[ name ] ?: javacast( "null", "" )
+	}
+
+	function rawExchange() {
+		return variables.exchange
+	}
+
+	private function _buildHeaderStruct( javaHeaders ) {
+		var headerStruct = {}
+		for ( var key in javaHeaders.keySet() ) {
+			headerStruct[ key ] = javaHeaders.getFirst( key )
+		}
+		return headerStruct
+	}
+
+	private function _parseQueryString( rawQuery ) {
+		var result = {}
+		if ( isNull( rawQuery ) || !len( rawQuery ) ) {
+			return result
+		}
+		for ( var pair in rawQuery.listToArray( "&" ) ) {
+			var eqPos = pair.find( "=" )
+			if ( eqPos ) {
+				var rawKey = pair.left( eqPos - 1 )
+				var rawValue = pair.right( pair.len() - eqPos )
+				result[ urlDecode( rawKey ) ] = urlDecode( rawValue )
+			} else {
+				result[ urlDecode( pair ) ] = ""
+			}
+		}
+		return result
+	}
+
+	private function _parseCookies( cookieHeader ) {
+		var result = {}
+		if ( !len( cookieHeader ) ) {
+			return result
+		}
+		for ( var pair in cookieHeader.listToArray( ";" ) ) {
+			var trimmedPair = pair.trim()
+			var eqPos = trimmedPair.find( "=" )
+			if ( eqPos ) {
+				var cookieName = trimmedPair.left( eqPos - 1 ).trim()
+				var cookieValue = trimmedPair.right( trimmedPair.len() - eqPos ).trim()
+				result[ cookieName ] = urlDecode( cookieValue )
+			}
+		}
+		return result
+	}
+
+	private function _resolveIp( exchange ) {
+		try {
+			return exchange.getRemoteAddress().getAddress().getHostAddress()
+		} catch ( any e ) {
+			return ""
+		}
+	}
+
+}

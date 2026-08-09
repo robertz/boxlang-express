@@ -1,0 +1,48 @@
+/**
+ * Internal adapter: implements java's HttpHandler (via createDynamicProxy) and
+ * bridges a raw HttpExchange into the Request/Response/Router world.
+ * Never used directly by application code.
+ */
+class {
+
+	function init( router ) {
+		variables.router = router
+		return this
+	}
+
+	function handle( exchange ) {
+		var req = ""
+		var res = ""
+
+		try {
+			req = new Request( exchange )
+			res = new Response( exchange )
+		} catch ( any e ) {
+			try {
+				exchange.sendResponseHeaders( 500, -1 )
+				exchange.close()
+			} catch ( any ignore ) {
+			}
+			return
+		}
+
+		try {
+			variables.router.dispatch( req, res )
+		} catch ( any e ) {
+			if ( !res.isSent() ) {
+				try {
+					res.status( 500 ).json( { error: true, message: e.message } )
+				} catch ( any ignore ) {
+				}
+			}
+		} finally {
+			if ( !res.isSent() ) {
+				try {
+					res.status( 500 ).send( "Internal Server Error" )
+				} catch ( any ignore ) {
+				}
+			}
+		}
+	}
+
+}

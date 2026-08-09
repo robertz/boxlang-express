@@ -1,0 +1,58 @@
+/**
+ * Opt-in body-parsing middleware, mirroring express.json() / express.urlencoded().
+ * Usage:
+ *   bodyParsers = new middleware.BodyParsers()
+ *   app.use( bodyParsers.json() )
+ *   app.use( bodyParsers.urlencoded() )
+ */
+class {
+
+	function json() {
+		return function( req, res, next ) {
+			var contentType = req.headers[ "Content-Type" ] ?: ""
+			if ( !contentType.findNoCase( "application/json" ) ) {
+				return next()
+			}
+			var rawBody = _readRawBody( req )
+			if ( len( rawBody ) ) {
+				try {
+					req.body = JSONDeserialize( rawBody )
+				} catch ( any e ) {
+					return next( e )
+				}
+			}
+			next()
+		}
+	}
+
+	function urlencoded() {
+		return function( req, res, next ) {
+			var contentType = req.headers[ "Content-Type" ] ?: ""
+			if ( !contentType.findNoCase( "application/x-www-form-urlencoded" ) ) {
+				return next()
+			}
+			var rawBody = _readRawBody( req )
+			var formData = {}
+			if ( len( rawBody ) ) {
+				for ( var pair in rawBody.listToArray( "&" ) ) {
+					var eqPos = pair.find( "=" )
+					if ( eqPos ) {
+						formData[ urlDecode( pair.left( eqPos - 1 ) ) ] = urlDecode( pair.right( pair.len() - eqPos ) )
+					} else if ( len( pair ) ) {
+						formData[ urlDecode( pair ) ] = ""
+					}
+				}
+			}
+			req.body = formData
+			next()
+		}
+	}
+
+	private function _readRawBody( req ) {
+		var inStream = req.rawExchange().getRequestBody()
+		var outStream = createObject( "java", "java.io.ByteArrayOutputStream" ).init()
+		inStream.transferTo( outStream )
+		return outStream.toString( "UTF-8" )
+	}
+
+}

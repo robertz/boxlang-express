@@ -1,0 +1,255 @@
+/**
+ * Route table + middleware stack + dispatch/next() logic.
+ * Mirrors Express's Router: app.get/post/put/patch/delete/all/use, mountable sub-routers.
+ */
+class {
+
+	function init() {
+		variables.stack = []
+		return this
+	}
+
+	function get( path ) {
+		return _addRoute( "GET", path, _extraHandlers( arguments ) )
+	}
+
+	function post( path ) {
+		return _addRoute( "POST", path, _extraHandlers( arguments ) )
+	}
+
+	function put( path ) {
+		return _addRoute( "PUT", path, _extraHandlers( arguments ) )
+	}
+
+	function patch( path ) {
+		return _addRoute( "PATCH", path, _extraHandlers( arguments ) )
+	}
+
+	function delete( path ) {
+		return _addRoute( "DELETE", path, _extraHandlers( arguments ) )
+	}
+
+	function all( path ) {
+		return _addRoute( "ALL", path, _extraHandlers( arguments ) )
+	}
+
+	/**
+	 * use( middlewareFn )
+	 * use( mountPath, middlewareFn )
+	 * use( mountPath, subRouter )
+	 */
+	function use( pathOrHandler, handlerOrRouter ) {
+		var mountPath = "/"
+		var target = pathOrHandler
+
+		if ( !isNull( handlerOrRouter ) ) {
+			mountPath = pathOrHandler
+			target = handlerOrRouter
+		}
+
+		if ( isInstanceOf( target, "Router" ) ) {
+			variables.stack.append( {
+				method: "USE",
+				isRouter: true,
+				router: target,
+				pattern: _parsePath( mountPath )
+			} )
+		} else {
+			variables.stack.append( {
+				method: "USE",
+				isRouter: false,
+				handler: target,
+				isErrorHandler: _isErrorHandler( target ),
+				pattern: _parsePath( mountPath )
+			} )
+		}
+
+		return this
+	}
+
+	/**
+	 * Dispatch a request through the stack.
+	 * finalNext( err ) is invoked when the stack is exhausted (used by sub-router mounting
+	 * to hand control back to the parent chain). When omitted, exhausting the stack triggers
+	 * the built-in 404 / 500 defaults.
+	 */
+	function dispatch( req, res, finalNext ) {
+		var stackRef = variables.stack
+		var idx = 0
+		var self = this
+		var next
+
+		next = function( err ) {
+			if ( res.isSent() ) {
+				return
+			}
+
+			if ( idx >= stackRef.len() ) {
+				if ( !isNull( finalNext ) ) {
+					finalNext( err )
+				} else {
+					self._final( err, req, res )
+				}
+				return
+			}
+
+			idx++
+			var layer = stackRef[ idx ]
+			var isErrorLayer = layer.isRouter ? false : layer.isErrorHandler
+
+			if ( !isNull( err ) && !isErrorLayer ) {
+				return next( err )
+			}
+			if ( isNull( err ) && isErrorLayer ) {
+				return next( err )
+			}
+
+			if ( layer.method != "USE" && layer.method != "ALL" && layer.method != req.method ) {
+				return next( err )
+			}
+
+			var exactMatch = ( layer.method != "USE" )
+			var reqSegments = _splitPath( req.path )
+			var matchResult = _matchPath( layer.pattern.segments, reqSegments, exactMatch )
+
+			if ( !matchResult.matched ) {
+				return next( err )
+			}
+
+			for ( var paramName in matchResult.params ) {
+				req.params[ paramName ] = matchResult.params[ paramName ]
+			}
+
+			if ( layer.method == "USE" ) {
+				var savedPath = req.path
+				var remainder = "/" & reqSegments.slice( matchResult.consumed + 1 ).toList( "/" )
+				req.path = remainder
+				var scopedNext = function( innerErr ) {
+					req.path = savedPath
+					next( innerErr )
+				}
+
+				if ( layer.isRouter ) {
+					layer.router.dispatch( req, res, scopedNext )
+				} else {
+					try {
+						if ( isErrorLayer ) {
+							layer.handler( err, req, res, scopedNext )
+						} else {
+							layer.handler( req, res, scopedNext )
+						}
+					} catch ( any e ) {
+						req.path = savedPath
+						next( e )
+					}
+				}
+				return
+			}
+
+			try {
+				layer.handler( req, res, next )
+			} catch ( any e ) {
+				next( e )
+			}
+		}
+
+		next()
+	}
+
+	function _final( err, req, res ) {
+		if ( res.isSent() ) {
+			return
+		}
+		if ( !isNull( err ) ) {
+			res.status( 500 ).json( { error: true, message: _errorMessage( err ) } )
+		} else {
+			res.status( 404 ).json( { error: true, message: "Cannot #req.method# #req.path#" } )
+		}
+	}
+
+	private function _errorMessage( err ) {
+		try {
+			return err.message
+		} catch ( any e ) {
+			return err.toString()
+		}
+	}
+
+	private function _addRoute( method, path, handlers ) {
+		var pattern = _parsePath( path )
+		for ( var handler in handlers ) {
+			variables.stack.append( {
+				method: method,
+				isRouter: false,
+				handler: handler,
+				isErrorHandler: false,
+				pattern: pattern
+			} )
+		}
+		return this
+	}
+
+	private function _extraHandlers( argScope ) {
+		var handlers = []
+		for ( var i = 2; i <= argScope.count(); i++ ) {
+			handlers.append( argScope[ i ] )
+		}
+		return handlers
+	}
+
+	private function _isErrorHandler( handler ) {
+		return getMetadata( handler ).parameters.len() == 4
+	}
+
+	private function _splitPath( path ) {
+		var parts = path.listToArray( "/" )
+		return parts
+	}
+
+	private function _parsePath( path ) {
+		var segments = []
+		var paramNames = []
+		for ( var raw in _splitPath( path ) ) {
+			if ( raw.left( 1 ) == ":" ) {
+				var paramName = raw.right( raw.len() - 1 )
+				segments.append( { type: "param", name: paramName } )
+				paramNames.append( paramName )
+			} else if ( raw == "*" ) {
+				segments.append( { type: "wildcard" } )
+			} else {
+				segments.append( { type: "literal", value: raw } )
+			}
+		}
+		return { segments: segments, paramNames: paramNames }
+	}
+
+	private function _matchPath( patternSegments, requestSegments, exact ) {
+		var params = {}
+		var i = 0
+
+		for ( i = 1; i <= patternSegments.len(); i++ ) {
+			var seg = patternSegments[ i ]
+
+			if ( seg.type == "wildcard" ) {
+				return { matched: true, params: params, consumed: requestSegments.len() }
+			}
+
+			if ( i > requestSegments.len() ) {
+				return { matched: false, params: {}, consumed: 0 }
+			}
+
+			if ( seg.type == "param" ) {
+				params[ seg.name ] = requestSegments[ i ]
+			} else if ( seg.value != requestSegments[ i ] ) {
+				return { matched: false, params: {}, consumed: 0 }
+			}
+		}
+
+		if ( exact && patternSegments.len() != requestSegments.len() ) {
+			return { matched: false, params: {}, consumed: 0 }
+		}
+
+		return { matched: true, params: params, consumed: patternSegments.len() }
+	}
+
+}

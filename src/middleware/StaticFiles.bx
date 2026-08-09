@@ -1,0 +1,50 @@
+/**
+ * Static file serving middleware, mirroring express.static().
+ * Usage:
+ *   staticFiles = new middleware.StaticFiles()
+ *   app.use( "/public", staticFiles.serve( "./public" ) )
+ */
+class {
+
+	function serve( rootDir, options = {} ) {
+		var rootPath = createObject( "java", "java.io.File" ).init( rootDir ).getCanonicalFile().toPath()
+		var indexFile = options.index ?: "index.html"
+		var mimeTypes = {
+			html: "text/html; charset=utf-8", htm: "text/html; charset=utf-8",
+			css: "text/css; charset=utf-8", js: "text/javascript; charset=utf-8",
+			json: "application/json; charset=utf-8", txt: "text/plain; charset=utf-8",
+			png: "image/png", jpg: "image/jpeg", jpeg: "image/jpeg", gif: "image/gif",
+			svg: "image/svg+xml", ico: "image/x-icon",
+			woff: "font/woff", woff2: "font/woff2"
+		}
+
+		return function( req, res, next ) {
+			if ( req.method != "GET" && req.method != "HEAD" ) {
+				return next()
+			}
+
+			var relativePath = req.path.left( 1 ) == "/" ? req.path.right( req.path.len() - 1 ) : req.path
+			if ( !len( relativePath ) || relativePath.right( 1 ) == "/" ) {
+				relativePath &= indexFile
+			}
+
+			var candidate = rootPath.resolve( relativePath ).normalize()
+
+			if ( !candidate.startsWith( rootPath ) ) {
+				return next()
+			}
+
+			var fileObj = candidate.toFile()
+			if ( !fileObj.exists() || !fileObj.isFile() ) {
+				return next()
+			}
+
+			var ext = listLast( fileObj.getName(), "." ).lcase()
+			var contentType = mimeTypes[ ext ] ?: "application/octet-stream"
+			var bytes = createObject( "java", "java.nio.file.Files" ).readAllBytes( candidate )
+
+			res.sendBytes( bytes, contentType )
+		}
+	}
+
+}

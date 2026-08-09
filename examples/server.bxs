@@ -1,0 +1,75 @@
+/**
+ * Runnable demo of the whole BoxExpress API surface. Start it with:
+ *   boxlang examples/server.bxs
+ * then exercise it with curl (see README.md for the full list of commands).
+ */
+app = new "../src/BoxExpress"()
+bodyParsers = new "../src/middleware/BodyParsers"()
+staticFiles = new "../src/middleware/StaticFiles"()
+
+app.use( bodyParsers.json() )
+app.use( bodyParsers.urlencoded() )
+app.use( "/public", staticFiles.serve( expandPath( "./public" ) ) )
+
+app.get( "/", ( req, res ) => {
+	res.send( "Hello from BoxExpress!" )
+} )
+
+app.get( "/users/:id", ( req, res ) => {
+	res.json( { id: req.params.id, source: "route param" } )
+} )
+
+app.get( "/search", ( req, res ) => {
+	res.json( { query: req.query } )
+} )
+
+app.post( "/echo", ( req, res ) => {
+	res.json( { youSent: req.body } )
+} )
+
+app.get( "/boom", ( req, res, next ) => {
+	throw( message = "Something went wrong on purpose", type = "DemoError" )
+} )
+
+// Demonstrates that requests are served concurrently (one virtual thread per
+// request) rather than queued behind each other.
+app.get( "/slow", ( req, res ) => {
+	sleep( 1000 )
+	res.json( { slept: 1000 } )
+} )
+
+app.get( "/set-cookie", ( req, res ) => {
+	res.cookie( "sessionId", "abc123", { maxAge: 3600 } ).json( { cookieSet: true } )
+} )
+
+app.get( "/go-home", ( req, res ) => {
+	res.redirect( "/" )
+} )
+
+apiRouter = new "../src/Router"()
+
+apiRouter.get( "/ping", ( req, res ) => {
+	res.json( { pong: true } )
+} )
+
+apiRouter.get( "/items/:itemId", ( req, res ) => {
+	res.json( { itemId: req.params.itemId, mountedUnder: "/api" } )
+} )
+
+app.use( "/api", apiRouter )
+
+// Custom error-handling middleware (4 args) — registered last, like Express.
+app.use( ( err, req, res, next ) => {
+	writeLog( text = "Unhandled error: " & err.message, log = "application" )
+	res.status( 500 ).json( { error: true, message: err.message } )
+} )
+
+app.listen( 3000, ( port ) => {
+	println( "BoxExpress listening on http://localhost:#port#" )
+} )
+
+// Node keeps the process alive via its event loop; BoxLang's CLI runtime has none,
+// so the main thread has to be kept alive explicitly for the server to keep serving.
+while ( true ) {
+	sleep( 1000 )
+}
