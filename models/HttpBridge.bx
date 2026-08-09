@@ -16,7 +16,7 @@ class {
 		var res = ""
 
 		try {
-			req = new Request( exchange )
+			req = new Request( exchange, variables.settings )
 			res = new Response( exchange, variables.settings )
 		} catch ( any e ) {
 			try {

@@ -3,7 +3,7 @@
  */
 class {
 
-	function init( exchange ) {
+	function init( exchange, settings = {} ) {
 		variables.exchange = exchange
 
 		var uri = exchange.getRequestURI()
@@ -16,7 +16,7 @@ class {
 		this.body = {}
 		this.headers = _buildHeaderStruct( exchange.getRequestHeaders() )
 		this.cookies = _parseCookies( this.headers[ "Cookie" ] ?: "" )
-		this.ip = _resolveIp( exchange )
+		this.ip = _resolveIp( exchange, settings )
 
 		return this
 	}
@@ -72,7 +72,20 @@ class {
 		return result
 	}
 
-	private function _resolveIp( exchange ) {
+	/**
+	 * By default this is always the direct TCP peer (safe, can't be spoofed by a client).
+	 * Behind a reverse proxy, the direct peer is the proxy itself — opt in with
+	 * app.set("trust proxy", true) to prefer X-Forwarded-For instead, same as Express's
+	 * trust-proxy setting (off by default for the same reason: an untrusted client could
+	 * otherwise forge that header to spoof its IP).
+	 */
+	private function _resolveIp( exchange, settings ) {
+		if ( settings[ "trust proxy" ] ?: false ) {
+			var forwardedFor = this.headers[ "X-Forwarded-For" ] ?: ""
+			if ( len( forwardedFor ) ) {
+				return forwardedFor.listFirst( "," ).trim()
+			}
+		}
 		try {
 			return exchange.getRemoteAddress().getAddress().getHostAddress()
 		} catch ( any e ) {

@@ -51,6 +51,10 @@ class extends="testbox.system.BaseSpec" {
 			res.cookie( "sessionId", "abc123" ).json( { cookieSet: true } )
 		} )
 
+		variables.app.get( "/not-found-status", ( req, res ) => {
+			res.sendStatus( 404 )
+		} )
+
 		variables.app.get( "/greet/:name", ( req, res ) => {
 			res.render( "greeting", { name: req.params.name } )
 		} )
@@ -63,6 +67,14 @@ class extends="testbox.system.BaseSpec" {
 
 		variables.app.use( ( err, req, res, next ) => {
 			res.status( 500 ).json( { error: true, message: err.message } )
+		} )
+
+		// Registered here (before listen()) rather than inside the concurrency test below —
+		// mutating the route table after listen() while other virtual-thread requests may be
+		// mid-dispatch is exactly the pattern this project doesn't guarantee is safe.
+		variables.app.get( "/slow-test-only", ( req, res ) => {
+			sleep( 500 )
+			res.json( { slept: true } )
 		} )
 
 		variables.app.listen( variables.testPort )
@@ -117,6 +129,12 @@ class extends="testbox.system.BaseSpec" {
 				expect( result.body ).toInclude( "Hello, Ada!" )
 			} )
 
+			it( "sends a status with its reason phrase via res.sendStatus()", function() {
+				var result = variables.client.get( variables.baseUrl & "/not-found-status" )
+				expect( result.statusCode ).toBe( 404 )
+				expect( result.body ).toBe( "Not Found" )
+			} )
+
 			it( "sets a cookie via res.cookie()", function() {
 				var result = variables.client.get( variables.baseUrl & "/set-cookie" )
 				expect( result.setCookie ).toInclude( "sessionId=abc123" )
@@ -140,11 +158,6 @@ class extends="testbox.system.BaseSpec" {
 			} )
 
 			it( "serves concurrent requests without serializing them", function() {
-				variables.app.get( "/slow-test-only", ( req, res ) => {
-					sleep( 500 )
-					res.json( { slept: true } )
-				} )
-
 				var slowUrl = variables.baseUrl & "/slow-test-only"
 				var httpClient = variables.client
 				var startedAt = getTickCount()

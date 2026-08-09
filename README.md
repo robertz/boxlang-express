@@ -108,11 +108,30 @@ Same routing methods as `app`. Create one with `new bxModules.boxexpress.models.
 it with `app.use("/api", apiRouter)` — request paths are matched relative to
 the mount point, exactly like Express's `express.Router()`.
 
+Register all routes and middleware *before* calling `listen()`. The route
+table isn't synchronized, so mutating it while requests are already being
+served concurrently (each on its own virtual thread) isn't supported.
+
+Path matching is case-insensitive for literal segments (BoxLang's `==`/`!=`
+compare strings case-insensitively by default, same as classic CFML), which
+happens to match Express's own default. A trailing `*` matches the rest of
+the path (`/files/*`); a `*` anywhere else in the pattern throws at
+registration time rather than silently matching more or less than you'd
+expect. A route registered with no handler function also throws immediately,
+rather than silently registering nothing.
+
 ### Request
 
 `req.method`, `req.path`, `req.originalUrl`, `req.query`, `req.params`,
 `req.headers`, `req.get(name)`, `req.cookies`, `req.ip`, `req.body` (populated
 by body-parsing middleware, empty struct otherwise).
+
+`req.ip` is always the direct TCP peer by default — safe, since a client
+can't spoof it, but wrong behind a reverse proxy (it'll report the proxy's
+IP). Opt in to trusting `X-Forwarded-For` with `app.set("trust proxy", true)`,
+same as Express; leave it off (the default) unless you actually control the
+proxy in front of this, since with it on, anyone who can reach the app
+directly can forge their reported IP.
 
 ### Response
 
@@ -155,7 +174,13 @@ Two things worth knowing:
   block, exactly like `<cfoutput>` in classic CFML — plain text outside one is
   left as literal `#...#`, unevaluated.
 
-`render()` throws if `app.set("views", ...)` was never called.
+`render()` throws if `app.set("views", ...)` was never called. `view` is
+resolved and checked against the views directory's real (symlink-resolved)
+path before anything is `include`d — a request for `res.render(req.query.tpl)`
+with `tpl=../../etc/passwd` throws instead of including whatever that
+resolves to, but treat any user input reaching `render()`'s first argument as
+something to validate yourself regardless; this just stops the obvious
+traversal case.
 
 ### Middleware
 
@@ -186,6 +211,19 @@ staticFiles = new bxModules.boxexpress.models.middleware.StaticFiles()
 app.use( "/public", staticFiles.serve( expandPath( "./public" ) ) )
 ```
 
+`json()`/`boxExpressJSON()` and `urlencoded()`/`boxExpressUrlencoded()` cap
+the request body at 100KB by default, to keep a slow or malicious client from
+buffering an unbounded body into memory — override with `{ limit: bytes }`:
+
+```js
+app.use( boxExpressJSON( { limit: 5000000 } ) )  // 5MB
+```
+
+A body over the limit gets a `413` response and never reaches your route
+handler. `boxExpressStatic()`/`StaticFiles.serve()` resolve requested files
+against the real (symlink-resolved) served directory, so a symlink placed
+inside it can't be used to read files from outside it.
+
 If no route matches, a default `404` JSON response is sent. If a handler
 throws (or calls `next(err)`) and no error-handling middleware is registered,
 a default `500` JSON response is sent.
@@ -197,10 +235,13 @@ needed — this runs the same way `examples/server.bxs` does, just against
 TestBox instead of an HTTP request):
 
 ```bash
-boxlang run-tests.bxs
+boxlang setup-tests.bxs   # once per checkout
+boxlang run-tests.bxs     # every time after that
 ```
 
-Exits non-zero on any failure/error, so it's CI-friendly as-is. Structure:
+`run-tests.bxs` exits non-zero on any failure/error, so it's CI-friendly —
+just run `setup-tests.bxs` once beforehand (e.g. in your CI image build step
+or a `pretest` script). Structure:
 
 - `tests/specs/RouterSpec.bx` — unit tests for path matching and the
   middleware/`next()` chain, using lightweight fake `req`/`res` structs
@@ -210,10 +251,20 @@ Exits non-zero on any failure/error, so it's CI-friendly as-is. Structure:
   (`tests/helpers/HttpClient.bx`, a thin `HttpURLConnection` wrapper),
   exercising `Request`/`Response`/`BodyParsers`/`StaticFiles`/`render()`
   together, plus a concurrency check using `bx:thread`.
-- `tests/fixtures/` — a static file and a `.bxm` view the integration spec
-  serves/renders.
+- `tests/specs/BifsSpec.bx` — the same idea, but built entirely through the
+  global BIFs (`boxExpress()`, `boxExpressJSON()`, etc.) on `localhost:4322`,
+  to make sure the friendly entry points actually work, not just the
+  underlying classes.
+- `tests/fixtures/` — a static file and a `.bxm` view the integration specs
+  serve/render.
 
-Two BoxLang-specific things that shaped how these are written:
+`setup-tests.bxs` creates a self-referencing `boxlang_modules/boxexpress`
+symlink (gitignored, not committed) so BoxLang discovers this project as a
+real module and registers the BIFs `BifsSpec` needs — module discovery only
+happens once at BoxLang process startup, so this has to run as its own
+invocation before `run-tests.bxs`, not get folded into it.
+
+Two more BoxLang-specific things that shaped how these are written:
 
 - Bare (non-`var`) assignment inside a `describe`/`it`/`beforeEach` closure
   doesn't reliably cross into sibling closures — `RouterSpec` builds its own

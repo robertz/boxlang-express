@@ -3,6 +3,14 @@
  * with a non-zero code on any failure/error, for CI/scripting use.
  *   boxlang run-tests.bxs
  */
+linkPath = createObject( "java", "java.nio.file.Paths" ).get( expandPath( "boxlang_modules/boxexpress" ) )
+if ( !createObject( "java", "java.nio.file.Files" ).exists( linkPath, [] ) ) {
+	println( "First run: setting up boxlang_modules/boxexpress (needed for BifsSpec)." )
+	println( "Run: boxlang setup-tests.bxs" )
+	println( "Then re-run: boxlang run-tests.bxs" )
+	createObject( "java", "java.lang.System" ).exit( 1 )
+}
+
 tb = new "testbox.system.TestBox"( directory = "tests.specs", reporter = "text" )
 println( tb.run() )
 

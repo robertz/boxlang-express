@@ -3,6 +3,10 @@
 /testbox/
 /modules/
 
+# Self-referencing symlink created by run-tests.bxs so BifsSpec can exercise the
+# module's global BIFs. Deliberately not committed — see run-tests.bxs for why.
+/boxlang_modules/
+
 # CommandBox / BoxLang runtime artifacts
 .engine/
 .artifacts/

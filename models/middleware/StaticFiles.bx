@@ -8,6 +8,7 @@ class {
 
 	function serve( rootDir, options = {} ) {
 		var rootPath = createObject( "java", "java.io.File" ).init( rootDir ).getCanonicalFile().toPath()
+		var realRootPath = rootPath.toRealPath()
 		var indexFile = options.index ?: "index.html"
 		var mimeTypes = {
 			html: "text/html; charset=utf-8", htm: "text/html; charset=utf-8",
@@ -39,9 +40,17 @@ class {
 				return next()
 			}
 
+			// Re-check containment against the *real* (symlink-resolved) paths — normalize()
+			// above is purely lexical and won't catch a symlink inside rootDir that points
+			// outside it.
+			var realCandidate = candidate.toRealPath()
+			if ( !realCandidate.startsWith( realRootPath ) ) {
+				return next()
+			}
+
 			var ext = listLast( fileObj.getName(), "." ).lcase()
 			var contentType = mimeTypes[ ext ] ?: "application/octet-stream"
-			var bytes = createObject( "java", "java.nio.file.Files" ).readAllBytes( candidate )
+			var bytes = createObject( "java", "java.nio.file.Files" ).readAllBytes( realCandidate )
 
 			res.sendBytes( bytes, contentType )
 		}

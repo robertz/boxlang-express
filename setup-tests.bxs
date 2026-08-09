@@ -1,0 +1,22 @@
+/**
+ * One-time (per checkout) setup for the test suite. Creates a self-referencing
+ * boxlang_modules/boxexpress symlink so BoxLang discovers this project as a real
+ * module and registers the global BIFs (boxExpress(), boxExpressJSON(), etc.) that
+ * BifsSpec exercises.
+ *
+ * Has to be a separate script run before run-tests.bxs, not folded into it: module
+ * discovery happens once at BoxLang process startup, so a symlink created mid-script
+ * isn't picked up by that same running process — only by a later one.
+ *
+ *   boxlang setup-tests.bxs   (once per checkout)
+ *   boxlang run-tests.bxs     (every time after that)
+ */
+linkPath = createObject( "java", "java.nio.file.Paths" ).get( expandPath( "boxlang_modules/boxexpress" ) )
+
+if ( createObject( "java", "java.nio.file.Files" ).exists( linkPath, [] ) ) {
+	println( "boxlang_modules/boxexpress already set up." )
+} else {
+	createObject( "java", "java.nio.file.Files" ).createDirectories( createObject( "java", "java.nio.file.Paths" ).get( expandPath( "boxlang_modules" ) ) )
+	createObject( "java", "java.nio.file.Files" ).createSymbolicLink( linkPath, createObject( "java", "java.nio.file.Paths" ).get( ".." ) )
+	println( "Created boxlang_modules/boxexpress. Run `boxlang run-tests.bxs` now." )
+}

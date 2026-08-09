@@ -1,0 +1,64 @@
+/**
+ * Exercises the four global BIFs (boxExpress, boxExpressJSON, boxExpressUrlencoded,
+ * boxExpressStatic) for real — a running server built entirely through the BIFs,
+ * not the bxModules.boxexpress.models.* classes directly. These only resolve as
+ * global functions once BoxLang has loaded this project as an actual module, which
+ * run-tests.bxs sets up via a self-referencing boxlang_modules/boxexpress symlink.
+ */
+class extends="testbox.system.BaseSpec" {
+
+	function beforeAll() {
+		variables.testPort = 4322
+		variables.baseUrl = "http://localhost:#variables.testPort#"
+		variables.client = new "../helpers/HttpClient"()
+
+		variables.app = boxExpress()
+		variables.app.use( boxExpressJSON() )
+		variables.app.use( boxExpressUrlencoded() )
+		variables.app.use( "/public", boxExpressStatic( expandPath( "tests/fixtures/public" ) ) )
+
+		variables.app.get( "/", ( req, res ) => {
+			res.send( "Hello via BIFs!" )
+		} )
+
+		variables.app.post( "/echo", ( req, res ) => {
+			res.json( { youSent: req.body } )
+		} )
+
+		variables.app.listen( variables.testPort )
+		sleep( 300 )
+	}
+
+	function afterAll() {
+		variables.app.close()
+	}
+
+	function run() {
+		describe( "BoxExpress global BIFs", function() {
+
+			it( "boxExpress() returns a working app", function() {
+				var result = variables.client.get( variables.baseUrl & "/" )
+				expect( result.statusCode ).toBe( 200 )
+				expect( result.body ).toBe( "Hello via BIFs!" )
+			} )
+
+			it( "boxExpressJSON() parses application/json bodies", function() {
+				var result = variables.client.post( variables.baseUrl & "/echo", '{"a":1}', "application/json" )
+				expect( JSONDeserialize( result.body ).youSent.a ).toBe( 1 )
+			} )
+
+			it( "boxExpressUrlencoded() parses form bodies", function() {
+				var result = variables.client.post( variables.baseUrl & "/echo", "x=1&y=2", "application/x-www-form-urlencoded" )
+				expect( JSONDeserialize( result.body ).youSent.x ).toBe( "1" )
+			} )
+
+			it( "boxExpressStatic() serves files", function() {
+				var result = variables.client.get( variables.baseUrl & "/public/hello.txt" )
+				expect( result.statusCode ).toBe( 200 )
+				expect( result.body ).toInclude( "static fixture" )
+			} )
+
+		} )
+	}
+
+}

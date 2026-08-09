@@ -3,12 +3,13 @@
  * express.urlencoded().
  *
  *   app.use( boxExpressUrlencoded() )
+ *   app.use( boxExpressUrlencoded( { limit: 500000 } ) )
  */
 @BoxBIF
 class {
 
-	function invoke() {
-		return new bxModules.boxexpress.models.middleware.BodyParsers().urlencoded()
+	function invoke( options = {} ) {
+		return new bxModules.boxexpress.models.middleware.BodyParsers().urlencoded( options )
 	}
 
 }

@@ -2,18 +2,25 @@
  * Opt-in body-parsing middleware, mirroring express.json() / express.urlencoded().
  * Usage:
  *   bodyParsers = new middleware.BodyParsers()
- *   app.use( bodyParsers.json() )
- *   app.use( bodyParsers.urlencoded() )
+ *   app.use( bodyParsers.json() )                 // default 100kb limit
+ *   app.use( bodyParsers.urlencoded( { limit: 500000 } ) )
  */
 class {
 
-	function json() {
+	function json( options = {} ) {
+		var limit = options.limit ?: 102400
+
 		return function( req, res, next ) {
 			var contentType = req.headers[ "Content-Type" ] ?: ""
 			if ( !contentType.findNoCase( "application/json" ) ) {
 				return next()
 			}
-			var rawBody = _readRawBody( req )
+
+			var rawBody = _readRawBody( req, limit )
+			if ( isNull( rawBody ) ) {
+				return res.status( 413 ).json( { error: true, message: "Request body exceeds the #limit#-byte limit" } )
+			}
+
 			if ( len( rawBody ) ) {
 				try {
 					req.body = JSONDeserialize( rawBody )
@@ -25,13 +32,20 @@ class {
 		}
 	}
 
-	function urlencoded() {
+	function urlencoded( options = {} ) {
+		var limit = options.limit ?: 102400
+
 		return function( req, res, next ) {
 			var contentType = req.headers[ "Content-Type" ] ?: ""
 			if ( !contentType.findNoCase( "application/x-www-form-urlencoded" ) ) {
 				return next()
 			}
-			var rawBody = _readRawBody( req )
+
+			var rawBody = _readRawBody( req, limit )
+			if ( isNull( rawBody ) ) {
+				return res.status( 413 ).json( { error: true, message: "Request body exceeds the #limit#-byte limit" } )
+			}
+
 			var formData = {}
 			if ( len( rawBody ) ) {
 				for ( var pair in rawBody.listToArray( "&" ) ) {
@@ -48,11 +62,17 @@ class {
 		}
 	}
 
-	private function _readRawBody( req ) {
+	/**
+	 * Reads up to limit+1 bytes so an oversized body is detected without
+	 * buffering an unbounded stream. Returns null if the body exceeds limit.
+	 */
+	private function _readRawBody( req, limit ) {
 		var inStream = req.rawExchange().getRequestBody()
-		var outStream = createObject( "java", "java.io.ByteArrayOutputStream" ).init()
-		inStream.transferTo( outStream )
-		return outStream.toString( "UTF-8" )
+		var bytes = inStream.readNBytes( limit + 1 )
+		if ( bytes.len() > limit ) {
+			return javacast( "null", "" )
+		}
+		return createObject( "java", "java.lang.String" ).init( bytes, "UTF-8" )
 	}
 
 }

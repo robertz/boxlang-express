@@ -2,12 +2,13 @@
  * Global BIF wrapping BodyParsers.json() — mirrors Express's express.json().
  *
  *   app.use( boxExpressJSON() )
+ *   app.use( boxExpressJSON( { limit: 500000 } ) )
  */
 @BoxBIF
 class {
 
-	function invoke() {
-		return new bxModules.boxexpress.models.middleware.BodyParsers().json()
+	function invoke( options = {} ) {
+		return new bxModules.boxexpress.models.middleware.BodyParsers().json( options )
 	}
 
 }

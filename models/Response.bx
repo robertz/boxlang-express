@@ -124,7 +124,23 @@ class {
 		}
 
 		var viewFile = view.right( 4 ) == ".bxm" ? view : view & ".bxm"
-		var templatePath = viewsDir & "/" & viewFile
+		var viewsRoot = createObject( "java", "java.io.File" ).init( viewsDir ).getCanonicalFile().toPath()
+		var candidate = viewsRoot.resolve( viewFile ).normalize()
+		var realCandidate = ""
+		var realRoot = ""
+
+		try {
+			realCandidate = candidate.toRealPath()
+			realRoot = viewsRoot.toRealPath()
+		} catch ( any e ) {
+			throw( message = "View not found: #view#", type = "BoxExpress.ViewNotFound" )
+		}
+
+		if ( !realCandidate.startsWith( realRoot ) ) {
+			throw( message = "Invalid view path: #view#", type = "BoxExpress.InvalidViewPath" )
+		}
+
+		var templatePath = realCandidate.toString()
 		var output = ""
 
 		bx:savecontent variable="output" {

@@ -1,6 +1,10 @@
 /**
  * Route table + middleware stack + dispatch/next() logic.
  * Mirrors Express's Router: app.get/post/put/patch/delete/all/use, mountable sub-routers.
+ *
+ * Register all routes/middleware before calling app.listen(). The route table isn't
+ * synchronized, so adding routes concurrently with in-flight requests (which each run
+ * on their own virtual thread once listening) is unsupported.
  */
 class {
 
@@ -176,6 +180,13 @@ class {
 	}
 
 	private function _addRoute( method, path, handlers ) {
+		if ( handlers.len() == 0 ) {
+			throw(
+				message = "#method# ""#path#"" was registered with no handler function",
+				type = "BoxExpress.MissingHandler"
+			)
+		}
+
 		var pattern = _parsePath( path )
 		for ( var handler in handlers ) {
 			variables.stack.append( {
@@ -209,12 +220,21 @@ class {
 	private function _parsePath( path ) {
 		var segments = []
 		var paramNames = []
-		for ( var raw in _splitPath( path ) ) {
+		var rawSegments = _splitPath( path )
+
+		for ( var i = 1; i <= rawSegments.len(); i++ ) {
+			var raw = rawSegments[ i ]
 			if ( raw.left( 1 ) == ":" ) {
 				var paramName = raw.right( raw.len() - 1 )
 				segments.append( { type: "param", name: paramName } )
 				paramNames.append( paramName )
 			} else if ( raw == "*" ) {
+				if ( i != rawSegments.len() ) {
+					throw(
+						message = "Invalid route path ""#path#"" — '*' is only supported as the final path segment",
+						type = "BoxExpress.InvalidRoutePath"
+					)
+				}
 				segments.append( { type: "wildcard" } )
 			} else {
 				segments.append( { type: "literal", value: raw } )
