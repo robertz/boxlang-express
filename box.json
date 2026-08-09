@@ -1,8 +1,39 @@
 {
+    "name":"BoxExpress",
+    "version":"1.0.0",
+    "author":"Rob",
+    "slug":"boxlang-express",
+    "shortDescription":"An Express.js-style web framework for BoxLang",
+    "type":"boxlang-modules",
+    "keywords":[
+        "boxlang",
+        "express",
+        "http",
+        "web",
+        "router",
+        "middleware"
+    ],
+    "homepage":"https://github.com/robertz/boxlang-express",
+    "repository":{
+        "type":"git",
+        "URL":"https://github.com/robertz/boxlang-express"
+    },
+    "boxlang":{
+        "minimumVersion":"1.15.0",
+        "moduleName":"boxexpress"
+    },
+    "private":false,
     "dependencies":{
         "testbox":"^7.0.0+19"
     },
     "installPaths":{
         "testbox":"testbox/"
-    }
+    },
+    "ignore":[
+        "**/.*",
+        "tests/**",
+        "examples/**",
+        "run-tests.bxs",
+        "testbox/**"
+    ]
 }

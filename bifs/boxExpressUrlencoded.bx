@@ -1,0 +1,14 @@
+/**
+ * Global BIF wrapping BodyParsers.urlencoded() — mirrors Express's
+ * express.urlencoded().
+ *
+ *   app.use( boxExpressUrlencoded() )
+ */
+@BoxBIF
+class {
+
+	function invoke() {
+		return new bxModules.boxexpress.models.middleware.BodyParsers().urlencoded()
+	}
+
+}

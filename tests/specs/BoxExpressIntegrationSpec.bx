@@ -11,14 +11,14 @@ class extends="testbox.system.BaseSpec" {
 		variables.baseUrl = "http://localhost:#variables.testPort#"
 		variables.client = new "../helpers/HttpClient"()
 
-		var bodyParsers = new "../../src/middleware/BodyParsers"()
-		var staticFiles = new "../../src/middleware/StaticFiles"()
+		var bodyParsers = new "../../models/middleware/BodyParsers"()
+		var staticFiles = new "../../models/middleware/StaticFiles"()
 
 		// expandPath() resolves relative to the top-level entry script (run-tests.bxs,
 		// at the project root), not relative to this class file — hence the project-root-
 		// relative "tests/..." paths below rather than "../fixtures/...".
 
-		variables.app = new "../../src/BoxExpress"()
+		variables.app = new "../../models/BoxExpress"()
 		variables.app.use( bodyParsers.json() )
 		variables.app.use( "/public", staticFiles.serve( expandPath( "tests/fixtures/public" ) ) )
 		variables.app.set( "views", expandPath( "tests/fixtures/views" ) )
@@ -55,7 +55,7 @@ class extends="testbox.system.BaseSpec" {
 			res.render( "greeting", { name: req.params.name } )
 		} )
 
-		var apiRouter = new "../../src/Router"()
+		var apiRouter = new "../../models/Router"()
 		apiRouter.get( "/ping", ( req, res ) => {
 			res.json( { pong: true } )
 		} )

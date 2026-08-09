@@ -1,0 +1,56 @@
+/**
+ * BoxExpress module descriptor and entry point.
+ * When this project is installed as a BoxLang module (into ~/.boxlang/modules/
+ * or a project's local boxlang_modules/ folder), the runtime registers the
+ * mapping below automatically, so consuming apps can do:
+ *
+ *   app = new bxModules.boxexpress.models.BoxExpress()
+ *
+ * regardless of their own working directory.
+ */
+class {
+
+	property name="moduleRecord";
+	property name="boxRuntime";
+	property name="log";
+
+	/**
+	 * Module version. Keep in sync with box.json.
+	 */
+	this.version = "1.0.0";
+
+	/**
+	 * BoxLang mapping for this module. Registered as bxModules.boxexpress
+	 * (and /bxmodules/boxexpress/ for path-style resolution).
+	 */
+	this.mapping = "boxexpress";
+
+	this.author = "Rob";
+	this.description = "An Express.js-style web framework for BoxLang — routing, middleware, mountable routers, and .bxm view rendering on top of a standalone HttpServer.";
+	this.webURL = "https://github.com/robertz/boxlang-express";
+	this.disabled = false;
+
+	/**
+	 * Called by the ModuleService on module registration.
+	 */
+	function configure() {
+		settings = {};
+		objectMappings = {};
+		datasources = {};
+		interceptors = [];
+		customInterceptionPoints = [];
+	}
+
+	/**
+	 * Called by the ModuleService on module activation.
+	 */
+	function onLoad() {
+	}
+
+	/**
+	 * Called by the ModuleService on module deactivation.
+	 */
+	function onUnload() {
+	}
+
+}

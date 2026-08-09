@@ -1,0 +1,13 @@
+/**
+ * Global BIF wrapping BodyParsers.json() — mirrors Express's express.json().
+ *
+ *   app.use( boxExpressJSON() )
+ */
+@BoxBIF
+class {
+
+	function invoke() {
+		return new bxModules.boxexpress.models.middleware.BodyParsers().json()
+	}
+
+}

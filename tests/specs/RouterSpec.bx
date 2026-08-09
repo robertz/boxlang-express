@@ -14,7 +14,7 @@ class extends="testbox.system.BaseSpec" {
 		describe( "Router", function() {
 
 			it( "matches a literal route", function() {
-				var router = new "../../src/Router"()
+				var router = new "../../models/Router"()
 				var hit = false
 				router.get( "/hello", ( req, res ) => { hit = true } )
 				router.dispatch( _fakeReq( "GET", "/hello" ), _fakeRes() )
@@ -22,7 +22,7 @@ class extends="testbox.system.BaseSpec" {
 			} )
 
 			it( "captures route params", function() {
-				var router = new "../../src/Router"()
+				var router = new "../../models/Router"()
 				var capturedId = ""
 				router.get( "/users/:id", ( req, res ) => { capturedId = req.params.id } )
 				router.dispatch( _fakeReq( "GET", "/users/42" ), _fakeRes() )
@@ -30,7 +30,7 @@ class extends="testbox.system.BaseSpec" {
 			} )
 
 			it( "matches a trailing wildcard", function() {
-				var router = new "../../src/Router"()
+				var router = new "../../models/Router"()
 				var hit = false
 				router.get( "/files/*", ( req, res ) => { hit = true } )
 				router.dispatch( _fakeReq( "GET", "/files/a/b/c.txt" ), _fakeRes() )
@@ -38,7 +38,7 @@ class extends="testbox.system.BaseSpec" {
 			} )
 
 			it( "does not match a different method", function() {
-				var router = new "../../src/Router"()
+				var router = new "../../models/Router"()
 				var hit = false
 				router.post( "/hello", ( req, res ) => { hit = true } )
 				var res = _fakeRes()
@@ -48,7 +48,7 @@ class extends="testbox.system.BaseSpec" {
 			} )
 
 			it( "runs middleware before the matching route, in order", function() {
-				var router = new "../../src/Router"()
+				var router = new "../../models/Router"()
 				var order = []
 				router.use( ( req, res, next ) => { order.append( "mw1" ); next() } )
 				router.use( ( req, res, next ) => { order.append( "mw2" ); next() } )
@@ -58,7 +58,7 @@ class extends="testbox.system.BaseSpec" {
 			} )
 
 			it( "skips remaining middleware once a response is sent", function() {
-				var router = new "../../src/Router"()
+				var router = new "../../models/Router"()
 				var reachedSecond = false
 				router.use( ( req, res, next ) => { res.send( "done" ) } )
 				router.use( ( req, res, next ) => { reachedSecond = true; next() } )
@@ -67,7 +67,7 @@ class extends="testbox.system.BaseSpec" {
 			} )
 
 			it( "strips the mount prefix for path-scoped middleware and restores it after", function() {
-				var router = new "../../src/Router"()
+				var router = new "../../models/Router"()
 				var seenPath = ""
 				var pathAfter = ""
 				router.use( "/api", ( req, res, next ) => { seenPath = req.path; next() } )
@@ -78,9 +78,9 @@ class extends="testbox.system.BaseSpec" {
 			} )
 
 			it( "dispatches into a mounted sub-router with the prefix stripped", function() {
-				var router = new "../../src/Router"()
+				var router = new "../../models/Router"()
 				var capturedItemId = ""
-				var subRouter = new "../../src/Router"()
+				var subRouter = new "../../models/Router"()
 				subRouter.get( "/items/:itemId", ( req, res ) => { capturedItemId = req.params.itemId } )
 				router.use( "/api", subRouter )
 				router.dispatch( _fakeReq( "GET", "/api/items/9" ), _fakeRes() )
@@ -88,7 +88,7 @@ class extends="testbox.system.BaseSpec" {
 			} )
 
 			it( "routes a thrown error to 4-arg error-handling middleware", function() {
-				var router = new "../../src/Router"()
+				var router = new "../../models/Router"()
 				var caughtMessage = ""
 				router.get( "/boom", ( req, res ) => {
 					throw( message = "kaboom", type = "TestError" )
@@ -99,7 +99,7 @@ class extends="testbox.system.BaseSpec" {
 			} )
 
 			it( "sends a default 404 when nothing matches", function() {
-				var router = new "../../src/Router"()
+				var router = new "../../models/Router"()
 				var res = _fakeRes()
 				router.dispatch( _fakeReq( "GET", "/nowhere" ), res )
 				expect( res.isSent() ).toBeTrue()
@@ -107,7 +107,7 @@ class extends="testbox.system.BaseSpec" {
 			} )
 
 			it( "sends a default 500 when an error reaches the end of the stack unhandled", function() {
-				var router = new "../../src/Router"()
+				var router = new "../../models/Router"()
 				var res = _fakeRes()
 				router.get( "/boom", ( req, res ) => {
 					throw( message = "kaboom", type = "TestError" )

@@ -4,8 +4,15 @@ An Express.js-style web framework for BoxLang. Runs as a standalone HTTP server
 (backed by the JDK's built-in `com.sun.net.httpserver.HttpServer`, with a
 virtual thread per request) — no servlet container required.
 
+BoxExpress is a BoxLang module (`ModuleConfig.bx` at the project root, `type:
+"boxlang-modules"` in `box.json`). Installed into a project's
+`boxlang_modules/boxexpress/` (or the runtime-wide `~/.boxlang/modules/`),
+BoxLang registers a `bxModules.boxexpress` mapping automatically, and a global
+`boxExpress()` factory function — the closest match to Node's
+`const app = require('express')()`:
+
 ```js
-app = new "src/BoxExpress"()
+app = boxExpress()
 
 app.get( "/", ( req, res ) => {
 	res.send( "Hello World" )
@@ -16,9 +23,38 @@ app.listen( 3000, ( port ) => {
 } )
 ```
 
-## Install / run
+`boxExpress()` is a custom BIF (`bifs/boxExpress.bx`), auto-registered by the
+module system the moment BoxExpress loads — no `new` or namespace needed. It's
+just a thin wrapper: `new bxModules.boxexpress.models.BoxExpress()` still
+works identically if you'd rather be explicit about where it comes from. The
+three built-in middleware factories get the same treatment —
+`boxExpressJSON()`, `boxExpressUrlencoded()`, `boxExpressStatic()` (see
+[Middleware](#middleware) below) — but `Router` is only reachable via
+`new bxModules.boxexpress.models.Router()`, since Express doesn't give
+`Router` its own top-level global either.
 
-Requires BoxLang (tested against 1.15.0) on the JVM. No external dependencies.
+## Install
+
+Not yet published to ForgeBox — for now, either symlink or copy this repo
+into a consuming project's `boxlang_modules/boxexpress/`:
+
+```bash
+mkdir -p boxlang_modules
+ln -s /path/to/boxlang-express boxlang_modules/boxexpress
+```
+
+The mapping (`bxModules.boxexpress`) is registered by the BoxLang runtime the
+moment it discovers the module — but that discovery is relative to the
+**process's current working directory** (no upward search), so `boxlang` has
+to be invoked from the directory containing `boxlang_modules/`, same as
+`node_modules` resolution rules of thumb in npm-land.
+
+Once published, this would just be `box install boxlang-express`.
+
+## Hacking on BoxExpress itself
+
+Requires BoxLang (tested against 1.15.0) on the JVM. No external dependencies
+beyond TestBox for the test suite (`box install`).
 
 ```bash
 boxlang examples/server.bxs
@@ -42,6 +78,13 @@ curl localhost:3000/slow    # run a few of these in parallel to see concurrent h
 curl localhost:3000/greet/Ada
 ```
 
+Inside this repo, `examples/` and `tests/` reference the library via relative
+paths (`new "../models/BoxExpress"()`) rather than the `bxModules.boxexpress`
+mapping — that's deliberate: relative-path `new` resolves against the calling
+file's own location and works regardless of where `boxlang` is invoked from,
+which matters for a repo whose own scripts live in subdirectories
+(`examples/`, `tests/specs/`) rather than at the module root.
+
 ## API
 
 ### App
@@ -61,7 +104,7 @@ the server.
 
 ### Router (mountable sub-app)
 
-Same routing methods as `app`. Create one with `new "src/Router"()` and mount
+Same routing methods as `app`. Create one with `new bxModules.boxexpress.models.Router()` and mount
 it with `app.use("/api", apiRouter)` — request paths are matched relative to
 the mount point, exactly like Express's `express.Router()`.
 
@@ -122,14 +165,24 @@ Error-handling middleware is any handler with **4** parameters —
 `(err, req, res, next) => {...}` — detected the same way Express does
 (`fn.length === 4`), and should be registered last.
 
-Built-in middleware factories (opt-in, same philosophy as `express.json()`):
+Built-in middleware factories (opt-in, same philosophy as `express.json()`),
+each with its own global BIF mirroring the Express function of the same name:
 
 ```js
-bodyParsers = new "src/middleware/BodyParsers"()
-app.use( bodyParsers.json() )        // parses application/json bodies into req.body
-app.use( bodyParsers.urlencoded() )  // parses application/x-www-form-urlencoded bodies
+app.use( boxExpressJSON() )        // parses application/json bodies into req.body
+app.use( boxExpressUrlencoded() )  // parses application/x-www-form-urlencoded bodies
+app.use( "/public", boxExpressStatic( expandPath( "./public" ) ) )
+```
 
-staticFiles = new "src/middleware/StaticFiles"()
+Same thing spelled out via the underlying classes, if you'd rather not lean
+on the BIFs:
+
+```js
+bodyParsers = new bxModules.boxexpress.models.middleware.BodyParsers()
+app.use( bodyParsers.json() )
+app.use( bodyParsers.urlencoded() )
+
+staticFiles = new bxModules.boxexpress.models.middleware.StaticFiles()
 app.use( "/public", staticFiles.serve( expandPath( "./public" ) ) )
 ```
 

@@ -1,0 +1,17 @@
+/**
+ * Global factory BIF, registered automatically when this module loads.
+ * Mirrors Node's `const app = express()` — the friendliest entry point,
+ * equivalent to `new bxModules.boxexpress.models.BoxExpress()`.
+ *
+ *   app = boxExpress()
+ *   app.get( "/", ( req, res ) => res.send( "Hello World" ) )
+ *   app.listen( 3000 )
+ */
+@BoxBIF
+class {
+
+	function invoke() {
+		return new bxModules.boxexpress.models.BoxExpress()
+	}
+
+}

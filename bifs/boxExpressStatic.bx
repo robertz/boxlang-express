@@ -1,0 +1,13 @@
+/**
+ * Global BIF wrapping StaticFiles.serve() — mirrors Express's express.static().
+ *
+ *   app.use( "/public", boxExpressStatic( expandPath( "./public" ) ) )
+ */
+@BoxBIF
+class {
+
+	function invoke( rootDir, options = {} ) {
+		return new bxModules.boxexpress.models.middleware.StaticFiles().serve( rootDir, options )
+	}
+
+}

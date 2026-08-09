@@ -3,9 +3,9 @@
  *   boxlang examples/server.bxs
  * then exercise it with curl (see README.md for the full list of commands).
  */
-app = new "../src/BoxExpress"()
-bodyParsers = new "../src/middleware/BodyParsers"()
-staticFiles = new "../src/middleware/StaticFiles"()
+app = new "../models/BoxExpress"()
+bodyParsers = new "../models/middleware/BodyParsers"()
+staticFiles = new "../models/middleware/StaticFiles"()
 
 app.use( bodyParsers.json() )
 app.use( bodyParsers.urlencoded() )
@@ -51,7 +51,7 @@ app.get( "/greet/:name", ( req, res ) => {
 	res.render( "greeting", { name: req.params.name, age: 30 } )
 } )
 
-apiRouter = new "../src/Router"()
+apiRouter = new "../models/Router"()
 
 apiRouter.get( "/ping", ( req, res ) => {
 	res.json( { pong: true } )
