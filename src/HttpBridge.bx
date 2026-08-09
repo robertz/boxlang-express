@@ -5,8 +5,9 @@
  */
 class {
 
-	function init( router ) {
+	function init( router, settings ) {
 		variables.router = router
+		variables.settings = settings
 		return this
 	}
 
@@ -16,7 +17,7 @@ class {
 
 		try {
 			req = new Request( exchange )
-			res = new Response( exchange )
+			res = new Response( exchange, variables.settings )
 		} catch ( any e ) {
 			try {
 				exchange.sendResponseHeaders( 500, -1 )

@@ -1,0 +1,1 @@
+This is a static fixture file for the StaticFiles middleware integration test.

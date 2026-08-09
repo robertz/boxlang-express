@@ -1,0 +1,12 @@
+/**
+ * Runs the BoxExpress test suite headlessly (no server needed) and exits
+ * with a non-zero code on any failure/error, for CI/scripting use.
+ *   boxlang run-tests.bxs
+ */
+tb = new "testbox.system.TestBox"( directory = "tests.specs", reporter = "text" )
+println( tb.run() )
+
+result = tb.getResult()
+if ( result.getTotalFail() > 0 || result.getTotalError() > 0 ) {
+	createObject( "java", "java.lang.System" ).exit( 1 )
+}

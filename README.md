@@ -39,6 +39,7 @@ curl localhost:3000/boom
 curl -i localhost:3000/set-cookie
 curl -i localhost:3000/go-home
 curl localhost:3000/slow    # run a few of these in parallel to see concurrent handling
+curl localhost:3000/greet/Ada
 ```
 
 ## API
@@ -75,10 +76,43 @@ by body-parsing middleware, empty struct otherwise).
 `res.status(code)`, `res.set(name,val)` / `res.header(...)`, `res.type(mime)`,
 `res.send(data)`, `res.json(data)`, `res.sendStatus(code)`,
 `res.redirect(url, code=302)`, `res.cookie(name,val,options)`,
-`res.sendBytes(bytes, contentType)`, `res.end(data)`.
+`res.sendBytes(bytes, contentType)`, `res.end(data)`, `res.render(view, data)`.
 
-Calling a second terminal method (`send`/`json`/`redirect`/`end`/`sendBytes`)
-on the same response throws — mirrors Express's "headers already sent".
+Calling a second terminal method (`send`/`json`/`redirect`/`end`/`sendBytes`/
+`render`) on the same response throws — mirrors Express's "headers already
+sent".
+
+### Views (`res.render`)
+
+Renders a `.bxm` template (BoxLang's server-page format — think `.cfm`) from a
+configured views directory and sends the result as `text/html`:
+
+```js
+app.set( "views", expandPath( "./views" ) )
+
+app.get( "/greet/:name", ( req, res ) => {
+	res.render( "greeting", { name: req.params.name, age: 30 } )
+} )
+```
+
+`views/greeting.bxm`:
+
+```html
+<bx:output>
+<h1>Hello, #data.name#!</h1>
+<p>You are #data.age# years old.</p>
+</bx:output>
+```
+
+Two things worth knowing:
+
+- `data` is whatever struct you pass as the second argument to `render()` —
+  reference its keys as `data.whatever` in the template.
+- `#var#` interpolation in a `.bxm` file only happens inside a `<bx:output>`
+  block, exactly like `<cfoutput>` in classic CFML — plain text outside one is
+  left as literal `#...#`, unevaluated.
+
+`render()` throws if `app.set("views", ...)` was never called.
 
 ### Middleware
 
@@ -103,12 +137,49 @@ If no route matches, a default `404` JSON response is sent. If a handler
 throws (or calls `next(err)`) and no error-handling middleware is registered,
 a default `500` JSON response is sent.
 
+## Tests
+
+[TestBox](https://testbox.ortusbooks.com/) specs, run headlessly (no server
+needed — this runs the same way `examples/server.bxs` does, just against
+TestBox instead of an HTTP request):
+
+```bash
+boxlang run-tests.bxs
+```
+
+Exits non-zero on any failure/error, so it's CI-friendly as-is. Structure:
+
+- `tests/specs/RouterSpec.bx` — unit tests for path matching and the
+  middleware/`next()` chain, using lightweight fake `req`/`res` structs
+  instead of a real `HttpExchange` (Router never touches anything else).
+- `tests/specs/BoxExpressIntegrationSpec.bx` — spins up a real app on
+  `localhost:4321` in `beforeAll()` and hits it with real HTTP requests
+  (`tests/helpers/HttpClient.bx`, a thin `HttpURLConnection` wrapper),
+  exercising `Request`/`Response`/`BodyParsers`/`StaticFiles`/`render()`
+  together, plus a concurrency check using `bx:thread`.
+- `tests/fixtures/` — a static file and a `.bxm` view the integration spec
+  serves/renders.
+
+Two BoxLang-specific things that shaped how these are written:
+
+- Bare (non-`var`) assignment inside a `describe`/`it`/`beforeEach` closure
+  doesn't reliably cross into sibling closures — `RouterSpec` builds its own
+  `var router` per test instead of sharing one via `beforeEach`.
+  `variables.xxx` set in `beforeAll()`/`afterAll()` *does* cross into `it()`
+  blocks, since those are real class methods rather than closure arguments —
+  that's what `BoxExpressIntegrationSpec` uses to share the running app.
+- `expandPath()` resolves relative to the top-level entry script
+  (`run-tests.bxs`, at the project root) — not relative to whichever `.bx`
+  file happens to call it — hence the fixture paths in
+  `BoxExpressIntegrationSpec` are project-root-relative (`tests/fixtures/...`)
+  rather than `../fixtures/...`.
+
 ## Scope (v1)
 
 Routing, middleware chaining, mountable routers, params/query parsing, opt-in
-JSON/urlencoded body parsing, static file serving, and default 404/500
-handling. Not included (possible future extensions): sessions, multipart
-file-upload parsing, and view-engine/template rendering.
+JSON/urlencoded body parsing, static file serving, `.bxm` view rendering, and
+default 404/500 handling. Not included (possible future extensions):
+sessions and multipart file-upload parsing.
 
 ## A BoxLang gotcha worth knowing
 

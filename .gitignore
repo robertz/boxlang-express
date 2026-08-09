@@ -1,0 +1,22 @@
+# Dependencies installed via `box install` (see box.json) — regenerate with
+# `box install`, don't commit them.
+/testbox/
+/modules/
+
+# CommandBox / BoxLang runtime artifacts
+.engine/
+.artifacts/
+.tmp/
+*.log
+
+# TestBox output (if a runner is pointed at a report path)
+/tests/results/
+
+# Editor
+.vscode/
+.idea/
+*.swp
+
+# OS
+.DS_Store
+Thumbs.db

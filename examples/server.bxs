@@ -10,6 +10,7 @@ staticFiles = new "../src/middleware/StaticFiles"()
 app.use( bodyParsers.json() )
 app.use( bodyParsers.urlencoded() )
 app.use( "/public", staticFiles.serve( expandPath( "./public" ) ) )
+app.set( "views", expandPath( "./views" ) )
 
 app.get( "/", ( req, res ) => {
 	res.send( "Hello from BoxExpress!" )
@@ -44,6 +45,10 @@ app.get( "/set-cookie", ( req, res ) => {
 
 app.get( "/go-home", ( req, res ) => {
 	res.redirect( "/" )
+} )
+
+app.get( "/greet/:name", ( req, res ) => {
+	res.render( "greeting", { name: req.params.name, age: 30 } )
 } )
 
 apiRouter = new "../src/Router"()

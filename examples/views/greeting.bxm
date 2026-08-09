@@ -1,0 +1,9 @@
+<bx:output><!doctype html>
+<html>
+<head><title>BoxExpress</title></head>
+<body>
+	<h1>Hello, #data.name#!</h1>
+	<p>You are #data.age# years old.</p>
+</body>
+</html>
+</bx:output>

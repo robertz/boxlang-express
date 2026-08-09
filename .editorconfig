@@ -1,0 +1,25 @@
+root = true
+
+[*]
+charset = utf-8
+end_of_line = lf
+insert_final_newline = true
+trim_trailing_whitespace = true
+indent_style = tab
+indent_size = 4
+
+# BoxLang source, scripts, templates, and legacy CFML compat files
+[*.{bx,bxs,bxm,cfc,cfm}]
+indent_style = tab
+indent_size = 4
+
+# CommandBox / npm-style manifests are conventionally space-indented
+[*.{json,yml,yaml}]
+indent_style = space
+indent_size = 4
+
+# Two trailing spaces in Markdown is a hard line break — don't strip it
+[*.md]
+indent_style = space
+indent_size = 4
+trim_trailing_whitespace = false

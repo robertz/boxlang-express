@@ -62,7 +62,7 @@ class {
 		var addr = createObject( "java", "java.net.InetSocketAddress" ).init( port )
 		variables.httpServer = createObject( "java", "com.sun.net.httpserver.HttpServer" ).create( addr, 0 )
 
-		var bridge = new HttpBridge( variables.router )
+		var bridge = new HttpBridge( variables.router, this.settings )
 		var proxy = createDynamicProxy( bridge, [ "com.sun.net.httpserver.HttpHandler" ] )
 
 		variables.httpServer.createContext( "/", proxy )

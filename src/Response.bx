@@ -5,10 +5,11 @@
  */
 class {
 
-	function init( exchange ) {
+	function init( exchange, settings = {} ) {
 		variables.exchange = exchange
 		variables.sent = false
 		variables.statusCode = 200
+		variables.settings = settings
 		variables.STATUS_TEXT = {
 			200: "OK", 201: "Created", 204: "No Content",
 			301: "Moved Permanently", 302: "Found",
@@ -105,6 +106,33 @@ class {
 			type( contentType )
 		}
 		return _end( bytes )
+	}
+
+	/**
+	 * Render a .bxm view from the configured views directory (app.set("views", dir))
+	 * and send it as the response body. `data` is available inside the template as
+	 * the `data` struct — interpolation there needs a <bx:output> block, same as
+	 * classic CFML <cfoutput>.
+	 */
+	function render( view, data = {} ) {
+		var viewsDir = variables.settings[ "views" ] ?: javacast( "null", "" )
+		if ( isNull( viewsDir ) ) {
+			throw(
+				message = "No views directory configured — call app.set( ""views"", expandPath( ""./views"" ) ) before using res.render()",
+				type = "BoxExpress.NoViewsDir"
+			)
+		}
+
+		var viewFile = view.right( 4 ) == ".bxm" ? view : view & ".bxm"
+		var templatePath = viewsDir & "/" & viewFile
+		var output = ""
+
+		bx:savecontent variable="output" {
+			include "#templatePath#"
+		}
+
+		type( "text/html; charset=utf-8" )
+		return _end( output.getBytes( "UTF-8" ) )
 	}
 
 	private function _end( bodyBytes ) {

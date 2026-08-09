@@ -1,0 +1,51 @@
+/**
+ * Minimal test-only HTTP client (java.net.HttpURLConnection) used by integration
+ * specs to hit a real running BoxExpress instance and assert on the response.
+ */
+class {
+
+	function get( targetUrl ) {
+		return _request( "GET", targetUrl, "", "", true )
+	}
+
+	function post( targetUrl, body = "", contentType = "application/json" ) {
+		return _request( "POST", targetUrl, body, contentType, true )
+	}
+
+	function requestNoRedirect( method, targetUrl ) {
+		return _request( method, targetUrl, "", "", false )
+	}
+
+	private function _request( method, targetUrl, body, contentType, followRedirects ) {
+		var conn = createObject( "java", "java.net.URI" ).init( targetUrl ).toURL().openConnection()
+		conn.setRequestMethod( method )
+		conn.setInstanceFollowRedirects( followRedirects )
+
+		if ( len( body ) ) {
+			conn.setDoOutput( true )
+			conn.setRequestProperty( "Content-Type", contentType )
+			var outStream = conn.getOutputStream()
+			outStream.write( body.getBytes( "UTF-8" ) )
+			outStream.close()
+		}
+
+		var statusCode = conn.getResponseCode()
+		var inStream = statusCode >= 400 ? conn.getErrorStream() : conn.getInputStream()
+		var responseBody = ""
+
+		if ( !isNull( inStream ) ) {
+			var outBuf = createObject( "java", "java.io.ByteArrayOutputStream" ).init()
+			inStream.transferTo( outBuf )
+			responseBody = outBuf.toString( "UTF-8" )
+		}
+
+		return {
+			statusCode: statusCode,
+			body: responseBody,
+			contentType: conn.getContentType() ?: "",
+			location: conn.getHeaderField( "Location" ) ?: "",
+			setCookie: conn.getHeaderField( "Set-Cookie" ) ?: ""
+		}
+	}
+
+}

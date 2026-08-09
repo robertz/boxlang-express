@@ -1,0 +1,172 @@
+/**
+ * End-to-end tests: spins up a real BoxExpress app on a real port and hits it
+ * with actual HTTP requests (java.net.HttpURLConnection), exercising Request,
+ * Response, BodyParsers, StaticFiles, HttpBridge and BoxExpress together —
+ * the same thing manual curl testing verified during development, now automated.
+ */
+class extends="testbox.system.BaseSpec" {
+
+	function beforeAll() {
+		variables.testPort = 4321
+		variables.baseUrl = "http://localhost:#variables.testPort#"
+		variables.client = new "../helpers/HttpClient"()
+
+		var bodyParsers = new "../../src/middleware/BodyParsers"()
+		var staticFiles = new "../../src/middleware/StaticFiles"()
+
+		// expandPath() resolves relative to the top-level entry script (run-tests.bxs,
+		// at the project root), not relative to this class file — hence the project-root-
+		// relative "tests/..." paths below rather than "../fixtures/...".
+
+		variables.app = new "../../src/BoxExpress"()
+		variables.app.use( bodyParsers.json() )
+		variables.app.use( "/public", staticFiles.serve( expandPath( "tests/fixtures/public" ) ) )
+		variables.app.set( "views", expandPath( "tests/fixtures/views" ) )
+
+		variables.app.get( "/", ( req, res ) => {
+			res.send( "Hello from BoxExpress!" )
+		} )
+
+		variables.app.get( "/users/:id", ( req, res ) => {
+			res.json( { id: req.params.id } )
+		} )
+
+		variables.app.get( "/search", ( req, res ) => {
+			res.json( { query: req.query } )
+		} )
+
+		variables.app.post( "/echo", ( req, res ) => {
+			res.json( { youSent: req.body } )
+		} )
+
+		variables.app.get( "/boom", ( req, res ) => {
+			throw( message = "kaboom", type = "TestError" )
+		} )
+
+		variables.app.get( "/go-home", ( req, res ) => {
+			res.redirect( "/" )
+		} )
+
+		variables.app.get( "/set-cookie", ( req, res ) => {
+			res.cookie( "sessionId", "abc123" ).json( { cookieSet: true } )
+		} )
+
+		variables.app.get( "/greet/:name", ( req, res ) => {
+			res.render( "greeting", { name: req.params.name } )
+		} )
+
+		var apiRouter = new "../../src/Router"()
+		apiRouter.get( "/ping", ( req, res ) => {
+			res.json( { pong: true } )
+		} )
+		variables.app.use( "/api", apiRouter )
+
+		variables.app.use( ( err, req, res, next ) => {
+			res.status( 500 ).json( { error: true, message: err.message } )
+		} )
+
+		variables.app.listen( variables.testPort )
+		sleep( 300 )
+	}
+
+	function afterAll() {
+		variables.app.close()
+	}
+
+	function run() {
+		describe( "BoxExpress (live server)", function() {
+
+			it( "responds to a basic GET route", function() {
+				var result = variables.client.get( variables.baseUrl & "/" )
+				expect( result.statusCode ).toBe( 200 )
+				expect( result.body ).toBe( "Hello from BoxExpress!" )
+			} )
+
+			it( "captures a route param", function() {
+				var result = variables.client.get( variables.baseUrl & "/users/42" )
+				expect( result.statusCode ).toBe( 200 )
+				expect( JSONDeserialize( result.body ).id ).toBe( "42" )
+			} )
+
+			it( "parses the query string", function() {
+				var result = variables.client.get( variables.baseUrl & "/search?q=cats" )
+				expect( JSONDeserialize( result.body ).query.q ).toBe( "cats" )
+			} )
+
+			it( "parses a JSON request body via opt-in middleware", function() {
+				var result = variables.client.post( variables.baseUrl & "/echo", '{"a":1}', "application/json" )
+				expect( result.statusCode ).toBe( 200 )
+				expect( JSONDeserialize( result.body ).youSent.a ).toBe( 1 )
+			} )
+
+			it( "dispatches into a mounted router", function() {
+				var result = variables.client.get( variables.baseUrl & "/api/ping" )
+				expect( JSONDeserialize( result.body ).pong ).toBeTrue()
+			} )
+
+			it( "serves a static file", function() {
+				var result = variables.client.get( variables.baseUrl & "/public/hello.txt" )
+				expect( result.statusCode ).toBe( 200 )
+				expect( result.body ).toInclude( "static fixture" )
+			} )
+
+			it( "renders a .bxm view", function() {
+				var result = variables.client.get( variables.baseUrl & "/greet/Ada" )
+				expect( result.statusCode ).toBe( 200 )
+				expect( result.contentType ).toInclude( "text/html" )
+				expect( result.body ).toInclude( "Hello, Ada!" )
+			} )
+
+			it( "sets a cookie via res.cookie()", function() {
+				var result = variables.client.get( variables.baseUrl & "/set-cookie" )
+				expect( result.setCookie ).toInclude( "sessionId=abc123" )
+			} )
+
+			it( "redirects via res.redirect()", function() {
+				var result = variables.client.requestNoRedirect( "GET", variables.baseUrl & "/go-home" )
+				expect( result.statusCode ).toBe( 302 )
+				expect( result.location ).toBe( "/" )
+			} )
+
+			it( "returns a default 404 for an unmatched route", function() {
+				var result = variables.client.get( variables.baseUrl & "/does-not-exist" )
+				expect( result.statusCode ).toBe( 404 )
+			} )
+
+			it( "routes a thrown error to custom error-handling middleware", function() {
+				var result = variables.client.get( variables.baseUrl & "/boom" )
+				expect( result.statusCode ).toBe( 500 )
+				expect( JSONDeserialize( result.body ).message ).toBe( "kaboom" )
+			} )
+
+			it( "serves concurrent requests without serializing them", function() {
+				variables.app.get( "/slow-test-only", ( req, res ) => {
+					sleep( 500 )
+					res.json( { slept: true } )
+				} )
+
+				var slowUrl = variables.baseUrl & "/slow-test-only"
+				var httpClient = variables.client
+				var startedAt = getTickCount()
+
+				bx:thread name="concurrencyTestThread1" {
+					httpClient.get( slowUrl )
+				}
+				bx:thread name="concurrencyTestThread2" {
+					httpClient.get( slowUrl )
+				}
+				bx:thread name="concurrencyTestThread3" {
+					httpClient.get( slowUrl )
+				}
+				bx:thread action="join" name="concurrencyTestThread1,concurrencyTestThread2,concurrencyTestThread3";
+
+				var elapsed = getTickCount() - startedAt
+
+				// Serialized would be ~1500ms; concurrent should land well under that.
+				expect( elapsed ).toBeLT( 1200 )
+			} )
+
+		} )
+	}
+
+}

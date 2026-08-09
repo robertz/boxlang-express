@@ -1,0 +1,141 @@
+/**
+ * Unit tests for Router's path matching and next()/middleware dispatch logic.
+ * Uses lightweight fake req/res objects instead of a real HttpExchange, since
+ * Router only ever touches req.method/req.path/req.params and res.isSent().
+ *
+ * Each test builds its own Router instance locally rather than sharing one via
+ * beforeEach — bare (non-"var") assignments inside describe/it closures don't
+ * reliably cross between sibling closures under BoxLang's TestBox, so a fresh
+ * `var router` per test keeps each spec self-contained instead of relying on it.
+ */
+class extends="testbox.system.BaseSpec" {
+
+	function run() {
+		describe( "Router", function() {
+
+			it( "matches a literal route", function() {
+				var router = new "../../src/Router"()
+				var hit = false
+				router.get( "/hello", ( req, res ) => { hit = true } )
+				router.dispatch( _fakeReq( "GET", "/hello" ), _fakeRes() )
+				expect( hit ).toBeTrue()
+			} )
+
+			it( "captures route params", function() {
+				var router = new "../../src/Router"()
+				var capturedId = ""
+				router.get( "/users/:id", ( req, res ) => { capturedId = req.params.id } )
+				router.dispatch( _fakeReq( "GET", "/users/42" ), _fakeRes() )
+				expect( capturedId ).toBe( "42" )
+			} )
+
+			it( "matches a trailing wildcard", function() {
+				var router = new "../../src/Router"()
+				var hit = false
+				router.get( "/files/*", ( req, res ) => { hit = true } )
+				router.dispatch( _fakeReq( "GET", "/files/a/b/c.txt" ), _fakeRes() )
+				expect( hit ).toBeTrue()
+			} )
+
+			it( "does not match a different method", function() {
+				var router = new "../../src/Router"()
+				var hit = false
+				router.post( "/hello", ( req, res ) => { hit = true } )
+				var res = _fakeRes()
+				router.dispatch( _fakeReq( "GET", "/hello" ), res )
+				expect( hit ).toBeFalse()
+				expect( res.getStatusCode() ).toBe( 404 )
+			} )
+
+			it( "runs middleware before the matching route, in order", function() {
+				var router = new "../../src/Router"()
+				var order = []
+				router.use( ( req, res, next ) => { order.append( "mw1" ); next() } )
+				router.use( ( req, res, next ) => { order.append( "mw2" ); next() } )
+				router.get( "/x", ( req, res ) => { order.append( "route" ) } )
+				router.dispatch( _fakeReq( "GET", "/x" ), _fakeRes() )
+				expect( order ).toBe( [ "mw1", "mw2", "route" ] )
+			} )
+
+			it( "skips remaining middleware once a response is sent", function() {
+				var router = new "../../src/Router"()
+				var reachedSecond = false
+				router.use( ( req, res, next ) => { res.send( "done" ) } )
+				router.use( ( req, res, next ) => { reachedSecond = true; next() } )
+				router.dispatch( _fakeReq( "GET", "/anything" ), _fakeRes() )
+				expect( reachedSecond ).toBeFalse()
+			} )
+
+			it( "strips the mount prefix for path-scoped middleware and restores it after", function() {
+				var router = new "../../src/Router"()
+				var seenPath = ""
+				var pathAfter = ""
+				router.use( "/api", ( req, res, next ) => { seenPath = req.path; next() } )
+				router.use( ( req, res, next ) => { pathAfter = req.path; next() } )
+				router.dispatch( _fakeReq( "GET", "/api/items/7" ), _fakeRes() )
+				expect( seenPath ).toBe( "/items/7" )
+				expect( pathAfter ).toBe( "/api/items/7" )
+			} )
+
+			it( "dispatches into a mounted sub-router with the prefix stripped", function() {
+				var router = new "../../src/Router"()
+				var capturedItemId = ""
+				var subRouter = new "../../src/Router"()
+				subRouter.get( "/items/:itemId", ( req, res ) => { capturedItemId = req.params.itemId } )
+				router.use( "/api", subRouter )
+				router.dispatch( _fakeReq( "GET", "/api/items/9" ), _fakeRes() )
+				expect( capturedItemId ).toBe( "9" )
+			} )
+
+			it( "routes a thrown error to 4-arg error-handling middleware", function() {
+				var router = new "../../src/Router"()
+				var caughtMessage = ""
+				router.get( "/boom", ( req, res ) => {
+					throw( message = "kaboom", type = "TestError" )
+				} )
+				router.use( ( err, req, res, next ) => { caughtMessage = err.message } )
+				router.dispatch( _fakeReq( "GET", "/boom" ), _fakeRes() )
+				expect( caughtMessage ).toBe( "kaboom" )
+			} )
+
+			it( "sends a default 404 when nothing matches", function() {
+				var router = new "../../src/Router"()
+				var res = _fakeRes()
+				router.dispatch( _fakeReq( "GET", "/nowhere" ), res )
+				expect( res.isSent() ).toBeTrue()
+				expect( res.getStatusCode() ).toBe( 404 )
+			} )
+
+			it( "sends a default 500 when an error reaches the end of the stack unhandled", function() {
+				var router = new "../../src/Router"()
+				var res = _fakeRes()
+				router.get( "/boom", ( req, res ) => {
+					throw( message = "kaboom", type = "TestError" )
+				} )
+				router.dispatch( _fakeReq( "GET", "/boom" ), res )
+				expect( res.isSent() ).toBeTrue()
+				expect( res.getStatusCode() ).toBe( 500 )
+			} )
+
+		} )
+	}
+
+	private function _fakeReq( method, path ) {
+		return { method: method, path: path, params: {}, query: {}, body: {} }
+	}
+
+	private function _fakeRes() {
+		var sent = false
+		var statusCode = 200
+		var body = ""
+		var fakeRes = {}
+		fakeRes.isSent = function() { return sent }
+		fakeRes.status = function( code ) { statusCode = code; return fakeRes }
+		fakeRes.send = function( data ) { sent = true; body = data; return fakeRes }
+		fakeRes.json = function( data ) { sent = true; body = data; return fakeRes }
+		fakeRes.getStatusCode = function() { return statusCode }
+		fakeRes.getBody = function() { return body }
+		return fakeRes
+	}
+
+}
