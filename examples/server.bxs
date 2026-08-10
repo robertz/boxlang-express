@@ -73,12 +73,7 @@ app.use( ( err, req, res, next ) => {
 	res.status( 500 ).json( { error: true, message: err.message } )
 } )
 
+// Blocks here — listen() keeps the process alive by default (options.block = true).
 app.listen( 3000, ( port ) => {
 	println( "BoxExpress listening on http://localhost:#port#" )
 } )
-
-// Node keeps the process alive via its event loop; BoxLang's CLI runtime has none,
-// so the main thread has to be kept alive explicitly for the server to keep serving.
-while ( true ) {
-	sleep( 1000 )
-}

@@ -81,7 +81,7 @@ class extends="testbox.system.BaseSpec" {
 			res.json( { slept: true } )
 		} )
 
-		variables.app.listen( variables.testPort )
+		variables.app.listen( port = variables.testPort, options = { block: false } )
 		sleep( 300 )
 	}
 

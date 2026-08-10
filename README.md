@@ -100,15 +100,31 @@ which matters for a repo whose own scripts live in subdirectories
 - `app.get/post/put/patch/delete/all(path, ...handlers)`
 - `app.use(handler)` / `app.use(path, handler)` / `app.use(path, router)`
 - `app.set(name, value)` / `app.getSetting(name)`
-- `app.listen(port, callback)` — starts the server, returns `app` immediately (non-blocking)
-- `app.close()` — stops the server
+- `app.listen(port, callback, options)` — starts the server and blocks the calling thread by default
+- `app.close()` — stops the server, and breaks a blocked `listen()` (from any thread)
 
-`listen()` doesn't block: Node keeps a CLI process alive via its event loop,
-but BoxLang's CLI runtime has no equivalent, so a `boxlang server.bxs`
-long-running process needs to block its own main thread after calling
-`listen()` (see the `while(true) { sleep(1000) }` at the end of
-`examples/server.bxs`) or the process will exit immediately after starting
-the server.
+Node keeps a CLI process alive via its event loop; BoxLang's CLI runtime has
+no equivalent, so unlike Express, `listen()` blocks the calling thread by
+default rather than requiring every script to remember its own keep-alive
+loop — a plain `boxlang server.bxs` just stays up. Pass `{ block: false }` as
+the third argument to get the old non-blocking behavior back (this project's
+own test suite uses that, since it needs to keep running setup code — and
+eventually call `close()` — after `listen()` returns):
+
+```js
+app.listen( 3000, ( port ) => {
+	println( "listening on #port#" )
+} )
+// unreachable until the server stops — that's the point
+
+app.listen( 3000, ( port ) => { ... }, { block: false } )
+// returns immediately, same as Express's listen()
+```
+
+`close()` works either way, and — since it just flips a flag `listen()`'s
+loop polls every second — also works when called from a *different* thread
+than the one blocked in `listen()`, e.g. a `/shutdown` route handler running
+on its own virtual thread.
 
 Every request gets a line on stdout as soon as it's received —
 `[2026-08-10 10:45:41] GET /users/42 127.0.0.1` — there's no setting to turn

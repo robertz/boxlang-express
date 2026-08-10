@@ -10,6 +10,7 @@ class {
 	function init() {
 		variables.router = new Router()
 		variables.httpServer = javacast( "null", "" )
+		variables.running = false
 		this.settings = {}
 		return this
 	}
@@ -58,7 +59,17 @@ class {
 		return this.settings[ name ] ?: javacast( "null", "" )
 	}
 
-	function listen( port, callback ) {
+	/**
+	 * Starts the server. Blocks the calling thread by default (options.block = true) —
+	 * Node keeps a CLI process alive via its event loop, BoxLang's CLI runtime has no
+	 * equivalent, so listen() blocks itself rather than requiring every caller to
+	 * remember a keep-alive loop. Pass { block: false } for the old non-blocking
+	 * behavior (used by this project's own test suite, or anyone embedding BoxExpress
+	 * inside a larger app that manages its own lifecycle) — close() still works to stop
+	 * the server either way, and also breaks the blocking loop if something else (e.g.
+	 * a route handler, on its own virtual thread) calls it while listen() is blocked.
+	 */
+	function listen( port, callback, options = {} ) {
 		var addr = createObject( "java", "java.net.InetSocketAddress" ).init( port )
 		variables.httpServer = createObject( "java", "com.sun.net.httpserver.HttpServer" ).create( addr, 0 )
 
@@ -68,15 +79,23 @@ class {
 		variables.httpServer.createContext( "/", proxy )
 		variables.httpServer.setExecutor( createObject( "java", "java.util.concurrent.Executors" ).newVirtualThreadPerTaskExecutor() )
 		variables.httpServer.start()
+		variables.running = true
 
 		if ( !isNull( callback ) ) {
 			callback( port )
+		}
+
+		if ( options.block ?: true ) {
+			while ( variables.running ) {
+				sleep( 1000 )
+			}
 		}
 
 		return this
 	}
 
 	function close() {
+		variables.running = false
 		if ( isNull( variables.httpServer ) ) {
 			return this
 		}
