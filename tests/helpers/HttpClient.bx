@@ -16,6 +16,45 @@ class {
 		return _request( method, targetUrl, "", "", false )
 	}
 
+	/**
+	 * Builds a real multipart/form-data body: fields is {name: value}, files is
+	 * an array of {field, filename, contentType, content} — enough to exercise
+	 * the Multipart middleware end-to-end without a browser.
+	 */
+	function postMultipart( targetUrl, fields = {}, files = [] ) {
+		var boundary = "----BoxExpressTestBoundary" & createObject( "java", "java.util.UUID" ).randomUUID().toString()
+		var crlf = char( 13 ) & char( 10 )
+		var bodyBuf = createObject( "java", "java.io.ByteArrayOutputStream" ).init()
+
+		for ( var fieldName in fields ) {
+			bodyBuf.write( ( "--" & boundary & crlf ).getBytes( "UTF-8" ) )
+			bodyBuf.write( ( 'Content-Disposition: form-data; name="' & fieldName & '"' & crlf & crlf ).getBytes( "UTF-8" ) )
+			bodyBuf.write( toString( fields[ fieldName ] ).getBytes( "UTF-8" ) )
+			bodyBuf.write( crlf.getBytes( "UTF-8" ) )
+		}
+
+		for ( var fileDef in files ) {
+			bodyBuf.write( ( "--" & boundary & crlf ).getBytes( "UTF-8" ) )
+			bodyBuf.write( ( 'Content-Disposition: form-data; name="' & fileDef.field & '"; filename="' & fileDef.filename & '"' & crlf ).getBytes( "UTF-8" ) )
+			bodyBuf.write( ( "Content-Type: " & fileDef.contentType & crlf & crlf ).getBytes( "UTF-8" ) )
+			bodyBuf.write( toString( fileDef.content ).getBytes( "UTF-8" ) )
+			bodyBuf.write( crlf.getBytes( "UTF-8" ) )
+		}
+
+		bodyBuf.write( ( "--" & boundary & "--" & crlf ).getBytes( "UTF-8" ) )
+
+		var conn = createObject( "java", "java.net.URI" ).init( targetUrl ).toURL().openConnection()
+		conn.setRequestMethod( "POST" )
+		conn.setInstanceFollowRedirects( true )
+		conn.setDoOutput( true )
+		conn.setRequestProperty( "Content-Type", "multipart/form-data; boundary=" & boundary )
+		var outStream = conn.getOutputStream()
+		outStream.write( bodyBuf.toByteArray() )
+		outStream.close()
+
+		return _readResponse( conn )
+	}
+
 	private function _request( method, targetUrl, body, contentType, followRedirects ) {
 		var conn = createObject( "java", "java.net.URI" ).init( targetUrl ).toURL().openConnection()
 		conn.setRequestMethod( method )
@@ -29,6 +68,10 @@ class {
 			outStream.close()
 		}
 
+		return _readResponse( conn )
+	}
+
+	private function _readResponse( conn ) {
 		var statusCode = conn.getResponseCode()
 		var inStream = statusCode >= 400 ? conn.getErrorStream() : conn.getInputStream()
 		var responseBody = ""
@@ -44,7 +87,8 @@ class {
 			body: responseBody,
 			contentType: conn.getContentType() ?: "",
 			location: conn.getHeaderField( "Location" ) ?: "",
-			setCookie: conn.getHeaderField( "Set-Cookie" ) ?: ""
+			setCookie: conn.getHeaderField( "Set-Cookie" ) ?: "",
+			contentDisposition: conn.getHeaderField( "Content-Disposition" ) ?: ""
 		}
 	}
 

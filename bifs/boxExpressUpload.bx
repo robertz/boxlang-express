@@ -1,0 +1,14 @@
+/**
+ * Global BIF wrapping Multipart.upload() — mirrors multer's basic usage.
+ *
+ *   app.use( boxExpressUpload() )
+ *   app.use( boxExpressUpload( { dest: expandPath( "./uploads" ), limit: 5242880 } ) )
+ */
+@BoxBIF
+class {
+
+	function invoke( options = {} ) {
+		return new bxModules.boxexpress.models.middleware.Multipart().upload( options )
+	}
+
+}

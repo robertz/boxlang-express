@@ -27,8 +27,8 @@ app.listen( 3000, ( port ) => {
 module system the moment BoxExpress loads — no `new` or namespace needed. It's
 just a thin wrapper: `new bxModules.boxexpress.models.BoxExpress()` still
 works identically if you'd rather be explicit about where it comes from. The
-three built-in middleware factories get the same treatment —
-`boxExpressJSON()`, `boxExpressUrlencoded()`, `boxExpressStatic()` (see
+built-in middleware factories get the same treatment — `boxExpressJSON()`,
+`boxExpressUrlencoded()`, `boxExpressStatic()`, `boxExpressUpload()` (see
 [Middleware](#middleware) below) — but `Router` is only reachable via
 `new bxModules.boxexpress.models.Router()`, since Express doesn't give
 `Router` its own top-level global either.
@@ -166,11 +166,40 @@ directly can forge their reported IP.
 `res.status(code)`, `res.set(name,val)` / `res.header(...)`, `res.type(mime)`,
 `res.send(data)`, `res.json(data)`, `res.sendStatus(code)`,
 `res.redirect(url, code=302)`, `res.cookie(name,val,options)`,
-`res.sendBytes(bytes, contentType)`, `res.end(data)`, `res.render(view, data)`.
+`res.sendBytes(bytes, contentType)`, `res.sendFile(path, options)`,
+`res.download(path, filename)`, `res.end(data)`, `res.render(view, data)`.
 
 Calling a second terminal method (`send`/`json`/`redirect`/`end`/`sendBytes`/
-`render`) on the same response throws — mirrors Express's "headers already
-sent".
+`sendFile`/`download`/`render`) on the same response throws — mirrors
+Express's "headers already sent".
+
+`res.sendFile(path, options)` streams a file from disk, guessing its
+`Content-Type` from the extension (override with `options.contentType`).
+`res.download(path, filename)` is the same thing but always sets
+`Content-Disposition: attachment`, so the browser saves it instead of
+rendering it inline — `filename` overrides the name it's saved as (defaults
+to the source file's own name):
+
+```js
+app.get( "/report", ( req, res ) => {
+	res.sendFile( expandPath( "./reports/latest.pdf" ) )     // renders inline
+} )
+
+app.get( "/report/download", ( req, res ) => {
+	res.download( expandPath( "./reports/latest.pdf" ), "report.pdf" )
+} )
+```
+
+If the path is built from user input, pass `options.root` — `sendFile()`
+then resolves the path against that root and rejects (throws) anything that
+resolves outside it, the same real-path containment check `StaticFiles` and
+`render()` use:
+
+```js
+app.get( "/files/:name", ( req, res ) => {
+	res.sendFile( req.params.name, { root: expandPath( "./public" ) } )
+} )
+```
 
 ### Views (`res.render`)
 
@@ -272,6 +301,43 @@ A body over the limit gets a `413` response and never reaches your route
 handler. `boxExpressStatic()`/`StaticFiles.serve()` resolve requested files
 against the real (symlink-resolved) served directory, so a symlink placed
 inside it can't be used to read files from outside it.
+
+#### File uploads (`boxExpressUpload()` / `Multipart`)
+
+Opt-in `multipart/form-data` parsing, mirroring [multer](https://github.com/expressjs/multer)'s
+basic usage:
+
+```js
+app.use( boxExpressUpload() )                                       // in-memory only
+app.use( boxExpressUpload( { dest: expandPath( "./uploads" ) } ) )  // also saved to disk
+```
+
+or via the underlying class:
+
+```js
+multipart = new bxModules.boxexpress.models.middleware.Multipart()
+app.use( multipart.upload( { dest: expandPath( "./uploads" ) } ) )
+```
+
+Non-file fields land in `req.body`, same as the other body parsers. File
+fields land in `req.files`, a struct keyed by field name, each value an
+**array** of file structs (a field can carry more than one file):
+
+```js
+app.post( "/upload", boxExpressUpload( { dest: expandPath( "./uploads" ) } ), ( req, res ) => {
+	res.json( { note: req.body.note, avatar: req.files.avatar[ 1 ] } )
+	// avatar: { fieldName, filename, contentType, size, buffer, path }
+} )
+```
+
+Every file struct always has `fieldName`, `filename` (the name the client
+sent — never trust it as a disk path), `contentType`, `size`, and `buffer`
+(the raw bytes, in memory). `path` is only present when `dest` was given —
+the file is saved there under a generated UUID name, never the client's own
+filename, so there's nothing for a malicious filename to path-traverse or
+collide with. Like the other parsers, the whole body is capped at 10MB by
+default — override with `{ limit: bytes }`; an oversized upload gets a `413`
+before your handler runs.
 
 If no route matches, a default `404` JSON response is sent. If a handler
 throws (or calls `next(err)`) and no error-handling middleware is registered,

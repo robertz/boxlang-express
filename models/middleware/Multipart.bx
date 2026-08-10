@@ -1,0 +1,182 @@
+/**
+ * Opt-in multipart/form-data parsing middleware, mirroring multer's basic usage.
+ * Usage:
+ *   multipart = new middleware.Multipart()
+ *   app.use( multipart.upload() )                        // in-memory buffers only
+ *   app.use( multipart.upload( { dest: expandPath( "./uploads" ) } ) )  // also saved to disk
+ *
+ * Populates req.body with the non-file fields and req.files with a struct keyed by
+ * field name, each value an array of file structs:
+ *   { fieldName, filename, contentType, size, buffer, path (only if dest was given) }
+ *
+ * The client-supplied filename is never used to build a disk path — saved files get
+ * a generated name, sidestepping path-traversal/collision entirely.
+ */
+class {
+
+	function upload( options = {} ) {
+		var limit = options.limit ?: 10485760
+		var dest = options.dest ?: javacast( "null", "" )
+
+		return function( req, res, next ) {
+			var contentType = req.headers[ "Content-Type" ] ?: ""
+			if ( !contentType.findNoCase( "multipart/form-data" ) ) {
+				return next()
+			}
+
+			var boundary = _extractBoundary( contentType )
+			if ( isNull( boundary ) ) {
+				return next( { message: "Missing multipart boundary", type: "BoxExpress.MultipartError" } )
+			}
+
+			var inStream = req.rawExchange().getRequestBody()
+			var bodyBytes = inStream.readNBytes( limit + 1 )
+			if ( bodyBytes.len() > limit ) {
+				return res.status( 413 ).json( { error: true, message: "Upload exceeds the #limit#-byte limit" } )
+			}
+
+			var parsed = ""
+			try {
+				parsed = _parseMultipart( bodyBytes, boundary )
+			} catch ( any e ) {
+				return next( e )
+			}
+
+			req.body = parsed.fields
+
+			if ( !isNull( dest ) ) {
+				_persistFiles( parsed.files, dest )
+			}
+			req.files = parsed.files
+
+			next()
+		}
+	}
+
+	private function _extractBoundary( contentType ) {
+		var marker = "boundary="
+		var pos = contentType.findNoCase( marker )
+		if ( !pos ) {
+			return javacast( "null", "" )
+		}
+		var boundary = contentType.right( contentType.len() - pos - marker.len() + 1 )
+		boundary = boundary.listFirst( ";" )
+		if ( boundary.left( 1 ) == '"' && boundary.right( 1 ) == '"' ) {
+			boundary = boundary.mid( 2, boundary.len() - 2 )
+		}
+		return boundary
+	}
+
+	/**
+	 * Splits the raw body on the multipart boundary using ISO-8859-1, which maps every
+	 * byte 0-255 to exactly one char and back losslessly — safe for locating boundary/
+	 * header text without corrupting binary part bodies, which are re-extracted as bytes
+	 * from the same string.
+	 */
+	private function _parseMultipart( bodyBytes, boundary ) {
+		var content = createObject( "java", "java.lang.String" ).init( bodyBytes, "ISO-8859-1" )
+		var delimiter = "--" & boundary
+		var pattern = createObject( "java", "java.util.regex.Pattern" ).quote( delimiter )
+		var rawParts = content.split( pattern )
+
+		var fields = {}
+		var files = {}
+
+		for ( var i = 1; i <= rawParts.len(); i++ ) {
+			var rawPart = rawParts[ i ]
+
+			if ( !len( rawPart ) || rawPart == "--" || rawPart == "--" & char( 13 ) & char( 10 ) ) {
+				continue
+			}
+
+			var part = rawPart.left( 2 ) == char( 13 ) & char( 10 ) ? rawPart.right( rawPart.len() - 2 ) : rawPart
+			var headerSep = part.find( char( 13 ) & char( 10 ) & char( 13 ) & char( 10 ) )
+			if ( !headerSep ) {
+				continue
+			}
+
+			var headerBlock = part.left( headerSep - 1 )
+			var partBody = part.right( part.len() - headerSep - 3 )
+			if ( partBody.right( 2 ) == char( 13 ) & char( 10 ) ) {
+				partBody = partBody.left( partBody.len() - 2 )
+			}
+
+			var headers = _parsePartHeaders( headerBlock )
+			var disposition = headers[ "content-disposition" ] ?: ""
+			if ( !len( disposition ) ) {
+				continue
+			}
+
+			var fieldName = _extractDispositionParam( disposition, "name" )
+			var filename = _extractDispositionParam( disposition, "filename" )
+
+			if ( !isNull( filename ) ) {
+				if ( !len( filename ) ) {
+					continue
+				}
+				var fileBytes = partBody.getBytes( "ISO-8859-1" )
+				var fileStruct = {
+					fieldName: fieldName,
+					filename: filename,
+					contentType: headers[ "content-type" ] ?: "application/octet-stream",
+					size: fileBytes.len(),
+					buffer: fileBytes
+				}
+				if ( isNull( files[ fieldName ] ) ) {
+					files[ fieldName ] = []
+				}
+				files[ fieldName ].append( fileStruct )
+			} else {
+				fields[ fieldName ] = createObject( "java", "java.lang.String" ).init( partBody.getBytes( "ISO-8859-1" ), "UTF-8" )
+			}
+		}
+
+		return { fields: fields, files: files }
+	}
+
+	private function _parsePartHeaders( headerBlock ) {
+		var headers = {}
+		for ( var line in headerBlock.listToArray( char( 13 ) & char( 10 ) ) ) {
+			var colonPos = line.find( ":" )
+			if ( colonPos ) {
+				var key = line.left( colonPos - 1 ).trim().lcase()
+				var value = line.right( line.len() - colonPos ).trim()
+				headers[ key ] = value
+			}
+		}
+		return headers
+	}
+
+	private function _extractDispositionParam( disposition, paramName ) {
+		var marker = paramName & '="'
+		var pos = disposition.findNoCase( marker )
+		if ( !pos ) {
+			return javacast( "null", "" )
+		}
+		var rest = disposition.right( disposition.len() - pos - marker.len() + 1 )
+		var endPos = rest.find( '"' )
+		if ( !endPos ) {
+			return javacast( "null", "" )
+		}
+		return rest.left( endPos - 1 )
+	}
+
+	private function _persistFiles( files, dest ) {
+		var destDir = createObject( "java", "java.io.File" ).init( dest )
+		if ( !destDir.exists() ) {
+			destDir.mkdirs()
+		}
+		var destPath = destDir.getCanonicalFile().toPath()
+
+		for ( var fieldName in files ) {
+			for ( var fileStruct in files[ fieldName ] ) {
+				var ext = listLen( fileStruct.filename, "." ) > 1 ? "." & listLast( fileStruct.filename, "." ) : ""
+				var generatedName = createObject( "java", "java.util.UUID" ).randomUUID().toString() & ext
+				var outPath = destPath.resolve( generatedName )
+				createObject( "java", "java.nio.file.Files" ).write( outPath, fileStruct.buffer )
+				fileStruct.path = outPath.toString()
+			}
+		}
+	}
+
+}

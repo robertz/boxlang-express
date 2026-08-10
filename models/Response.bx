@@ -109,6 +109,78 @@ class {
 	}
 
 	/**
+	 * Send a file from disk. Any path is allowed (unlike static middleware, this is
+	 * driven by server-side route code, not user-supplied request paths) but a
+	 * root-relative escape check still runs when options.root is given, so a caller
+	 * building the path from user input (e.g. req.params) gets the same containment
+	 * guarantee as express.static().
+	 */
+	function sendFile( filePath, options = {} ) {
+		var target = filePath
+
+		if ( !isNull( options.root ) ) {
+			var rootPath = createObject( "java", "java.io.File" ).init( options.root ).getCanonicalFile().toPath()
+			var candidate = rootPath.resolve( filePath ).normalize()
+			var realRoot = ""
+			var realCandidate = ""
+			try {
+				realRoot = rootPath.toRealPath()
+				realCandidate = candidate.toRealPath()
+			} catch ( any e ) {
+				throw( message = "File not found: #filePath#", type = "BoxExpress.FileNotFound" )
+			}
+			if ( !realCandidate.startsWith( realRoot ) ) {
+				throw( message = "Invalid file path: #filePath#", type = "BoxExpress.InvalidFilePath" )
+			}
+			target = realCandidate.toString()
+		}
+
+		var fileObj = createObject( "java", "java.io.File" ).init( target )
+		if ( !fileObj.exists() || !fileObj.isFile() ) {
+			throw( message = "File not found: #filePath#", type = "BoxExpress.FileNotFound" )
+		}
+
+		var contentType = options.contentType ?: _guessMimeType( fileObj.getName() )
+		var bytes = createObject( "java", "java.nio.file.Files" ).readAllBytes( fileObj.toPath() )
+
+		type( contentType )
+		if ( options.download ?: false ) {
+			var downloadName = !isNull( options.filename ) ? options.filename : fileObj.getName()
+			set( "Content-Disposition", 'attachment; filename="#downloadName#"' )
+		}
+
+		return _end( bytes )
+	}
+
+	/**
+	 * Force-download variant of sendFile() — always sets Content-Disposition: attachment,
+	 * defaulting the downloaded filename to the source file's own name.
+	 */
+	function download( filePath, filename ) {
+		var options = { download: true }
+		if ( !isNull( filename ) ) {
+			options.filename = filename
+		}
+		return sendFile( filePath, options )
+	}
+
+	private function _guessMimeType( fileName ) {
+		var mimeTypes = {
+			html: "text/html; charset=utf-8", htm: "text/html; charset=utf-8",
+			css: "text/css; charset=utf-8", js: "text/javascript; charset=utf-8",
+			json: "application/json; charset=utf-8", txt: "text/plain; charset=utf-8",
+			png: "image/png", jpg: "image/jpeg", jpeg: "image/jpeg", gif: "image/gif",
+			svg: "image/svg+xml", ico: "image/x-icon",
+			woff: "font/woff", woff2: "font/woff2",
+			pdf: "application/pdf", zip: "application/zip",
+			csv: "text/csv; charset=utf-8", xml: "application/xml; charset=utf-8",
+			mp4: "video/mp4", mp3: "audio/mpeg"
+		}
+		var ext = listLast( fileName, "." ).lcase()
+		return mimeTypes[ ext ] ?: "application/octet-stream"
+	}
+
+	/**
 	 * Render a view from the configured views directory (app.set("views", dir)) and
 	 * send it as the response body. Supports two engines, picked by the view's file
 	 * extension:

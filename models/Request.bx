@@ -14,6 +14,7 @@ class {
 		this.query = _parseQueryString( uri.getQuery() )
 		this.params = {}
 		this.body = {}
+		this.files = {}
 		this.headers = _buildHeaderStruct( exchange.getRequestHeaders() )
 		this.cookies = _parseCookies( this.headers[ "Cookie" ] ?: "" )
 		this.ip = _resolveIp( exchange, settings )

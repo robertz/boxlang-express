@@ -13,6 +13,8 @@ class extends="testbox.system.BaseSpec" {
 
 		var bodyParsers = new "../../models/middleware/BodyParsers"()
 		var staticFiles = new "../../models/middleware/StaticFiles"()
+		var multipart = new "../../models/middleware/Multipart"()
+		variables.uploadDest = expandPath( "tests/fixtures/uploads" )
 
 		// expandPath() resolves relative to the top-level entry script (run-tests.bxs,
 		// at the project root), not relative to this class file — hence the project-root-
@@ -55,6 +57,18 @@ class extends="testbox.system.BaseSpec" {
 			res.sendStatus( 404 )
 		} )
 
+		variables.app.get( "/download", ( req, res ) => {
+			res.download( expandPath( "tests/fixtures/public/hello.txt" ), "greeting.txt" )
+		} )
+
+		variables.app.get( "/send-file", ( req, res ) => {
+			res.sendFile( expandPath( "tests/fixtures/public/hello.txt" ) )
+		} )
+
+		variables.app.post( "/upload", multipart.upload( { dest: variables.uploadDest } ), ( req, res ) => {
+			res.json( { fields: req.body, files: req.files } )
+		} )
+
 		variables.app.get( "/greet/:name", ( req, res ) => {
 			res.render( "greeting", { name: req.params.name } )
 		} )
@@ -87,6 +101,9 @@ class extends="testbox.system.BaseSpec" {
 
 	function afterAll() {
 		variables.app.close()
+		if ( directoryExists( variables.uploadDest ) ) {
+			directoryDelete( variables.uploadDest, true )
+		}
 	}
 
 	function run() {
@@ -124,6 +141,35 @@ class extends="testbox.system.BaseSpec" {
 				var result = variables.client.get( variables.baseUrl & "/public/hello.txt" )
 				expect( result.statusCode ).toBe( 200 )
 				expect( result.body ).toInclude( "static fixture" )
+			} )
+
+			it( "sends a file inline via res.sendFile()", function() {
+				var result = variables.client.get( variables.baseUrl & "/send-file" )
+				expect( result.statusCode ).toBe( 200 )
+				expect( result.body ).toInclude( "static fixture" )
+				expect( result.contentDisposition ).toBe( "" )
+			} )
+
+			it( "sends a file as an attachment via res.download()", function() {
+				var result = variables.client.get( variables.baseUrl & "/download" )
+				expect( result.statusCode ).toBe( 200 )
+				expect( result.body ).toInclude( "static fixture" )
+				expect( result.contentDisposition ).toInclude( 'attachment; filename="greeting.txt"' )
+			} )
+
+			it( "parses a multipart/form-data upload, fields and files alike", function() {
+				var result = variables.client.postMultipart(
+					variables.baseUrl & "/upload",
+					{ note: "hello" },
+					[ { field: "avatar", filename: "avatar.txt", contentType: "text/plain", content: "binary-ish content" } ]
+				)
+				expect( result.statusCode ).toBe( 200 )
+				var parsed = JSONDeserialize( result.body )
+				expect( parsed.fields.note ).toBe( "hello" )
+				expect( parsed.files.avatar[ 1 ].filename ).toBe( "avatar.txt" )
+				expect( parsed.files.avatar[ 1 ].size ).toBe( 18 )
+				expect( fileExists( parsed.files.avatar[ 1 ].path ) ).toBeTrue()
+				expect( fileRead( parsed.files.avatar[ 1 ].path ) ).toBe( "binary-ish content" )
 			} )
 
 			it( "renders a .bxm view", function() {

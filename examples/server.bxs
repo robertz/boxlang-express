@@ -6,6 +6,7 @@
 app = new "../models/BoxExpress"()
 bodyParsers = new "../models/middleware/BodyParsers"()
 staticFiles = new "../models/middleware/StaticFiles"()
+multipart = new "../models/middleware/Multipart"()
 
 app.use( bodyParsers.json() )
 app.use( bodyParsers.urlencoded() )
@@ -37,6 +38,14 @@ app.get( "/boom", ( req, res, next ) => {
 app.get( "/slow", ( req, res ) => {
 	sleep( 1000 )
 	res.json( { slept: 1000 } )
+} )
+
+app.get( "/download", ( req, res ) => {
+	res.download( expandPath( "./public/hello.txt" ) )
+} )
+
+app.post( "/upload", multipart.upload( { dest: expandPath( "./uploads" ) } ), ( req, res ) => {
+	res.json( { fields: req.body, files: req.files } )
 } )
 
 app.get( "/set-cookie", ( req, res ) => {
