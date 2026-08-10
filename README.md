@@ -99,7 +99,7 @@ which matters for a repo whose own scripts live in subdirectories
 
 - `app.get/post/put/patch/delete/all(path, ...handlers)`
 - `app.use(handler)` / `app.use(path, handler)` / `app.use(path, router)`
-- `app.param(name, callback)` — see [Route params](#route-params-approuteparampath) below
+- `app.param(name, callback)` — see [Route params](#route-params-appparamname-callback) below
 - `app.route(path)` — see [Chainable routes](#chainable-routes-approutepath) below
 - `app.set(name, value)` / `app.getSetting(name)`
 - `app.listen(port, callback, options)` — starts the server and blocks the calling thread by default
@@ -150,7 +150,7 @@ registration time rather than silently matching more or less than you'd
 expect. A route registered with no handler function also throws immediately,
 rather than silently registering nothing.
 
-#### Route params (`app.route.param(path)`)
+#### Route params (`app.param(name, callback)`)
 
 `param(name, (req, res, next, value) => {...})` runs once for any matched
 route whose path pattern captures that param name, before the route's own
