@@ -8,8 +8,9 @@
  */
 class {
 
-	function init() {
+	function init( settings = {} ) {
 		variables.stack = []
+		variables.settings = settings
 		return this
 	}
 
@@ -160,12 +161,22 @@ class {
 		next()
 	}
 
+	/**
+	 * The default 500 body hides the real error message unless the app has opted in
+	 * with app.set("env", "development") — an unhandled exception's message (file
+	 * paths, driver errors, internal identifiers, whatever the thrown error happened
+	 * to contain) would otherwise leak straight through to an unauthenticated client.
+	 * The full message is always logged server-side via HttpBridge regardless.
+	 */
 	function _final( err, req, res ) {
 		if ( res.isSent() ) {
 			return
 		}
 		if ( !isNull( err ) ) {
-			res.status( 500 ).json( { error: true, message: _errorMessage( err ) } )
+			var message = ( variables.settings[ "env" ] ?: "" ) == "development"
+				? _errorMessage( err )
+				: "Internal Server Error"
+			res.status( 500 ).json( { error: true, message: message } )
 		} else {
 			res.status( 404 ).json( { error: true, message: "Cannot #req.method# #req.path#" } )
 		}

@@ -8,10 +8,10 @@
 class {
 
 	function init() {
-		variables.router = new Router()
+		this.settings = {}
+		variables.router = new Router( this.settings )
 		variables.httpServer = javacast( "null", "" )
 		variables.running = false
-		this.settings = {}
 		return this
 	}
 

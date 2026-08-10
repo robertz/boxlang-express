@@ -117,6 +117,26 @@ class extends="testbox.system.BaseSpec" {
 				expect( res.getStatusCode() ).toBe( 500 )
 			} )
 
+			it( "hides the real error message from the default 500 body unless app.set('env','development') was used", function() {
+				var router = new "../../models/Router"()
+				var res = _fakeRes()
+				router.get( "/boom", ( req, res ) => {
+					throw( message = "/etc/shadow could not be read", type = "TestError" )
+				} )
+				router.dispatch( _fakeReq( "GET", "/boom" ), res )
+				expect( res.getBody().message ).toBe( "Internal Server Error" )
+			} )
+
+			it( "exposes the real error message from the default 500 body when app.set('env','development') was used", function() {
+				var router = new "../../models/Router"( { env: "development" } )
+				var res = _fakeRes()
+				router.get( "/boom", ( req, res ) => {
+					throw( message = "kaboom", type = "TestError" )
+				} )
+				router.dispatch( _fakeReq( "GET", "/boom" ), res )
+				expect( res.getBody().message ).toBe( "kaboom" )
+			} )
+
 		} )
 	}
 

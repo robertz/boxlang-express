@@ -31,9 +31,11 @@ class {
 		try {
 			variables.router.dispatch( req, res )
 		} catch ( any e ) {
+			println( "[#dateTimeFormat( now(), 'yyyy-MM-dd HH:mm:ss' )#] Unhandled error dispatching #req.method# #req.path#: #e.message#" )
 			if ( !res.isSent() ) {
 				try {
-					res.status( 500 ).json( { error: true, message: e.message } )
+					var message = ( variables.settings[ "env" ] ?: "" ) == "development" ? e.message : "Internal Server Error"
+					res.status( 500 ).json( { error: true, message: message } )
 				} catch ( any ignore ) {
 				}
 			}
