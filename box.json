@@ -1,7 +1,7 @@
 {
     "name":"BoxExpress",
-    "version":"1.0.0",
-    "author":"Rob",
+    "version":"0.1.0",
+    "author":"Robert Zehnder",
     "slug":"boxlang-express",
     "shortDescription":"An Express.js-style web framework for BoxLang",
     "type":"boxlang-modules",
@@ -23,7 +23,7 @@
         "moduleName":"boxexpress"
     },
     "private":false,
-    "dependencies":{
+    "devDependencies":{
         "testbox":"^7.0.0+19"
     },
     "installPaths":{

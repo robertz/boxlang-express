@@ -17,7 +17,7 @@ class {
 	/**
 	 * Module version. Keep in sync with box.json.
 	 */
-	this.version = "1.0.0";
+	this.version = "0.1.0";
 
 	/**
 	 * BoxLang mapping for this module. Registered as bxModules.boxexpress
@@ -25,7 +25,7 @@ class {
 	 */
 	this.mapping = "boxexpress";
 
-	this.author = "Rob";
+	this.author = "Robert Zehnder";
 	this.description = "An Express.js-style web framework for BoxLang — routing, middleware, mountable routers, and .bxm view rendering on top of a standalone HttpServer.";
 	this.webURL = "https://github.com/robertz/boxlang-express";
 	this.disabled = false;
