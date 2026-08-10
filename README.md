@@ -110,6 +110,10 @@ long-running process needs to block its own main thread after calling
 `examples/server.bxs`) or the process will exit immediately after starting
 the server.
 
+Every request gets a line on stdout as soon as it's received —
+`[2026-08-10 10:45:41] GET /users/42 127.0.0.1` — there's no setting to turn
+this off yet.
+
 ### Router (mountable sub-app)
 
 Same routing methods as `app`. Create one with `new bxModules.boxexpress.models.Router()` and mount

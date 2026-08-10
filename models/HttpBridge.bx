@@ -18,6 +18,7 @@ class {
 		try {
 			req = new Request( exchange, variables.settings )
 			res = new Response( exchange, variables.settings )
+			println( "[#dateTimeFormat( now(), 'yyyy-MM-dd HH:mm:ss' )#] #req.method# #req.path# #req.ip#" )
 		} catch ( any e ) {
 			try {
 				exchange.sendResponseHeaders( 500, -1 )
