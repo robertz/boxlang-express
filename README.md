@@ -396,9 +396,9 @@ Two more BoxLang-specific things that shaped how these are written:
 ## Scope (v1)
 
 Routing, middleware chaining, mountable routers, params/query parsing, opt-in
-JSON/urlencoded body parsing, static file serving, `.bxm`/Handlebars view
-rendering, and default 404/500 handling. Not included (possible future
-extensions): sessions and multipart file-upload parsing.
+JSON/urlencoded/multipart body parsing, static file serving, file
+upload/download, `.bxm`/Handlebars view rendering, and default 404/500
+handling. Not included (a possible future extension): sessions.
 
 ## A BoxLang gotcha worth knowing
 
