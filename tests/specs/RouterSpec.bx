@@ -29,6 +29,44 @@ class extends="testbox.system.BaseSpec" {
 				expect( capturedId ).toBe( "42" )
 			} )
 
+			it( "runs a registered param() callback before the route handler, once per matched param name", function() {
+				var router = new "../../models/Router"()
+				var order = []
+				router.param( "id", ( req, res, next, value ) => {
+					order.append( "param:" & value )
+					req.params.id = "loaded-" & value
+					next()
+				} )
+				router.get( "/users/:id", ( req, res ) => {
+					order.append( "handler:" & req.params.id )
+				} )
+				router.dispatch( _fakeReq( "GET", "/users/42" ), _fakeRes() )
+				expect( order ).toBe( [ "param:42", "handler:loaded-42" ] )
+			} )
+
+			it( "aborts to error-handling middleware when a param() callback calls next(err)", function() {
+				var router = new "../../models/Router"()
+				var handlerRan = false
+				var caughtMessage = ""
+				router.param( "id", ( req, res, next, value ) => next( { message: "bad id: " & value } ) )
+				router.get( "/users/:id", ( req, res ) => { handlerRan = true } )
+				router.use( ( err, req, res, next ) => { caughtMessage = err.message } )
+				router.dispatch( _fakeReq( "GET", "/users/42" ), _fakeRes() )
+				expect( handlerRan ).toBeFalse()
+				expect( caughtMessage ).toBe( "bad id: 42" )
+			} )
+
+			it( "route(path) chains multiple methods onto one path", function() {
+				var router = new "../../models/Router"()
+				var hits = []
+				router.route( "/widgets" )
+					.get( ( req, res ) => { hits.append( "get" ) } )
+					.post( ( req, res ) => { hits.append( "post" ) } )
+				router.dispatch( _fakeReq( "GET", "/widgets" ), _fakeRes() )
+				router.dispatch( _fakeReq( "POST", "/widgets" ), _fakeRes() )
+				expect( hits ).toBe( [ "get", "post" ] )
+			} )
+
 			it( "matches a trailing wildcard", function() {
 				var router = new "../../models/Router"()
 				var hit = false

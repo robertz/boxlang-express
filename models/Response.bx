@@ -140,6 +140,16 @@ class {
 			throw( message = "File not found: #filePath#", type = "BoxExpress.FileNotFound" )
 		}
 
+		var conditional = new ConditionalGet()
+		var etag = conditional.etagFor( fileObj )
+		set( "ETag", etag )
+		set( "Last-Modified", conditional.lastModifiedHeader( fileObj ) )
+
+		var requestHeaders = variables.exchange.getRequestHeaders()
+		if ( conditional.isNotModified( requestHeaders.getFirst( "If-None-Match" ) ?: "", requestHeaders.getFirst( "If-Modified-Since" ) ?: "", etag, fileObj ) ) {
+			return status( 304 ).end()
+		}
+
 		var contentType = options.contentType ?: _guessMimeType( fileObj.getName() )
 		var bytes = createObject( "java", "java.nio.file.Files" ).readAllBytes( fileObj.toPath() )
 

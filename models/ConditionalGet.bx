@@ -1,0 +1,49 @@
+/**
+ * Shared conditional-GET (ETag / Last-Modified) logic used by StaticFiles.serve()
+ * and Response.sendFile() so a client that already has the current copy of a file
+ * gets a 304 instead of the file being re-sent.
+ */
+class {
+
+	/**
+	 * A weak ETag derived from file size + mtime — cheap (no file read needed) and
+	 * good enough to detect "this exact file on disk changed", same tradeoff the
+	 * Node `send` module (which express.static/res.sendFile use) makes by default.
+	 */
+	function etagFor( file ) {
+		return 'W/"' & file.length() & "-" & file.lastModified() & '"'
+	}
+
+	function lastModifiedHeader( file ) {
+		var instant = createObject( "java", "java.time.Instant" ).ofEpochMilli( file.lastModified() )
+		var zdt = instant.atZone( createObject( "java", "java.time.ZoneOffset" ).UTC )
+		return createObject( "java", "java.time.format.DateTimeFormatter" ).RFC_1123_DATE_TIME.format( zdt )
+	}
+
+	/**
+	 * If-None-Match takes precedence over If-Modified-Since when both are present,
+	 * same as RFC 7232 — a client that supports ETags shouldn't also need date
+	 * comparison to fall back on.
+	 */
+	function isNotModified( ifNoneMatch, ifModifiedSince, etag, file ) {
+		if ( len( ifNoneMatch ) ) {
+			return ifNoneMatch == etag
+		}
+
+		if ( !len( ifModifiedSince ) ) {
+			return false
+		}
+
+		try {
+			var since = createObject( "java", "java.time.ZonedDateTime" ).parse(
+				ifModifiedSince,
+				createObject( "java", "java.time.format.DateTimeFormatter" ).RFC_1123_DATE_TIME
+			)
+			var fileEpochSecond = int( file.lastModified() / 1000 )
+			return fileEpochSecond <= since.toEpochSecond()
+		} catch ( any e ) {
+			return false
+		}
+	}
+
+}

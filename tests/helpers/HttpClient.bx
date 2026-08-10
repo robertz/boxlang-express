@@ -8,6 +8,10 @@ class {
 		return _request( "GET", targetUrl, "", "", true )
 	}
 
+	function getWithHeaders( targetUrl, requestHeaders = {} ) {
+		return _request( "GET", targetUrl, "", "", true, requestHeaders )
+	}
+
 	function post( targetUrl, body = "", contentType = "application/json" ) {
 		return _request( "POST", targetUrl, body, contentType, true )
 	}
@@ -55,10 +59,14 @@ class {
 		return _readResponse( conn )
 	}
 
-	private function _request( method, targetUrl, body, contentType, followRedirects ) {
+	private function _request( method, targetUrl, body, contentType, followRedirects, requestHeaders = {} ) {
 		var conn = createObject( "java", "java.net.URI" ).init( targetUrl ).toURL().openConnection()
 		conn.setRequestMethod( method )
 		conn.setInstanceFollowRedirects( followRedirects )
+
+		for ( var headerName in requestHeaders ) {
+			conn.setRequestProperty( headerName, requestHeaders[ headerName ] )
+		}
 
 		if ( len( body ) ) {
 			conn.setDoOutput( true )
@@ -88,7 +96,9 @@ class {
 			contentType: conn.getContentType() ?: "",
 			location: conn.getHeaderField( "Location" ) ?: "",
 			setCookie: conn.getHeaderField( "Set-Cookie" ) ?: "",
-			contentDisposition: conn.getHeaderField( "Content-Disposition" ) ?: ""
+			contentDisposition: conn.getHeaderField( "Content-Disposition" ) ?: "",
+			etag: conn.getHeaderField( "ETag" ) ?: "",
+			lastModified: conn.getHeaderField( "Last-Modified" ) ?: ""
 		}
 	}
 

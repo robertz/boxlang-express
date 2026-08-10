@@ -11,6 +11,7 @@ class {
 	function init( settings = {} ) {
 		variables.stack = []
 		variables.settings = settings
+		variables.paramHandlers = {}
 		return this
 	}
 
@@ -36,6 +37,36 @@ class {
 
 	function all( path ) {
 		return _addRoute( "ALL", path, _extraHandlers( arguments ) )
+	}
+
+	/**
+	 * Registers a param-preprocessing callback: param( "id", (req, res, next, value) => {...} ).
+	 * Runs once per matched route whose pattern captures that param name, before the
+	 * route's own handler(s) — same idea as Express's app.param(). Call next(err) to
+	 * abort with an error, or next() to continue into the route handler.
+	 */
+	function param( name, callback ) {
+		variables.paramHandlers[ name ] = callback
+		return this
+	}
+
+	/**
+	 * route( path ) returns a chainable builder scoped to a single path:
+	 *   router.route( "/users/:id" ).get( getHandler ).put( putHandler ).delete( deleteHandler )
+	 * Equivalent to calling router.get/put/delete(path, handler) separately — sugar only.
+	 */
+	function route( path ) {
+		var self = this
+		var builder = {}
+
+		builder.get = function() { self._addRoute( "GET", path, _routeHandlers( arguments ) ); return builder }
+		builder.post = function() { self._addRoute( "POST", path, _routeHandlers( arguments ) ); return builder }
+		builder.put = function() { self._addRoute( "PUT", path, _routeHandlers( arguments ) ); return builder }
+		builder.patch = function() { self._addRoute( "PATCH", path, _routeHandlers( arguments ) ); return builder }
+		builder.delete = function() { self._addRoute( "DELETE", path, _routeHandlers( arguments ) ); return builder }
+		builder.all = function() { self._addRoute( "ALL", path, _routeHandlers( arguments ) ); return builder }
+
+		return builder
 	}
 
 	/**
@@ -151,6 +182,26 @@ class {
 				return
 			}
 
+			var pendingParams = []
+			for ( var paramName in matchResult.params ) {
+				if ( !isNull( variables.paramHandlers[ paramName ] ) ) {
+					pendingParams.append( paramName )
+				}
+			}
+
+			if ( pendingParams.len() ) {
+				return self._runParamHandlers( pendingParams, 1, req, res, function( paramErr ) {
+					if ( !isNull( paramErr ) ) {
+						return next( paramErr )
+					}
+					try {
+						layer.handler( req, res, next )
+					} catch ( any e ) {
+						next( e )
+					}
+				} )
+			}
+
 			try {
 				layer.handler( req, res, next )
 			} catch ( any e ) {
@@ -159,6 +210,33 @@ class {
 		}
 
 		next()
+	}
+
+	/**
+	 * Runs registered param() callbacks in sequence for a matched route, one per
+	 * captured param name that has a handler — each callback's next(err) either moves
+	 * on to the next pending param or (with an error) aborts straight to doneFn.
+	 */
+	function _runParamHandlers( names, position, req, res, doneFn ) {
+		if ( position > names.len() ) {
+			return doneFn( javacast( "null", "" ) )
+		}
+
+		var name = names[ position ]
+		var handler = variables.paramHandlers[ name ]
+		var value = req.params[ name ]
+		var self = this
+
+		try {
+			handler( req, res, function( err ) {
+				if ( !isNull( err ) ) {
+					return doneFn( err )
+				}
+				self._runParamHandlers( names, position + 1, req, res, doneFn )
+			}, value )
+		} catch ( any e ) {
+			doneFn( e )
+		}
 	}
 
 	/**
@@ -190,7 +268,7 @@ class {
 		}
 	}
 
-	private function _addRoute( method, path, handlers ) {
+	function _addRoute( method, path, handlers ) {
 		if ( handlers.len() == 0 ) {
 			throw(
 				message = "#method# ""#path#"" was registered with no handler function",
@@ -214,6 +292,14 @@ class {
 	private function _extraHandlers( argScope ) {
 		var handlers = []
 		for ( var i = 2; i <= argScope.count(); i++ ) {
+			handlers.append( argScope[ i ] )
+		}
+		return handlers
+	}
+
+	private function _routeHandlers( argScope ) {
+		var handlers = []
+		for ( var i = 1; i <= argScope.count(); i++ ) {
 			handlers.append( argScope[ i ] )
 		}
 		return handlers

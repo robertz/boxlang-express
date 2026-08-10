@@ -17,9 +17,21 @@ app.get( "/", ( req, res ) => {
 	res.send( "Hello from BoxExpress!" )
 } )
 
+// Runs once for any matched route with an :id param, before that route's own
+// handler — good for a shared lookup/validation step.
+app.param( "id", ( req, res, next, value ) => {
+	req.params.id = value.trim()
+	next()
+} )
+
 app.get( "/users/:id", ( req, res ) => {
 	res.json( { id: req.params.id, source: "route param" } )
 } )
+
+// Chainable per-path route builder — sugar over app.get/post individually.
+app.route( "/widgets" )
+	.get( ( req, res ) => res.json( { op: "list" } ) )
+	.post( ( req, res ) => res.json( { op: "create", body: req.body } ) )
 
 app.get( "/search", ( req, res ) => {
 	res.json( { query: req.query } )

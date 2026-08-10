@@ -99,6 +99,8 @@ which matters for a repo whose own scripts live in subdirectories
 
 - `app.get/post/put/patch/delete/all(path, ...handlers)`
 - `app.use(handler)` / `app.use(path, handler)` / `app.use(path, router)`
+- `app.param(name, callback)` — see [Route params](#route-params-approuteparampath) below
+- `app.route(path)` — see [Chainable routes](#chainable-routes-approutepath) below
 - `app.set(name, value)` / `app.getSetting(name)`
 - `app.listen(port, callback, options)` — starts the server and blocks the calling thread by default
 - `app.close()` — stops the server, and breaks a blocked `listen()` (from any thread)
@@ -147,6 +149,41 @@ the path (`/files/*`); a `*` anywhere else in the pattern throws at
 registration time rather than silently matching more or less than you'd
 expect. A route registered with no handler function also throws immediately,
 rather than silently registering nothing.
+
+#### Route params (`app.route.param(path)`)
+
+`param(name, (req, res, next, value) => {...})` runs once for any matched
+route whose path pattern captures that param name, before the route's own
+handler(s) run — same idea as Express's `app.param()`. Handy for centralizing
+a lookup/validation step (e.g. loading a record by `:id`) instead of
+repeating it in every handler that has that param:
+
+```js
+app.param( "id", ( req, res, next, value ) => {
+	req.params.id = value.trim()   // normalize, validate, load from a DB, etc.
+	next()                          // or next(err) to jump to error-handling middleware
+} )
+
+app.get( "/users/:id", ( req, res ) => {
+	res.json( { id: req.params.id } )   // already normalized
+} )
+```
+
+Works the same on a standalone `Router` — `router.param(...)`.
+
+#### Chainable routes (`app.route(path)`)
+
+`route(path)` returns a small builder scoped to one path, so multiple
+methods on the same path don't need to repeat it — sugar over calling
+`app.get/post/put/...` individually, nothing more:
+
+```js
+app.route( "/widgets" )
+	.get( ( req, res ) => res.json( { op: "list" } ) )
+	.post( ( req, res ) => res.json( { op: "create" } ) )
+```
+
+Works the same on a standalone `Router` — `router.route(path)`.
 
 ### Request
 
@@ -200,6 +237,14 @@ app.get( "/files/:name", ( req, res ) => {
 	res.sendFile( req.params.name, { root: expandPath( "./public" ) } )
 } )
 ```
+
+Both `sendFile()` and static file serving (`StaticFiles`/`boxExpressStatic()`)
+set `ETag` and `Last-Modified` on every response, and answer a conditional
+request (`If-None-Match` or, failing that, `If-Modified-Since`) with an empty
+`304 Not Modified` instead of re-sending the file — same behavior as
+`express.static()`/`res.sendFile()`, so a browser's normal caching just
+works. The `ETag` is a cheap weak tag (`W/"<size>-<mtime>"`, no file hash),
+so it changes whenever the file's size or modified time changes on disk.
 
 ### Views (`res.render`)
 
@@ -403,6 +448,12 @@ Two more BoxLang-specific things that shaped how these are written:
   rather than `../fixtures/...`.
 
 ## Changelog
+
+**Unreleased**
+- Added `app.param(name, callback)` (Express-style route-param preprocessing),
+  `app.route(path)` (chainable per-path route builder), and conditional GET
+  support (`ETag`/`Last-Modified`/304) for `res.sendFile()` and static file
+  serving.
 
 **0.1.4**
 - **Security fix:** the default `500` error handler echoed the raw exception

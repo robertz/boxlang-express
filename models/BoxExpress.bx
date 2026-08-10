@@ -50,6 +50,15 @@ class {
 		return this
 	}
 
+	function param( name, callback ) {
+		variables.router.param( argumentCollection = arguments )
+		return this
+	}
+
+	function route( path ) {
+		return variables.router.route( argumentCollection = arguments )
+	}
+
 	function set( name, value ) {
 		this.settings[ name ] = value
 		return this

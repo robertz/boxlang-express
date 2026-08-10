@@ -147,11 +147,31 @@ class extends="testbox.system.BaseSpec" {
 				expect( result.body ).toInclude( "static fixture" )
 			} )
 
+			it( "sets ETag/Last-Modified on a static file and sends 304 when If-None-Match matches", function() {
+				var first = variables.client.get( variables.baseUrl & "/public/hello.txt" )
+				expect( first.statusCode ).toBe( 200 )
+				expect( first.etag ).notToBe( "" )
+				expect( first.lastModified ).notToBe( "" )
+
+				var second = variables.client.getWithHeaders( variables.baseUrl & "/public/hello.txt", { "If-None-Match": first.etag } )
+				expect( second.statusCode ).toBe( 304 )
+				expect( second.body ).toBe( "" )
+			} )
+
 			it( "sends a file inline via res.sendFile()", function() {
 				var result = variables.client.get( variables.baseUrl & "/send-file" )
 				expect( result.statusCode ).toBe( 200 )
 				expect( result.body ).toInclude( "static fixture" )
 				expect( result.contentDisposition ).toBe( "" )
+			} )
+
+			it( "sets ETag/Last-Modified on res.sendFile() and sends 304 when If-None-Match matches", function() {
+				var first = variables.client.get( variables.baseUrl & "/send-file" )
+				expect( first.etag ).notToBe( "" )
+
+				var second = variables.client.getWithHeaders( variables.baseUrl & "/send-file", { "If-None-Match": first.etag } )
+				expect( second.statusCode ).toBe( 304 )
+				expect( second.body ).toBe( "" )
 			} )
 
 			it( "sends a file as an attachment via res.download()", function() {
