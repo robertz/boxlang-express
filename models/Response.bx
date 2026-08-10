@@ -146,10 +146,19 @@ class {
 		type( contentType )
 		if ( options.download ?: false ) {
 			var downloadName = !isNull( options.filename ) ? options.filename : fileObj.getName()
-			set( "Content-Disposition", 'attachment; filename="#downloadName#"' )
+			set( "Content-Disposition", 'attachment; filename="#_sanitizeHeaderToken( downloadName )#"' )
 		}
 
 		return _end( bytes )
+	}
+
+	/**
+	 * Strips characters that would let an attacker-controlled filename escape the
+	 * quoted Content-Disposition token (") or inject header-folding whitespace/control
+	 * characters (CR/LF and other control chars) before it's interpolated into a header.
+	 */
+	private function _sanitizeHeaderToken( value ) {
+		return reReplace( value, "[""\r\n\x00-\x1F]", "", "all" )
 	}
 
 	/**

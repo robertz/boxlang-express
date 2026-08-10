@@ -61,6 +61,10 @@ class extends="testbox.system.BaseSpec" {
 			res.download( expandPath( "tests/fixtures/public/hello.txt" ), "greeting.txt" )
 		} )
 
+		variables.app.get( "/download-named", ( req, res ) => {
+			res.download( expandPath( "tests/fixtures/public/hello.txt" ), req.query.filename )
+		} )
+
 		variables.app.get( "/send-file", ( req, res ) => {
 			res.sendFile( expandPath( "tests/fixtures/public/hello.txt" ) )
 		} )
@@ -155,6 +159,12 @@ class extends="testbox.system.BaseSpec" {
 				expect( result.statusCode ).toBe( 200 )
 				expect( result.body ).toInclude( "static fixture" )
 				expect( result.contentDisposition ).toInclude( 'attachment; filename="greeting.txt"' )
+			} )
+
+			it( "strips quote/control characters from a caller-supplied download filename, preventing Content-Disposition parameter injection", function() {
+				var result = variables.client.get( variables.baseUrl & "/download-named?filename=" & urlEncodedFormat( 'x".hi; foo=bar' ) )
+				expect( result.statusCode ).toBe( 200 )
+				expect( result.contentDisposition ).toBe( 'attachment; filename="x.hi; foo=bar"' )
 			} )
 
 			it( "parses a multipart/form-data upload, fields and files alike", function() {
