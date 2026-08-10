@@ -35,21 +35,28 @@ three built-in middleware factories get the same treatment —
 
 ## Install
 
-Not yet published to ForgeBox — for now, either symlink or copy this repo
-into a consuming project's `boxlang_modules/boxexpress/`:
+Published on [ForgeBox](https://www.forgebox.io/) as `boxlang-express`:
+
+```bash
+box install boxlang-express
+```
+
+That drops it into a project's local `boxlang_modules/boxexpress/` (or use
+`box install boxlang-express --system` for the runtime-wide
+`~/.boxlang/modules/`). The mapping (`bxModules.boxexpress`) is registered by
+the BoxLang runtime the moment it discovers the module — but that discovery
+is relative to the **process's current working directory** (no upward
+search), so `boxlang` has to be invoked from the directory containing
+`boxlang_modules/`, same as `node_modules` resolution rules of thumb in
+npm-land.
+
+To develop against a local checkout instead (e.g. to test unreleased
+changes), symlink it in rather than installing from ForgeBox:
 
 ```bash
 mkdir -p boxlang_modules
 ln -s /path/to/boxlang-express boxlang_modules/boxexpress
 ```
-
-The mapping (`bxModules.boxexpress`) is registered by the BoxLang runtime the
-moment it discovers the module — but that discovery is relative to the
-**process's current working directory** (no upward search), so `boxlang` has
-to be invoked from the directory containing `boxlang_modules/`, same as
-`node_modules` resolution rules of thumb in npm-land.
-
-Once published, this would just be `box install boxlang-express`.
 
 ## Hacking on BoxExpress itself
 
