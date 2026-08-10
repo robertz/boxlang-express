@@ -449,7 +449,7 @@ Two more BoxLang-specific things that shaped how these are written:
 
 ## Changelog
 
-**Unreleased**
+**0.1.5**
 - Added `app.param(name, callback)` (Express-style route-param preprocessing),
   `app.route(path)` (chainable per-path route builder), and conditional GET
   support (`ETag`/`Last-Modified`/304) for `res.sendFile()` and static file
