@@ -402,6 +402,39 @@ Two more BoxLang-specific things that shaped how these are written:
   `BoxExpressIntegrationSpec` are project-root-relative (`tests/fixtures/...`)
   rather than `../fixtures/...`.
 
+## Changelog
+
+**0.1.4**
+- **Security fix:** the default `500` error handler echoed the raw exception
+  message straight back to unauthenticated clients — this could leak
+  internal details (absolute server file paths, driver errors, etc.) on any
+  unhandled error, reachable via nothing more than a malformed body sent to
+  the opt-in JSON parser. The default now sends a generic
+  `"Internal Server Error"` message; the real message is still logged to
+  stdout, and still returned in the response if the app opts in with
+  `app.set("env", "development")`.
+
+**0.1.3**
+- **Security fix:** `res.sendFile()`/`res.download()` interpolated a
+  caller-supplied `filename` into the `Content-Disposition` header
+  unescaped, letting an attacker-controlled value (e.g. passed straight
+  through from a query param) break out of the quoted `filename="..."`
+  token and inject extra header parameters. Quote and control characters
+  are now stripped before the value reaches the header.
+- Added file upload (`boxExpressUpload()` / `Multipart` middleware,
+  `req.files`) and download (`res.sendFile()`, `res.download()`) support.
+
+**0.1.2**
+- `listen()` now blocks the calling thread by default (`options.block`),
+  matching Node's effective behavior — no more manual keep-alive loop
+  required in consuming apps.
+- Added request logging: every request gets a line on stdout as soon as
+  it's received.
+
+**0.1.1**
+- Added Handlebars (`.hbs`) view rendering alongside the native `.bxm`
+  engine.
+
 ## Scope (v1)
 
 Routing, middleware chaining, mountable routers, params/query parsing, opt-in
