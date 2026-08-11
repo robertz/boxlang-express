@@ -14,6 +14,7 @@ class extends="testbox.system.BaseSpec" {
 		var bodyParsers = new "../../models/middleware/BodyParsers"()
 		var staticFiles = new "../../models/middleware/StaticFiles"()
 		var multipart = new "../../models/middleware/Multipart"()
+		var session = new "../../models/middleware/Session"()
 		variables.uploadDest = expandPath( "tests/fixtures/uploads" )
 
 		// expandPath() resolves relative to the top-level entry script (run-tests.bxs,
@@ -23,6 +24,7 @@ class extends="testbox.system.BaseSpec" {
 		variables.app = new "../../models/BoxExpress"()
 		variables.app.use( bodyParsers.json() )
 		variables.app.use( "/public", staticFiles.serve( expandPath( "tests/fixtures/public" ) ) )
+		variables.app.use( session.session() )
 		variables.app.set( "views", expandPath( "tests/fixtures/views" ) )
 
 		variables.app.get( "/", ( req, res ) => {
@@ -55,6 +57,16 @@ class extends="testbox.system.BaseSpec" {
 
 		variables.app.get( "/not-found-status", ( req, res ) => {
 			res.sendStatus( 404 )
+		} )
+
+		variables.app.get( "/session-count", ( req, res ) => {
+			req.session.views = ( req.session.views ?: 0 ) + 1
+			res.json( { views: req.session.views, sessionID: req.sessionID } )
+		} )
+
+		variables.app.get( "/session-logout", ( req, res ) => {
+			req.destroySession()
+			res.json( { loggedOut: true } )
 		} )
 
 		variables.app.get( "/download", ( req, res ) => {
@@ -226,6 +238,36 @@ class extends="testbox.system.BaseSpec" {
 			it( "sets a cookie via res.cookie()", function() {
 				var result = variables.client.get( variables.baseUrl & "/set-cookie" )
 				expect( result.setCookie ).toInclude( "sessionId=abc123" )
+			} )
+
+			it( "starts a new session (views=1) when no session cookie is sent", function() {
+				var result = variables.client.get( variables.baseUrl & "/session-count" )
+				expect( JSONDeserialize( result.body ).views ).toBe( 1 )
+				expect( result.setCookie ).toInclude( "connect.sid=" )
+			} )
+
+			it( "persists session data across requests via the session cookie", function() {
+				var first = variables.client.get( variables.baseUrl & "/session-count" )
+				var sessionCookie = listFirst( first.setCookie, ";" )
+
+				var second = variables.client.getWithHeaders( variables.baseUrl & "/session-count", { "Cookie": sessionCookie } )
+				expect( JSONDeserialize( second.body ).views ).toBe( 2 )
+
+				var third = variables.client.getWithHeaders( variables.baseUrl & "/session-count", { "Cookie": sessionCookie } )
+				expect( JSONDeserialize( third.body ).views ).toBe( 3 )
+			} )
+
+			it( "destroys a session via req.destroySession(), clearing the cookie and the stored data", function() {
+				var first = variables.client.get( variables.baseUrl & "/session-count" )
+				var sessionCookie = listFirst( first.setCookie, ";" )
+
+				var logout = variables.client.getWithHeaders( variables.baseUrl & "/session-logout", { "Cookie": sessionCookie } )
+				expect( JSONDeserialize( logout.body ).loggedOut ).toBeTrue()
+				expect( logout.setCookie ).toInclude( "connect.sid=;" )
+				expect( logout.setCookie ).toInclude( "Max-Age=0" )
+
+				var after = variables.client.getWithHeaders( variables.baseUrl & "/session-count", { "Cookie": sessionCookie } )
+				expect( JSONDeserialize( after.body ).views ).toBe( 1 )
 			} )
 
 			it( "redirects via res.redirect()", function() {

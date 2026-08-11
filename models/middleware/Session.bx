@@ -1,0 +1,111 @@
+/**
+ * Cookie-based session middleware, mirroring express-session's default
+ * (MemoryStore) behavior: the cookie carries only an opaque, unguessable
+ * session ID — the actual data lives server-side, keyed by that ID.
+ * Usage:
+ *   session = new middleware.Session()
+ *   app.use( session.session() )
+ *   app.get( "/", ( req, res ) => {
+ *     req.session.views = ( req.session.views ?: 0 ) + 1
+ *     res.json( { views: req.session.views } )
+ *   } )
+ *
+ * Sessions are rolling: every request that passes through this middleware
+ * resets the cookie's and the store entry's expiry to maxAge from now.
+ *
+ * The default store is in-memory (a ConcurrentHashMap on this instance), so
+ * it doesn't survive a restart and isn't shared across processes — fine for
+ * a single-process app, not for a cluster. Pass { store: myStore } with an
+ * object exposing get(id)/set(id, data, maxAge)/destroy(id) to swap in
+ * something durable (Redis, a database, etc).
+ */
+class {
+
+	function init() {
+		variables.entries = createObject( "java", "java.util.concurrent.ConcurrentHashMap" ).init()
+		variables.writesSinceSweep = 0
+		return this
+	}
+
+	function session( options = {} ) {
+		var cookieName = options.name ?: "connect.sid"
+		var maxAge = options.maxAge ?: 86400
+		var cookiePath = options.path ?: "/"
+		var store = options.store ?: this
+
+		return function( req, res, next ) {
+			var sessionId = req.cookies[ cookieName ] ?: ""
+			var data = len( sessionId ) ? store.get( sessionId ) : javacast( "null", "" )
+
+			if ( isNull( data ) ) {
+				sessionId = _generateId()
+				data = {}
+			}
+
+			store.set( sessionId, data, maxAge )
+
+			req.session = data
+			req.sessionID = sessionId
+			req.destroySession = function() {
+				store.destroy( sessionId )
+				res.cookie( cookieName, "", { path: cookiePath, maxAge: 0 } )
+			}
+
+			res.cookie( cookieName, sessionId, {
+				path: cookiePath,
+				maxAge: maxAge,
+				httpOnly: options.httpOnly ?: true,
+				secure: options.secure ?: false,
+				sameSite: options.sameSite ?: "Lax"
+			} )
+
+			next()
+		}
+	}
+
+	function get( sessionId ) {
+		var entry = variables.entries.get( sessionId )
+		if ( isNull( entry ) || entry.expiresAt < _now() ) {
+			return javacast( "null", "" )
+		}
+		return entry.data
+	}
+
+	function set( sessionId, data, maxAge ) {
+		variables.entries.put( sessionId, { data: data, expiresAt: _now() + ( maxAge * 1000 ) } )
+
+		// Cheap amortized cleanup instead of a background thread: every 100th
+		// write sweeps expired entries so an abandoned MemoryStore doesn't
+		// grow unbounded.
+		variables.writesSinceSweep++
+		if ( variables.writesSinceSweep >= 100 ) {
+			variables.writesSinceSweep = 0
+			_sweep()
+		}
+	}
+
+	function destroy( sessionId ) {
+		variables.entries.remove( sessionId )
+	}
+
+	private function _now() {
+		return createObject( "java", "java.lang.System" ).currentTimeMillis()
+	}
+
+	private function _generateId() {
+		var uuidClass = createObject( "java", "java.util.UUID" )
+		var rawId = uuidClass.randomUUID().toString() & uuidClass.randomUUID().toString()
+		return rawId.replace( "-", "", "all" )
+	}
+
+	private function _sweep() {
+		var now = _now()
+		for ( var key in variables.entries.keySet().toArray() ) {
+			var entry = variables.entries.get( key )
+			if ( !isNull( entry ) && entry.expiresAt < now ) {
+				variables.entries.remove( key )
+			}
+		}
+	}
+
+}

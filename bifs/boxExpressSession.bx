@@ -1,0 +1,18 @@
+/**
+ * Global BIF wrapping Session.session() — mirrors express-session's basic usage.
+ *
+ *   app.use( boxExpressSession() )
+ *   app.use( boxExpressSession( { name: "sid", maxAge: 3600 } ) )
+ *
+ * Note: unlike boxExpressUpload()/boxExpressStatic(), the Session instance this
+ * creates holds the in-memory session store itself, so only call this once per
+ * app (each call starts a fresh, empty store).
+ */
+@BoxBIF
+class {
+
+	function invoke( options = {} ) {
+		return new bxModules.boxexpress.models.middleware.Session().session( options )
+	}
+
+}

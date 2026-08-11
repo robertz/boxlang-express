@@ -320,6 +320,7 @@ each with its own global BIF mirroring the Express function of the same name:
 app.use( boxExpressJSON() )        // parses application/json bodies into req.body
 app.use( boxExpressUrlencoded() )  // parses application/x-www-form-urlencoded bodies
 app.use( "/public", boxExpressStatic( expandPath( "./public" ) ) )
+app.use( boxExpressSession() )     // cookie-based sessions, req.session
 ```
 
 Same thing spelled out via the underlying classes, if you'd rather not lean
@@ -383,6 +384,42 @@ filename, so there's nothing for a malicious filename to path-traverse or
 collide with. Like the other parsers, the whole body is capped at 10MB by
 default — override with `{ limit: bytes }`; an oversized upload gets a `413`
 before your handler runs.
+
+#### Sessions (`boxExpressSession()` / `Session`)
+
+Cookie-based sessions, mirroring [express-session](https://github.com/expressjs/session)'s
+default (in-memory) behavior. The cookie carries only an opaque, unguessable
+session ID — the actual data lives server-side, keyed by that ID — and is
+rolling: every request through this middleware resets both the cookie's and
+the stored data's expiry to `maxAge` from now.
+
+```js
+app.use( boxExpressSession() )                                // connect.sid cookie, 24h maxAge
+app.use( boxExpressSession( { name: "sid", maxAge: 3600 } ) )  // custom name, 1h (seconds) maxAge
+
+app.get( "/", ( req, res ) => {
+	req.session.views = ( req.session.views ?: 0 ) + 1
+	res.json( { views: req.session.views } )
+} )
+```
+
+or via the underlying class:
+
+```js
+session = new bxModules.boxexpress.models.middleware.Session()
+app.use( session.session( { maxAge: 3600 } ) )
+```
+
+`req.session` is a plain struct — read and write whatever you like on it, it's
+saved automatically (no explicit `req.session.save()` call, since BoxLang
+structs are references: the same struct instance backs the store entry).
+`req.sessionID` is the current session's ID. Call `req.destroySession()` to
+log a user out — it removes the server-side data and expires the cookie.
+
+The default store is in-memory on the `Session` instance (so it doesn't
+survive a restart and isn't shared across processes) — swap in something
+durable by passing `{ store: myStore }`, an object exposing
+`get(id)` / `set(id, data, maxAge)` / `destroy(id)`.
 
 If no route matches, a default `404` JSON response is sent. If a handler
 throws (or calls `next(err)`) and no error-handling middleware is registered,
@@ -449,6 +486,10 @@ Two more BoxLang-specific things that shaped how these are written:
 
 ## Changelog
 
+**0.1.6**
+- Added cookie-based sessions (`boxExpressSession()` / `Session` middleware,
+  `req.session`, `req.sessionID`, `req.destroySession()`).
+
 **0.1.5**
 - Added `app.param(name, callback)` (Express-style route-param preprocessing),
   `app.route(path)` (chainable per-path route builder), and conditional GET
@@ -490,8 +531,8 @@ Two more BoxLang-specific things that shaped how these are written:
 
 Routing, middleware chaining, mountable routers, params/query parsing, opt-in
 JSON/urlencoded/multipart body parsing, static file serving, file
-upload/download, `.bxm`/Handlebars view rendering, and default 404/500
-handling. Not included (a possible future extension): sessions.
+upload/download, cookie-based sessions, `.bxm`/Handlebars view rendering, and
+default 404/500 handling.
 
 ## A BoxLang gotcha worth knowing
 

@@ -1,6 +1,7 @@
 /**
- * Exercises the four global BIFs (boxExpress, boxExpressJSON, boxExpressUrlencoded,
- * boxExpressStatic) for real — a running server built entirely through the BIFs,
+ * Exercises the global BIFs (boxExpress, boxExpressJSON, boxExpressUrlencoded,
+ * boxExpressStatic, boxExpressUpload, boxExpressSession) for real — a running
+ * server built entirely through the BIFs,
  * not the bxModules.boxexpress.models.* classes directly. These only resolve as
  * global functions once BoxLang has loaded this project as an actual module, which
  * run-tests.bxs sets up via a self-referencing boxlang_modules/boxexpress symlink.
@@ -18,9 +19,15 @@ class extends="testbox.system.BaseSpec" {
 		variables.app.use( boxExpressJSON() )
 		variables.app.use( boxExpressUrlencoded() )
 		variables.app.use( "/public", boxExpressStatic( expandPath( "tests/fixtures/public" ) ) )
+		variables.app.use( boxExpressSession() )
 
 		variables.app.get( "/", ( req, res ) => {
 			res.send( "Hello via BIFs!" )
+		} )
+
+		variables.app.get( "/session-count", ( req, res ) => {
+			req.session.views = ( req.session.views ?: 0 ) + 1
+			res.json( { views: req.session.views } )
 		} )
 
 		variables.app.post( "/echo", ( req, res ) => {
@@ -75,6 +82,15 @@ class extends="testbox.system.BaseSpec" {
 				var result = variables.client.get( variables.baseUrl & "/download" )
 				expect( result.statusCode ).toBe( 200 )
 				expect( result.contentDisposition ).toInclude( "attachment;" )
+			} )
+
+			it( "boxExpressSession() persists session data across requests via the session cookie", function() {
+				var first = variables.client.get( variables.baseUrl & "/session-count" )
+				expect( JSONDeserialize( first.body ).views ).toBe( 1 )
+
+				var sessionCookie = listFirst( first.setCookie, ";" )
+				var second = variables.client.getWithHeaders( variables.baseUrl & "/session-count", { "Cookie": sessionCookie } )
+				expect( JSONDeserialize( second.body ).views ).toBe( 2 )
 			} )
 
 			it( "boxExpressUpload() parses a multipart upload", function() {
