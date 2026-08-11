@@ -486,6 +486,15 @@ Two more BoxLang-specific things that shaped how these are written:
 
 ## Changelog
 
+**0.1.7**
+- **Fix:** `boxExpressStatic()` threw on any request to the mount root
+  (`/`) instead of falling through to `next()`, returning a generic `500`
+  for what should have been the app's own route handler. The middleware
+  stripped the leading slash with `req.path.right( req.path.len() - 1 )`,
+  which becomes `right(0)` for `req.path == "/"` — BoxLang's `right()`
+  throws `"Count cannot be zero"` for a zero count (CF/Lucee just returns
+  `""`). Switched to `mid()`, which handles it correctly.
+
 **0.1.6**
 - Added cookie-based sessions (`boxExpressSession()` / `Session` middleware,
   `req.session`, `req.sessionID`, `req.destroySession()`).
