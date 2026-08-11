@@ -25,7 +25,7 @@ class {
 				return next()
 			}
 
-			var relativePath = req.path.left( 1 ) == "/" ? req.path.right( req.path.len() - 1 ) : req.path
+			var relativePath = req.path.left( 1 ) == "/" ? req.path.mid( 2, req.path.len() - 1 ) : req.path
 			if ( !len( relativePath ) || relativePath.right( 1 ) == "/" ) {
 				relativePath &= indexFile
 			}
