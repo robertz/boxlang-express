@@ -122,9 +122,9 @@ class {
 
 			if ( idx >= stackRef.len() ) {
 				if ( !isNull( finalNext ) ) {
-					finalNext( err )
+					isNull( err ) ? finalNext() : finalNext( err )
 				} else {
-					self._final( err, req, res )
+					isNull( err ) ? self._final( javacast( "null", "" ), req, res ) : self._final( err, req, res )
 				}
 				return
 			}
@@ -137,11 +137,11 @@ class {
 				return next( err )
 			}
 			if ( isNull( err ) && isErrorLayer ) {
-				return next( err )
+				return next()
 			}
 
 			if ( layer.method != "USE" && layer.method != "ALL" && layer.method != req.method ) {
-				return next( err )
+				return isNull( err ) ? next() : next( err )
 			}
 
 			var exactMatch = ( layer.method != "USE" )
@@ -149,7 +149,7 @@ class {
 			var matchResult = _matchPath( layer.pattern.segments, reqSegments, exactMatch )
 
 			if ( !matchResult.matched ) {
-				return next( err )
+				return isNull( err ) ? next() : next( err )
 			}
 
 			for ( var paramName in matchResult.params ) {
@@ -162,7 +162,11 @@ class {
 				req.path = remainder
 				var scopedNext = function( innerErr ) {
 					req.path = savedPath
-					next( innerErr )
+					if ( isNull( innerErr ) ) {
+						next()
+					} else {
+						next( innerErr )
+					}
 				}
 
 				if ( layer.isRouter ) {
