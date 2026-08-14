@@ -1,6 +1,6 @@
 {
     "name":"BoxExpress",
-    "version":"0.1.9",
+    "version":"0.1.10",
     "author":"Robert Zehnder",
     "slug":"boxlang-express",
     "shortDescription":"An Express.js-style web framework for BoxLang",
@@ -27,7 +27,7 @@
         "testbox":"^7.0.0+19"
     },
     "scripts":{
-        "preVersion":"boxlang run-tests.bxs",
+        "preVersion":"!boxlang run-tests.bxs",
         "postVersion":"package set location='robertz/boxlang-express#v`package version`'",
         "postPublish":"!git push --follow-tags"
     },
@@ -40,5 +40,6 @@
         "examples/**",
         "run-tests.bxs",
         "testbox/**"
-    ]
+    ],
+    "location":"robertz/boxlang-express#v0.1.10"
 }
