@@ -509,6 +509,35 @@ Two more BoxLang-specific things that shaped how these are written:
 
 ## Changelog
 
+**0.1.11**
+- Added graceful process shutdown: `listen()` now registers a JVM shutdown
+  hook so Ctrl-C/SIGTERM/normal exit runs `close()` (stopping the
+  `httpServer` and, if running, the `reloadOnChange` watcher) instead of
+  getting torn down mid-flight — previously the watcher's daemon thread
+  could outlive a killed server. `close()` is now idempotent, and a bad
+  port bind is caught and reported with a friendly message plus `exit(1)`
+  instead of a raw stack trace.
+- Added `res.dump(data)` — sends BoxLang's HTML `dump()` view of a variable
+  as the response, round-tripped through a temp file since
+  `dump(format="html")` only ever writes to the process console under
+  BoxExpress's CLI-based `HttpServer`.
+- Added colored console output (`AnsiColor.bx`): the access log gets a gray
+  timestamp, a method colored by verb (`GET`=cyan, `POST`=green,
+  `PUT`/`PATCH`=yellow, `DELETE`=red, everything else=magenta), and a dim
+  IP; the `reloadOnChange` restart notice is cyan; fatal/error lines are
+  red. Respects [`NO_COLOR`](https://no-color.org/) — set it to get plain
+  text, e.g. when piping stdout to a file or log aggregator.
+- Broadened test coverage: `PUT`/`PATCH`/`DELETE`/`all()` routing,
+  `res.header()`/`type()`/`end()`/`sendBytes()`, `req.get()`/
+  `rawExchange()`/`ip()` (including the `trust proxy` `X-Forwarded-For`
+  case), `app.param()`, `res.redirect()` with an explicit status, and
+  `close()` idempotency — plus a new `ProcessLifecycleSpec.bx` covering
+  behavior that needs a real OS process boundary (port-conflict exit code,
+  SIGTERM releasing the socket, `reloadOnChange` actually replacing the
+  process). The test suite's `HttpClient.bx` helper moved from
+  `HttpURLConnection` to `java.net.http.HttpClient`, since the former
+  hard-rejects `PATCH`.
+
 **0.1.10**
 - **Fix:** the router's dispatch loop sometimes called `next()`/`_final()`
   with an explicit `null` error argument on the success path, instead of
