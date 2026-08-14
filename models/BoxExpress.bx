@@ -201,8 +201,17 @@ class {
 	 * relaunch the app, rather than assuming a fixed "boxlang <script>"
 	 * shape — this way it works whatever the entry script is named and
 	 * however it was launched (bvm-managed boxlang, a raw java -jar, custom
-	 * JVM flags, etc). The current server is closed first so the new
-	 * process doesn't fail to bind the same port.
+	 * JVM flags, etc).
+	 *
+	 * pb.start() only has to launch the new OS process — it doesn't wait for
+	 * BoxLang to boot or the new process to bind the port, so it's safe to
+	 * call before close() releases this server. That ordering matters: if
+	 * launching the replacement fails (bad command, a transient OS resource
+	 * limit, whatever), the current server is left running and a clear error
+	 * is logged, rather than close() + exit() already having torn it down
+	 * with nothing left to replace it — previously an uncaught exception
+	 * here (on this daemon thread) silently killed the server with no
+	 * replacement and no visible explanation tying the two together.
 	 */
 	private function _restartProcess() {
 		var info = createObject( "java", "java.lang.ProcessHandle" ).current().info()
@@ -215,13 +224,16 @@ class {
 			command.append( getBaseTemplatePath() )
 		}
 
+		try {
+			var pb = createObject( "java", "java.lang.ProcessBuilder" ).init( command )
+			pb.inheritIO()
+			pb.start()
+		} catch ( any e ) {
+			println( variables.color.red( "[reloadOnChange] Failed to restart: #e.message# — keeping the current server running." ) )
+			return
+		}
+
 		close()
-		sleep( 100 )
-
-		var pb = createObject( "java", "java.lang.ProcessBuilder" ).init( command )
-		pb.inheritIO()
-		pb.start()
-
 		createObject( "java", "java.lang.System" ).exit( 0 )
 	}
 
