@@ -24,6 +24,10 @@ class extends="testbox.system.BaseSpec" {
 		variables.app = new "../../models/BoxExpress"()
 		variables.app.use( bodyParsers.json() )
 		variables.app.use( "/public", staticFiles.serve( expandPath( "tests/fixtures/public" ) ) )
+		// Mounted at the root (no path prefix) like the README's quickstart example —
+		// tests/fixtures/public has no index.html, so every request should fall through
+		// to the routes below via next() rather than erroring.
+		variables.app.use( staticFiles.serve( expandPath( "tests/fixtures/public" ) ) )
 		variables.app.use( session.session() )
 		variables.app.set( "views", expandPath( "tests/fixtures/views" ) )
 
@@ -151,6 +155,12 @@ class extends="testbox.system.BaseSpec" {
 			it( "dispatches into a mounted router", function() {
 				var result = variables.client.get( variables.baseUrl & "/api/ping" )
 				expect( JSONDeserialize( result.body ).pong ).toBeTrue()
+			} )
+
+			it( "falls through to the next handler on the root path when static middleware is mounted with no path prefix", function() {
+				var result = variables.client.get( variables.baseUrl & "/" )
+				expect( result.statusCode ).toBe( 200 )
+				expect( result.body ).toBe( "Hello from BoxExpress!" )
 			} )
 
 			it( "serves a static file", function() {
