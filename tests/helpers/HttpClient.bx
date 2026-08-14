@@ -1,6 +1,10 @@
 /**
- * Minimal test-only HTTP client (java.net.HttpURLConnection) used by integration
+ * Minimal test-only HTTP client (java.net.http.HttpClient) used by integration
  * specs to hit a real running BoxExpress instance and assert on the response.
+ * Uses the JEP 321 client rather than HttpURLConnection because the latter
+ * hard-rejects "Invalid HTTP method: PATCH" (a fixed verb whitelist baked into
+ * sun.net.www.protocol.http.HttpURLConnection) and working around it needs
+ * reflection that's blocked by module encapsulation on modern JDKs anyway.
  */
 class {
 
@@ -18,6 +22,10 @@ class {
 
 	function requestNoRedirect( method, targetUrl ) {
 		return _request( method, targetUrl, "", "", false )
+	}
+
+	function request( method, targetUrl, body = "", contentType = "application/json" ) {
+		return _request( method, targetUrl, body, contentType, true )
 	}
 
 	/**
@@ -47,58 +55,67 @@ class {
 
 		bodyBuf.write( ( "--" & boundary & "--" & crlf ).getBytes( "UTF-8" ) )
 
-		var conn = createObject( "java", "java.net.URI" ).init( targetUrl ).toURL().openConnection()
-		conn.setRequestMethod( "POST" )
-		conn.setInstanceFollowRedirects( true )
-		conn.setDoOutput( true )
-		conn.setRequestProperty( "Content-Type", "multipart/form-data; boundary=" & boundary )
-		var outStream = conn.getOutputStream()
-		outStream.write( bodyBuf.toByteArray() )
-		outStream.close()
+		var httpReq = createObject( "java", "java.net.http.HttpRequest" ).newBuilder()
+			.uri( createObject( "java", "java.net.URI" ).init( targetUrl ) )
+			.header( "Content-Type", "multipart/form-data; boundary=" & boundary )
+			.POST( createObject( "java", "java.net.http.HttpRequest$BodyPublishers" ).ofByteArray( bodyBuf.toByteArray() ) )
+			.build()
 
-		return _readResponse( conn )
+		return _readResponse( _client( true ).send( httpReq, createObject( "java", "java.net.http.HttpResponse$BodyHandlers" ).ofString() ) )
+	}
+
+	private function _client( followRedirects ) {
+		var redirectPolicy = createObject( "java", "java.net.http.HttpClient$Redirect" )
+		return createObject( "java", "java.net.http.HttpClient" ).newBuilder()
+			.followRedirects( followRedirects ? redirectPolicy.NORMAL : redirectPolicy.NEVER )
+			.build()
 	}
 
 	private function _request( method, targetUrl, body, contentType, followRedirects, requestHeaders = {} ) {
-		var conn = createObject( "java", "java.net.URI" ).init( targetUrl ).toURL().openConnection()
-		conn.setRequestMethod( method )
-		conn.setInstanceFollowRedirects( followRedirects )
+		var builder = createObject( "java", "java.net.http.HttpRequest" ).newBuilder()
+			.uri( createObject( "java", "java.net.URI" ).init( targetUrl ) )
 
 		for ( var headerName in requestHeaders ) {
-			conn.setRequestProperty( headerName, requestHeaders[ headerName ] )
+			builder.header( headerName, requestHeaders[ headerName ] )
 		}
+
+		var bodyPublishers = createObject( "java", "java.net.http.HttpRequest$BodyPublishers" )
 
 		if ( len( body ) ) {
-			conn.setDoOutput( true )
-			conn.setRequestProperty( "Content-Type", contentType )
-			var outStream = conn.getOutputStream()
-			outStream.write( body.getBytes( "UTF-8" ) )
-			outStream.close()
+			builder.header( "Content-Type", contentType )
+			builder.method( method, bodyPublishers.ofString( body ) )
+		} else {
+			builder.method( method, bodyPublishers.noBody() )
 		}
 
-		return _readResponse( conn )
+		var response = _client( followRedirects ).send(
+			builder.build(),
+			createObject( "java", "java.net.http.HttpResponse$BodyHandlers" ).ofString()
+		)
+
+		return _readResponse( response )
 	}
 
-	private function _readResponse( conn ) {
-		var statusCode = conn.getResponseCode()
-		var inStream = statusCode >= 400 ? conn.getErrorStream() : conn.getInputStream()
-		var responseBody = ""
+	private function _readResponse( response ) {
+		var responseHeaders = response.headers()
 
-		if ( !isNull( inStream ) ) {
-			var outBuf = createObject( "java", "java.io.ByteArrayOutputStream" ).init()
-			inStream.transferTo( outBuf )
-			responseBody = outBuf.toString( "UTF-8" )
-		}
+		// A response can carry multiple Set-Cookie headers (e.g. the session
+		// middleware's connect.sid alongside a route's own res.cookie() call) —
+		// unlike HttpURLConnection, java.net.http.HttpClient's HttpHeaders doesn't
+		// preserve wire order for firstValue(), so callers need all of them to
+		// reliably find "their" cookie via toInclude().
+		var setCookieValues = responseHeaders.allValues( "Set-Cookie" )
 
 		return {
-			statusCode: statusCode,
-			body: responseBody,
-			contentType: conn.getContentType() ?: "",
-			location: conn.getHeaderField( "Location" ) ?: "",
-			setCookie: conn.getHeaderField( "Set-Cookie" ) ?: "",
-			contentDisposition: conn.getHeaderField( "Content-Disposition" ) ?: "",
-			etag: conn.getHeaderField( "ETag" ) ?: "",
-			lastModified: conn.getHeaderField( "Last-Modified" ) ?: ""
+			statusCode: response.statusCode(),
+			body: response.body(),
+			contentType: responseHeaders.firstValue( "Content-Type" ).orElse( "" ),
+			location: responseHeaders.firstValue( "Location" ).orElse( "" ),
+			setCookie: createObject( "java", "java.lang.String" ).join( char( 10 ), setCookieValues ),
+			contentDisposition: responseHeaders.firstValue( "Content-Disposition" ).orElse( "" ),
+			etag: responseHeaders.firstValue( "ETag" ).orElse( "" ),
+			lastModified: responseHeaders.firstValue( "Last-Modified" ).orElse( "" ),
+			header: responseHeaders.firstValue( "X-Custom" ).orElse( "" )
 		}
 	}
 

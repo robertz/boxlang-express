@@ -75,6 +75,29 @@ class extends="testbox.system.BaseSpec" {
 				expect( hit ).toBeTrue()
 			} )
 
+			it( "matches PUT, PATCH, and DELETE routes", function() {
+				var router = new "../../models/Router"()
+				var hits = []
+				router.put( "/widgets/:id", ( req, res ) => { hits.append( "put:" & req.params.id ) } )
+				router.patch( "/widgets/:id", ( req, res ) => { hits.append( "patch:" & req.params.id ) } )
+				router.delete( "/widgets/:id", ( req, res ) => { hits.append( "delete:" & req.params.id ) } )
+				router.dispatch( _fakeReq( "PUT", "/widgets/1" ), _fakeRes() )
+				router.dispatch( _fakeReq( "PATCH", "/widgets/1" ), _fakeRes() )
+				router.dispatch( _fakeReq( "DELETE", "/widgets/1" ), _fakeRes() )
+				expect( hits ).toBe( [ "put:1", "patch:1", "delete:1" ] )
+			} )
+
+			it( "matches every HTTP method via all()", function() {
+				var router = new "../../models/Router"()
+				var hits = []
+				router.all( "/anything", ( req, res ) => { hits.append( req.method ) } )
+				router.dispatch( _fakeReq( "GET", "/anything" ), _fakeRes() )
+				router.dispatch( _fakeReq( "POST", "/anything" ), _fakeRes() )
+				router.dispatch( _fakeReq( "PUT", "/anything" ), _fakeRes() )
+				router.dispatch( _fakeReq( "DELETE", "/anything" ), _fakeRes() )
+				expect( hits ).toBe( [ "GET", "POST", "PUT", "DELETE" ] )
+			} )
+
 			it( "does not match a different method", function() {
 				var router = new "../../models/Router"()
 				var hit = false

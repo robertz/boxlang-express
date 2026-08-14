@@ -257,6 +257,24 @@ class {
 		return _end( output.getBytes( "UTF-8" ) )
 	}
 
+	/**
+	 * Sends BoxLang's rich HTML dump() view of a variable as the response —
+	 * dump( format = "html" ) only ever writes to the process console under
+	 * BoxExpress's CLI-based HttpServer (there's no per-request page buffer for
+	 * it to land in, even inside res.render()'s bx:savecontent), so this
+	 * round-trips the markup through a temp file to get it into the response
+	 * body instead.
+	 */
+	function dump( data ) {
+		var tmpFile = getTempDirectory() & "boxexpress-dump-" & createUUID() & ".html"
+		dump( var = data, format = "html", output = tmpFile )
+		var dumpHtml = fileRead( tmpFile )
+		fileDelete( tmpFile )
+
+		type( "text/html; charset=utf-8" )
+		return _end( dumpHtml.getBytes( "UTF-8" ) )
+	}
+
 	private function _end( bodyBytes ) {
 		if ( variables.sent ) {
 			throw( message = "Response already sent for this request", type = "BoxExpress.ResponseAlreadySent" )

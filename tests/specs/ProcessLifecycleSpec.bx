@@ -1,0 +1,238 @@
+/**
+ * Process-level lifecycle tests: things that can't be exercised by TestBox's
+ * usual in-process, block=false server (see BoxExpressIntegrationSpec) because
+ * they involve a real OS process boundary — a clean exit on a port conflict
+ * (System.exit(1), which would kill the test runner itself if triggered
+ * in-process), a real SIGTERM releasing the listening socket, and
+ * reloadOnChange actually replacing the running process on a file change.
+ *
+ * Each test spawns `boxlang` as a real subprocess (replaying the current JVM's
+ * own command line, the same trick BoxExpress._restartProcess() uses) against
+ * a small generated .bxs script, and asserts on its stdout/exit code/the
+ * actual TCP port — never on internal state, since these are black-box,
+ * OS-level behaviors.
+ */
+class extends="testbox.system.BaseSpec" {
+
+	function beforeAll() {
+		variables.scratchDir = expandPath( "tests/fixtures/process-lifecycle-scratch" )
+		if ( !directoryExists( variables.scratchDir ) ) {
+			directoryCreate( variables.scratchDir )
+		}
+	}
+
+	function afterAll() {
+		if ( directoryExists( variables.scratchDir ) ) {
+			directoryDelete( variables.scratchDir, true )
+		}
+	}
+
+	function run() {
+		describe( "BoxExpress process lifecycle", function() {
+
+			it( "exits cleanly with a friendly message (not a raw stack trace) when the requested port is already in use", function() {
+				var port = 4401
+				var holderApp = new "../../models/BoxExpress"()
+				holderApp.get( "/", ( req, res ) => res.send( "up" ) )
+				holderApp.listen( port = port, options = { block: false } )
+				sleep( 300 )
+
+				try {
+					var scriptPath = _writeScratchScript( "port-conflict", '
+						app = boxExpress()
+						app.listen( #port# )
+					' )
+					var logPath = scriptPath & ".log"
+					var proc = _spawnBoxlangScript( scriptPath, logPath )
+
+					var exited = proc.waitFor( 10, createObject( "java", "java.util.concurrent.TimeUnit" ).SECONDS )
+					expect( exited ).toBeTrue( "subprocess should have exited within 10s" )
+					expect( proc.exitValue() ).toBe( 1 )
+
+					var logContents = fileRead( logPath )
+					expect( logContents ).toInclude( "already in use" )
+					expect( logContents ).notToInclude( "BoxRuntimeException" )
+					expect( logContents ).notToInclude( "at ortus.boxlang" )
+				} finally {
+					holderApp.close()
+				}
+			} )
+
+			it( "releases the port immediately when the process is sent SIGTERM", function() {
+				var port = 4402
+				var scriptPath = _writeScratchScript( "sigterm-shutdown", '
+					app = boxExpress()
+					app.get( "/", ( req, res ) => res.send( "up" ) )
+					app.listen( #port#, ( p ) => println( "LISTENING_OK" ) )
+				' )
+				var logPath = scriptPath & ".log"
+				var proc = _spawnBoxlangScript( scriptPath, logPath )
+
+				try {
+					var cameUp = _waitUntil( function() {
+						return fileExists( logPath ) && fileRead( logPath ).contains( "LISTENING_OK" )
+					}, 8000 )
+					expect( cameUp ).toBeTrue( "subprocess should have reported LISTENING_OK within 8s" )
+					expect( _isPortFree( port ) ).toBeFalse( "port should be bound while the subprocess is up" )
+
+					proc.destroy() // SIGTERM
+
+					var timeUnit = createObject( "java", "java.util.concurrent.TimeUnit" )
+					var exited = proc.waitFor( 8, timeUnit.SECONDS )
+					expect( exited ).toBeTrue( "subprocess should exit within 8s of SIGTERM" )
+
+					var portFreed = _waitUntil( function() {
+						return _isPortFree( port )
+					}, 3000 )
+					expect( portFreed ).toBeTrue( "port should be released promptly after SIGTERM" )
+				} finally {
+					if ( proc.isAlive() ) {
+						proc.destroyForcibly()
+					}
+				}
+			} )
+
+			it( "reloadOnChange restarts the process and picks up the edited source when a watched file changes", function() {
+				var port = 4403
+				var marker = "reload-test-" & createUUID()
+				var scriptPath = _writeScratchScript( marker, '
+					app = boxExpress()
+					app.set( "reloadOnChange", true )
+					app.get( "/version", ( req, res ) => res.json( { version: 1 } ) )
+					app.listen( #port#, ( p ) => println( "LISTENING_OK" ) )
+				' )
+				var logPath = scriptPath & ".log"
+				var proc = _spawnBoxlangScript( scriptPath, logPath )
+
+				try {
+					var cameUp = _waitUntil( function() {
+						return fileExists( logPath ) && fileRead( logPath ).contains( "LISTENING_OK" )
+					}, 8000 )
+					expect( cameUp ).toBeTrue( "subprocess should have reported LISTENING_OK within 8s" )
+
+					var initial = _httpGetJson( "http://localhost:#port#/version" )
+					expect( initial.version ).toBe( 1 )
+
+					// Rewrite the watched script with a behavior change — this is the
+					// same file FileWatcher registered a watch key for, since it lives
+					// directly in the watched rootDir (the subprocess's working directory).
+					fileWrite( scriptPath, '
+						app = boxExpress()
+						app.set( "reloadOnChange", true )
+						app.get( "/version", ( req, res ) => res.json( { version: 2 } ) )
+						app.listen( #port#, ( p ) => println( "LISTENING_OK" ) )
+					' )
+
+					var reloaded = _waitUntil( function() {
+						try {
+							return _httpGetJson( "http://localhost:#port#/version" ).version == 2
+						} catch ( any e ) {
+							return false // port briefly unbound mid-restart — keep polling
+						}
+					}, 15000, 400 )
+					expect( reloaded ).toBeTrue( "server should serve the updated route within 15s of the file change" )
+
+					var logContents = fileRead( logPath )
+					expect( logContents ).toInclude( "[reloadOnChange]" )
+					expect( logContents ).toInclude( "restarting" )
+				} finally {
+					_destroyAllMatching( marker )
+				}
+			} )
+
+		} )
+	}
+
+	private function _writeScratchScript( name, content ) {
+		var scriptPath = variables.scratchDir & "/" & name & "-" & createUUID() & ".bxs"
+		fileWrite( scriptPath, content )
+		return scriptPath
+	}
+
+	/**
+	 * Spawns `boxlang <scriptPath>` by replaying the current JVM's own command
+	 * line with the trailing script argument swapped out — the same approach
+	 * BoxExpress._restartProcess() uses — so this works with however the test
+	 * suite itself was launched (bvm-managed boxlang, a raw java invocation,
+	 * custom JVM flags) without hardcoding a "boxlang" executable path.
+	 */
+	private function _spawnBoxlangScript( scriptPath, logPath ) {
+		var info = createObject( "java", "java.lang.ProcessHandle" ).current().info()
+		var command = []
+		command.append( info.command().isPresent() ? info.command().get() : "boxlang" )
+
+		if ( info.arguments().isPresent() ) {
+			var currentArgs = info.arguments().get()
+			for ( var i = 1; i < currentArgs.length; i++ ) {
+				command.append( currentArgs[ i ] )
+			}
+		}
+		command.append( scriptPath )
+
+		var pb = createObject( "java", "java.lang.ProcessBuilder" ).init( command )
+		pb.redirectOutput( createObject( "java", "java.io.File" ).init( logPath ) )
+		pb.redirectErrorStream( true )
+		return pb.start()
+	}
+
+	private function _waitUntil( checkFn, timeoutMs, intervalMs = 200 ) {
+		var start = getTickCount()
+		while ( getTickCount() - start < timeoutMs ) {
+			if ( checkFn() ) {
+				return true
+			}
+			sleep( intervalMs )
+		}
+		return false
+	}
+
+	private function _isPortFree( port ) {
+		try {
+			var socket = createObject( "java", "java.net.ServerSocket" ).init( port )
+			socket.close()
+			return true
+		} catch ( any e ) {
+			return false
+		}
+	}
+
+	private function _httpGetJson( targetUrl ) {
+		var httpClient = createObject( "java", "java.net.http.HttpClient" ).newHttpClient()
+		var req = createObject( "java", "java.net.http.HttpRequest" ).newBuilder()
+			.uri( createObject( "java", "java.net.URI" ).init( targetUrl ) )
+			.GET()
+			.build()
+		var response = httpClient.send( req, createObject( "java", "java.net.http.HttpResponse$BodyHandlers" ).ofString() )
+		return JSONDeserialize( response.body() )
+	}
+
+	/**
+	 * reloadOnChange replaces the process (close the old one, spawn a new one,
+	 * System.exit(0)) — our held Process handle for the *original* subprocess
+	 * exits along the way, orphaning the replacement (reparented to the OS,
+	 * same as any detached dev-server process). We can't reach it via the old
+	 * Process object, so find it by its unique marker in the command line
+	 * instead of relying on a parent/child handle.
+	 */
+	private function _destroyAllMatching( marker ) {
+		try {
+			var allProcs = createObject( "java", "java.lang.ProcessHandle" ).allProcesses()
+				.toArray()
+
+			for ( var i = 1; i <= arrayLen( allProcs ); i++ ) {
+				var ph = allProcs[ i ]
+				try {
+					var cmdLine = ph.info().commandLine()
+					if ( cmdLine.isPresent() && cmdLine.get().contains( marker ) ) {
+						ph.destroyForcibly()
+					}
+				} catch ( any e ) {
+					// process may have exited between enumeration and inspection — ignore
+				}
+			}
+		} catch ( any e ) {
+			// best-effort cleanup only
+		}
+	}
+
+}

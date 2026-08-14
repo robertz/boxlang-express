@@ -89,6 +89,70 @@ class extends="testbox.system.BaseSpec" {
 			res.json( { fields: req.body, files: req.files } )
 		} )
 
+		variables.app.get( "/dump-test", ( req, res ) => {
+			res.dump( { name: "Ada", tags: [ "a", "b" ] } )
+		} )
+
+		variables.app.put( "/items/:id", ( req, res ) => {
+			res.json( { updated: req.params.id, body: req.body } )
+		} )
+
+		variables.app.patch( "/items/:id", ( req, res ) => {
+			res.json( { patched: req.params.id } )
+		} )
+
+		variables.app.delete( "/items/:id", ( req, res ) => {
+			res.json( { deleted: req.params.id } )
+		} )
+
+		variables.app.all( "/any-method", ( req, res ) => {
+			res.send( "matched: " & req.method )
+		} )
+
+		variables.app.get( "/header-test", ( req, res ) => {
+			res.header( "X-Custom", "yes" ).send( "ok" )
+		} )
+
+		variables.app.get( "/type-test", ( req, res ) => {
+			res.type( "application/xml" ).send( "<x/>" )
+		} )
+
+		variables.app.get( "/end-test", ( req, res ) => {
+			res.end()
+		} )
+
+		variables.app.get( "/end-test-body", ( req, res ) => {
+			res.end( "bye" )
+		} )
+
+		variables.app.get( "/bytes-test", ( req, res ) => {
+			res.sendBytes( "raw bytes".getBytes( "UTF-8" ), "text/plain; charset=utf-8" )
+		} )
+
+		variables.app.get( "/echo-header", ( req, res ) => {
+			res.json( { got: req.get( "X-Ping" ) ?: "" } )
+		} )
+
+		variables.app.get( "/raw-exchange-test", ( req, res ) => {
+			res.json( { hasExchange: !isNull( req.rawExchange() ) } )
+		} )
+
+		variables.app.get( "/redirect-permanent", ( req, res ) => {
+			res.redirect( "/", 301 )
+		} )
+
+		variables.app.get( "/ip-test", ( req, res ) => {
+			res.json( { ip: req.ip } )
+		} )
+
+		variables.app.param( "code", ( req, res, next, value ) => {
+			req.params.code = "parented-" & value
+			next()
+		} )
+		variables.app.get( "/parented/:code", ( req, res ) => {
+			res.json( { code: req.params.code } )
+		} )
+
 		variables.app.get( "/greet/:name", ( req, res ) => {
 			res.render( "greeting", { name: req.params.name } )
 		} )
@@ -245,6 +309,14 @@ class extends="testbox.system.BaseSpec" {
 				expect( result.body ).toBe( "Not Found" )
 			} )
 
+			it( "sends dump()'s HTML view of a variable as the response via res.dump()", function() {
+				var result = variables.client.get( variables.baseUrl & "/dump-test" )
+				expect( result.statusCode ).toBe( 200 )
+				expect( result.contentType ).toInclude( "text/html" )
+				expect( result.body ).toInclude( "bx-dump" )
+				expect( result.body ).toInclude( "Ada" )
+			} )
+
 			it( "sets a cookie via res.cookie()", function() {
 				var result = variables.client.get( variables.baseUrl & "/set-cookie" )
 				expect( result.setCookie ).toInclude( "sessionId=abc123" )
@@ -286,6 +358,108 @@ class extends="testbox.system.BaseSpec" {
 				expect( result.location ).toBe( "/" )
 			} )
 
+			it( "redirects with a caller-supplied status code via res.redirect(url, code)", function() {
+				var result = variables.client.requestNoRedirect( "GET", variables.baseUrl & "/redirect-permanent" )
+				expect( result.statusCode ).toBe( 301 )
+				expect( result.location ).toBe( "/" )
+			} )
+
+			it( "routes PUT requests via app.put()", function() {
+				var result = variables.client.request( "PUT", variables.baseUrl & "/items/7", '{"name":"widget"}' )
+				expect( result.statusCode ).toBe( 200 )
+				var parsed = JSONDeserialize( result.body )
+				expect( parsed.updated ).toBe( "7" )
+				expect( parsed.body.name ).toBe( "widget" )
+			} )
+
+			it( "routes PATCH requests via app.patch()", function() {
+				var result = variables.client.request( "PATCH", variables.baseUrl & "/items/7" )
+				expect( result.statusCode ).toBe( 200 )
+				expect( JSONDeserialize( result.body ).patched ).toBe( "7" )
+			} )
+
+			it( "routes DELETE requests via app.delete()", function() {
+				var result = variables.client.request( "DELETE", variables.baseUrl & "/items/7" )
+				expect( result.statusCode ).toBe( 200 )
+				expect( JSONDeserialize( result.body ).deleted ).toBe( "7" )
+			} )
+
+			it( "matches every HTTP method via app.all()", function() {
+				expect( variables.client.get( variables.baseUrl & "/any-method" ).body ).toBe( "matched: GET" )
+				expect( variables.client.post( variables.baseUrl & "/any-method" ).body ).toBe( "matched: POST" )
+				expect( variables.client.request( "PUT", variables.baseUrl & "/any-method" ).body ).toBe( "matched: PUT" )
+				expect( variables.client.request( "DELETE", variables.baseUrl & "/any-method" ).body ).toBe( "matched: DELETE" )
+			} )
+
+			it( "sets an arbitrary response header via res.header()", function() {
+				var result = variables.client.get( variables.baseUrl & "/header-test" )
+				expect( result.statusCode ).toBe( 200 )
+				expect( result.header ).toBe( "yes" )
+			} )
+
+			it( "sets the response content type via res.type()", function() {
+				var result = variables.client.get( variables.baseUrl & "/type-test" )
+				expect( result.contentType ).toInclude( "application/xml" )
+				expect( result.body ).toBe( "<x/>" )
+			} )
+
+			it( "ends the response with no body via res.end()", function() {
+				var result = variables.client.get( variables.baseUrl & "/end-test" )
+				expect( result.statusCode ).toBe( 200 )
+				expect( result.body ).toBe( "" )
+			} )
+
+			it( "ends the response with a body via res.end(data)", function() {
+				var result = variables.client.get( variables.baseUrl & "/end-test-body" )
+				expect( result.body ).toBe( "bye" )
+			} )
+
+			it( "sends raw bytes with an explicit content type via res.sendBytes()", function() {
+				var result = variables.client.get( variables.baseUrl & "/bytes-test" )
+				expect( result.statusCode ).toBe( 200 )
+				expect( result.contentType ).toInclude( "text/plain" )
+				expect( result.body ).toBe( "raw bytes" )
+			} )
+
+			it( "reads an arbitrary request header via req.get()", function() {
+				var result = variables.client.getWithHeaders( variables.baseUrl & "/echo-header", { "X-Ping": "pong" } )
+				expect( JSONDeserialize( result.body ).got ).toBe( "pong" )
+			} )
+
+			it( "exposes the underlying HttpExchange via req.rawExchange()", function() {
+				var result = variables.client.get( variables.baseUrl & "/raw-exchange-test" )
+				expect( JSONDeserialize( result.body ).hasExchange ).toBeTrue()
+			} )
+
+			it( "resolves req.ip to the direct TCP peer", function() {
+				var result = variables.client.get( variables.baseUrl & "/ip-test" )
+				expect( len( JSONDeserialize( result.body ).ip ) ).toBeGT( 0 )
+			} )
+
+			it( "prefers X-Forwarded-For for req.ip only when app.set('trust proxy', true) is used", function() {
+				var proxyPort = 4322
+				var proxyApp = new "../../models/BoxExpress"()
+				proxyApp.set( "trust proxy", true )
+				proxyApp.get( "/ip", ( req, res ) => res.json( { ip: req.ip } ) )
+				proxyApp.listen( port = proxyPort, options = { block: false } )
+				sleep( 300 )
+
+				try {
+					var result = variables.client.getWithHeaders(
+						"http://localhost:#proxyPort#/ip",
+						{ "X-Forwarded-For": "203.0.113.9, 10.0.0.1" }
+					)
+					expect( JSONDeserialize( result.body ).ip ).toBe( "203.0.113.9" )
+				} finally {
+					proxyApp.close()
+				}
+			} )
+
+			it( "runs a registered param() callback before the route handler via app.param()", function() {
+				var result = variables.client.get( variables.baseUrl & "/parented/42" )
+				expect( JSONDeserialize( result.body ).code ).toBe( "parented-42" )
+			} )
+
 			it( "returns a default 404 for an unmatched route", function() {
 				var result = variables.client.get( variables.baseUrl & "/does-not-exist" )
 				expect( result.statusCode ).toBe( 404 )
@@ -295,6 +469,23 @@ class extends="testbox.system.BaseSpec" {
 				var result = variables.client.get( variables.baseUrl & "/boom" )
 				expect( result.statusCode ).toBe( 500 )
 				expect( JSONDeserialize( result.body ).message ).toBe( "kaboom" )
+			} )
+
+			it( "close() is idempotent — calling it a second time does not error", function() {
+				var throwawayPort = 4323
+				var throwawayApp = new "../../models/BoxExpress"()
+				throwawayApp.get( "/", ( req, res ) => res.send( "up" ) )
+				throwawayApp.listen( port = throwawayPort, options = { block: false } )
+				sleep( 300 )
+
+				expect( variables.client.get( "http://localhost:#throwawayPort#/" ).body ).toBe( "up" )
+
+				throwawayApp.close()
+				throwawayApp.close() // must not throw
+
+				expect( function() {
+					throwawayApp.close()
+				} ).notToThrow()
 			} )
 
 			it( "serves concurrent requests without serializing them", function() {

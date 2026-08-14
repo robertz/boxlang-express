@@ -13,6 +13,9 @@ class {
 		variables.httpServer = javacast( "null", "" )
 		variables.running = false
 		variables.reloadWatcher = javacast( "null", "" )
+		variables.shutdownHook = javacast( "null", "" )
+		variables.closed = false
+		variables.color = new AnsiColor()
 		return this
 	}
 
@@ -81,7 +84,18 @@ class {
 	 */
 	function listen( port, callback, options = {} ) {
 		var addr = createObject( "java", "java.net.InetSocketAddress" ).init( port )
-		variables.httpServer = createObject( "java", "com.sun.net.httpserver.HttpServer" ).create( addr, 0 )
+
+		try {
+			variables.httpServer = createObject( "java", "com.sun.net.httpserver.HttpServer" ).create( addr, 0 )
+		} catch ( any e ) {
+			var cause = e.getCause()
+			if ( !isNull( cause ) && cause.getClass().getName() == "java.net.BindException" ) {
+				println( variables.color.red( "[BoxExpress] Port #port# is already in use — exiting." ) )
+				createObject( "java", "java.lang.System" ).exit( 1 )
+				return this
+			}
+			rethrow;
+		}
 
 		var bridge = new HttpBridge( variables.router, this.settings )
 		var proxy = createDynamicProxy( bridge, [ "com.sun.net.httpserver.HttpHandler" ] )
@@ -90,6 +104,7 @@ class {
 		variables.httpServer.setExecutor( createObject( "java", "java.util.concurrent.Executors" ).newVirtualThreadPerTaskExecutor() )
 		variables.httpServer.start()
 		variables.running = true
+		_registerShutdownHook()
 
 		if ( this.settings[ "reloadOnChange" ] ?: false ) {
 			_startReloadWatcher()
@@ -109,16 +124,51 @@ class {
 	}
 
 	function close() {
+		if ( variables.closed ) {
+			return this
+		}
+		variables.closed = true
 		variables.running = false
+
 		if ( !isNull( variables.reloadWatcher ) ) {
 			variables.reloadWatcher.stop()
 			variables.reloadWatcher = javacast( "null", "" )
 		}
-		if ( isNull( variables.httpServer ) ) {
-			return this
+
+		if ( !isNull( variables.shutdownHook ) ) {
+			try {
+				createObject( "java", "java.lang.Runtime" ).getRuntime().removeShutdownHook( variables.shutdownHook )
+			} catch ( any e ) {
+				// already in the middle of JVM shutdown — the hook is running (or has run) anyway
+			}
+			variables.shutdownHook = javacast( "null", "" )
 		}
-		variables.httpServer.stop( 0 )
+
+		if ( !isNull( variables.httpServer ) ) {
+			variables.httpServer.stop( 0 )
+			variables.httpServer = javacast( "null", "" )
+		}
+
 		return this
+	}
+
+	/**
+	 * Ensures close() runs on Ctrl-C / SIGTERM / normal JVM exit, not just on
+	 * an explicit app.close() call. Without this, listen()'s blocking loop
+	 * and the reload watcher's daemon thread just get torn down by the JVM
+	 * without ever calling httpServer.stop() or reloadWatcher.stop() — the
+	 * process dies, but nothing runs the cleanup path, which is what let the
+	 * dev-mode watcher outlive a Ctrl-C'd server.
+	 */
+	private function _registerShutdownHook() {
+		var runnable = createDynamicProxy(
+			new ThreadRunnable( function() {
+				close()
+			} ),
+			[ "java.lang.Runnable" ]
+		)
+		variables.shutdownHook = createObject( "java", "java.lang.Thread" ).init( runnable )
+		createObject( "java", "java.lang.Runtime" ).getRuntime().addShutdownHook( variables.shutdownHook )
 	}
 
 	/**
@@ -134,7 +184,7 @@ class {
 		var runnable = createDynamicProxy(
 			new ThreadRunnable( function() {
 				variables.reloadWatcher.watch( function( changedPath ) {
-					println( "[reloadOnChange] #changedPath# changed — restarting..." )
+					println( variables.color.cyan( "[reloadOnChange] #changedPath# changed — restarting..." ) )
 					_restartProcess()
 				} )
 			} ),

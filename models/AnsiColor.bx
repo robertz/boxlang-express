@@ -1,0 +1,97 @@
+/**
+ * ANSI color helpers for BoxExpress's own console output — the per-request
+ * access log, startup/fatal messages, and reloadOnChange notices. Standard
+ * 16-color SGR codes only (no 256-color/truecolor) since this is just
+ * log-line emphasis, not a TUI, and 16-color has the broadest terminal
+ * support.
+ *
+ * Respects the NO_COLOR convention (https://no-color.org/): a non-empty
+ * NO_COLOR environment variable disables coloring, and every helper below
+ * then returns its input unchanged rather than raw escape codes — matters
+ * when stdout is piped to a file or log aggregator that doesn't interpret
+ * ANSI. There's no TTY auto-detection (java.lang.System.console() isn't a
+ * reliable signal across how BoxLang gets invoked), so NO_COLOR is the one
+ * opt-out.
+ *
+ * Note: the internal wrapper is named _paint(), not wrap() — wrap() is a
+ * BoxLang global BIF (text wrapping to a column limit), and calling a
+ * same-named method from inside this class resolved to that BIF instead of
+ * this class's own method, throwing on the mismatched argument signature.
+ */
+class {
+
+	function init() {
+		var noColor = createObject( "java", "java.lang.System" ).getenv( "NO_COLOR" )
+		variables.enabled = isNull( noColor ) || !len( noColor )
+		variables.ESC = char( 27 )
+		variables.CODES = {
+			bold: 1, dim: 2,
+			red: 31, green: 32, yellow: 33, blue: 34, magenta: 35, cyan: 36, white: 37,
+			gray: 90
+		}
+		return this
+	}
+
+	function bold( text ) {
+		return _paint( text, "bold" )
+	}
+
+	function dim( text ) {
+		return _paint( text, "dim" )
+	}
+
+	function red( text ) {
+		return _paint( text, "red" )
+	}
+
+	function green( text ) {
+		return _paint( text, "green" )
+	}
+
+	function yellow( text ) {
+		return _paint( text, "yellow" )
+	}
+
+	function cyan( text ) {
+		return _paint( text, "cyan" )
+	}
+
+	function magenta( text ) {
+		return _paint( text, "magenta" )
+	}
+
+	function gray( text ) {
+		return _paint( text, "gray" )
+	}
+
+	/**
+	 * Colors an HTTP method the way BoxExpress's access log does:
+	 * GET=cyan, POST=green, PUT/PATCH=yellow, DELETE=red, everything
+	 * else (HEAD/OPTIONS/CONNECT/TRACE/etc.)=magenta.
+	 */
+	function method( verb ) {
+		var upperVerb = verb.ucase()
+		if ( upperVerb == "GET" ) {
+			return cyan( verb )
+		}
+		if ( upperVerb == "POST" ) {
+			return green( verb )
+		}
+		if ( upperVerb == "PUT" || upperVerb == "PATCH" ) {
+			return yellow( verb )
+		}
+		if ( upperVerb == "DELETE" ) {
+			return red( verb )
+		}
+		return magenta( verb )
+	}
+
+	private function _paint( text, colorName ) {
+		if ( !variables.enabled ) {
+			return text
+		}
+		var code = variables.CODES[ colorName ] ?: variables.CODES.white
+		return variables.ESC & "[" & code & "m" & text & variables.ESC & "[0m"
+	}
+
+}
