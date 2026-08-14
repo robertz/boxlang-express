@@ -150,9 +150,16 @@ Separate from `app.set("env", "development")` — use either independently.
 
 ### Router (mountable sub-app)
 
-Same routing methods as `app`. Create one with `new bxModules.boxexpress.models.Router()` and mount
-it with `app.use("/api", apiRouter)` — request paths are matched relative to
-the mount point, exactly like Express's `express.Router()`.
+Same routing methods as `app`. Create one with `boxExpressRouter()` (or
+`new bxModules.boxexpress.models.Router()` directly) and mount it with
+`app.use("/api", apiRouter)` — request paths are matched relative to the
+mount point, exactly like Express's `express.Router()`.
+
+```js
+apiRouter = boxExpressRouter()
+apiRouter.get( "/ping", ( req, res ) => res.json( { pong: true } ) )
+app.use( "/api", apiRouter )
+```
 
 Register all routes and middleware *before* calling `listen()`. The route
 table isn't synchronized, so mutating it while requests are already being
@@ -501,6 +508,12 @@ Two more BoxLang-specific things that shaped how these are written:
   rather than `../fixtures/...`.
 
 ## Changelog
+
+**0.1.9**
+- Added `boxExpressRouter()` — a global BIF wrapping `new
+  bxModules.boxexpress.models.Router()`, mirroring Express's
+  `express.Router()`. Brings `Router` in line with the rest of the public
+  API surface, which was otherwise fully reachable through BIFs.
 
 **0.1.8**
 - Added `app.set("reloadOnChange", true)` — watches the working directory

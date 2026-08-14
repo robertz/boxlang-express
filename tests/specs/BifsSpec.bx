@@ -1,7 +1,7 @@
 /**
- * Exercises the global BIFs (boxExpress, boxExpressJSON, boxExpressUrlencoded,
- * boxExpressStatic, boxExpressUpload, boxExpressSession) for real — a running
- * server built entirely through the BIFs,
+ * Exercises the global BIFs (boxExpress, boxExpressRouter, boxExpressJSON,
+ * boxExpressUrlencoded, boxExpressStatic, boxExpressUpload, boxExpressSession)
+ * for real — a running server built entirely through the BIFs,
  * not the bxModules.boxexpress.models.* classes directly. These only resolve as
  * global functions once BoxLang has loaded this project as an actual module, which
  * run-tests.bxs sets up via a self-referencing boxlang_modules/boxexpress symlink.
@@ -41,6 +41,12 @@ class extends="testbox.system.BaseSpec" {
 		variables.app.post( "/upload", boxExpressUpload( { dest: variables.uploadDest } ), ( req, res ) => {
 			res.json( { files: req.files } )
 		} )
+
+		variables.apiRouter = boxExpressRouter()
+		variables.apiRouter.get( "/ping", ( req, res ) => {
+			res.json( { pong: true } )
+		} )
+		variables.app.use( "/api", variables.apiRouter )
 
 		variables.app.listen( port = variables.testPort, options = { block: false } )
 		sleep( 300 )
@@ -103,6 +109,12 @@ class extends="testbox.system.BaseSpec" {
 				var parsed = JSONDeserialize( result.body )
 				expect( parsed.files.doc[ 1 ].filename ).toBe( "doc.txt" )
 				expect( fileRead( parsed.files.doc[ 1 ].path ) ).toBe( "via bif" )
+			} )
+
+			it( "boxExpressRouter() returns a mountable router", function() {
+				var result = variables.client.get( variables.baseUrl & "/api/ping" )
+				expect( result.statusCode ).toBe( 200 )
+				expect( JSONDeserialize( result.body ).pong ).toBeTrue()
 			} )
 
 		} )

@@ -1,0 +1,17 @@
+/**
+ * Global factory BIF, registered automatically when this module loads.
+ * Mirrors Express's `express.Router()` — a mountable, standalone route
+ * table you can build up separately and attach with `app.use(path, router)`.
+ *
+ *   apiRouter = boxExpressRouter()
+ *   apiRouter.get( "/ping", ( req, res ) => res.json( { pong: true } ) )
+ *   app.use( "/api", apiRouter )
+ */
+@BoxBIF
+class {
+
+	function invoke() {
+		return new bxModules.boxexpress.models.Router()
+	}
+
+}
