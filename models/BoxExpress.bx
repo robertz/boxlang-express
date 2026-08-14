@@ -12,6 +12,7 @@ class {
 		variables.router = new Router( this.settings )
 		variables.httpServer = javacast( "null", "" )
 		variables.running = false
+		variables.reloadWatcher = javacast( "null", "" )
 		return this
 	}
 
@@ -90,6 +91,10 @@ class {
 		variables.httpServer.start()
 		variables.running = true
 
+		if ( this.settings[ "reloadOnChange" ] ?: false ) {
+			_startReloadWatcher()
+		}
+
 		if ( !isNull( callback ) ) {
 			callback( port )
 		}
@@ -105,11 +110,69 @@ class {
 
 	function close() {
 		variables.running = false
+		if ( !isNull( variables.reloadWatcher ) ) {
+			variables.reloadWatcher.stop()
+			variables.reloadWatcher = javacast( "null", "" )
+		}
 		if ( isNull( variables.httpServer ) ) {
 			return this
 		}
 		variables.httpServer.stop( 0 )
 		return this
+	}
+
+	/**
+	 * Dev-mode convenience: app.set("reloadOnChange", true) watches the
+	 * current working directory for .bx/.bxs/.bxm changes (via FileWatcher)
+	 * and restarts the process on save. Deliberately separate from
+	 * app.set("env", "development") — the two are orthogonal settings, so
+	 * either can be used without the other.
+	 */
+	private function _startReloadWatcher() {
+		variables.reloadWatcher = new FileWatcher( expandPath( "." ) )
+
+		var runnable = createDynamicProxy(
+			new ThreadRunnable( function() {
+				variables.reloadWatcher.watch( function( changedPath ) {
+					println( "[reloadOnChange] #changedPath# changed — restarting..." )
+					_restartProcess()
+				} )
+			} ),
+			[ "java.lang.Runnable" ]
+		)
+
+		var thread = createObject( "java", "java.lang.Thread" ).init( runnable )
+		thread.setDaemon( true )
+		thread.start()
+	}
+
+	/**
+	 * Replays the exact original JVM invocation (ProcessHandle.current()) to
+	 * relaunch the app, rather than assuming a fixed "boxlang <script>"
+	 * shape — this way it works whatever the entry script is named and
+	 * however it was launched (bvm-managed boxlang, a raw java -jar, custom
+	 * JVM flags, etc). The current server is closed first so the new
+	 * process doesn't fail to bind the same port.
+	 */
+	private function _restartProcess() {
+		var info = createObject( "java", "java.lang.ProcessHandle" ).current().info()
+
+		var command = []
+		command.append( info.command().isPresent() ? info.command().get() : "boxlang" )
+		if ( info.arguments().isPresent() ) {
+			command.append( info.arguments().get(), true )
+		} else {
+			command.append( getBaseTemplatePath() )
+		}
+
+		close()
+		sleep( 100 )
+
+		var pb = createObject( "java", "java.lang.ProcessBuilder" ).init( command )
+		pb.inheritIO()
+		pb.start()
+
+		createObject( "java", "java.lang.System" ).exit( 0 )
 	}
 
 }

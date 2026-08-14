@@ -132,6 +132,22 @@ Every request gets a line on stdout as soon as it's received —
 `[2026-08-10 10:45:41] GET /users/42 127.0.0.1` — there's no setting to turn
 this off yet.
 
+#### Auto-restart on file change (`app.set("reloadOnChange", true)`)
+
+```js
+app.set( "reloadOnChange", true )
+```
+
+Dev-only convenience — watches the current working directory (recursively,
+skipping `boxlang_modules/`, `node_modules/`, `.git`, and other dot-dirs) for
+`.bx`/`.bxs`/`.bxm` changes and restarts the process on save. There's no hot
+reload inside a running JVM once BoxLang has compiled your classes, so this
+works by closing the current server, replaying the exact original launch
+command (via `ProcessHandle.current()`, so it works whatever the entry
+script is named or however it was launched), and exiting — same net effect
+as running under `entr -r` or `nodemon`, just without the extra dependency.
+Separate from `app.set("env", "development")` — use either independently.
+
 ### Router (mountable sub-app)
 
 Same routing methods as `app`. Create one with `new bxModules.boxexpress.models.Router()` and mount
@@ -485,6 +501,12 @@ Two more BoxLang-specific things that shaped how these are written:
   rather than `../fixtures/...`.
 
 ## Changelog
+
+**0.1.8**
+- Added `app.set("reloadOnChange", true)` — watches the working directory
+  for `.bx`/`.bxs`/`.bxm` changes and restarts the process on save, using
+  `java.nio.file.WatchService` and `ProcessHandle.current()` to replay the
+  original launch command. See [FileWatcher.bx](models/FileWatcher.bx).
 
 **0.1.7**
 - **Fix:** `boxExpressStatic()` threw on any request to the mount root

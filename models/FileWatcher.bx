@@ -1,0 +1,126 @@
+/**
+ * Recursively watches a directory tree for .bx/.bxs/.bxm changes using
+ * java.nio.file.WatchService, debouncing bursty save events (most editors
+ * fire 2-3 filesystem events per save) into a single callback invocation.
+ * Powers BoxExpress's app.set("reloadOnChange", true) — see
+ * BoxExpress.bx#_startReloadWatcher().
+ *
+ * Registration is a one-time recursive snapshot taken in init(); a directory
+ * created after that won't be picked up until the process restarts, which is
+ * an acceptable limitation for a dev-only convenience feature.
+ */
+class {
+
+	function init( rootDir, extensions = [ "bx", "bxs", "bxm" ] ) {
+		variables.extensions = extensions
+		variables.ignoredDirs = [ "boxlang_modules", "node_modules", "target", "build", "dist" ]
+		variables.watchService = createObject( "java", "java.nio.file.FileSystems" ).getDefault().newWatchService()
+		variables.watchKeys = createObject( "java", "java.util.HashMap" ).init()
+		variables.stopped = false
+		_registerTree( rootDir )
+		return this
+	}
+
+	function stop() {
+		variables.stopped = true
+		try {
+			variables.watchService.close()
+		} catch ( any e ) {
+		}
+	}
+
+	/**
+	 * Blocks the calling thread, invoking onChange( changedPath ) once per
+	 * debounced burst of events on a watched file. Call stop() from another
+	 * thread to unblock it — closing the underlying WatchService interrupts
+	 * the pending take().
+	 */
+	function watch( onChange ) {
+		var kinds = createObject( "java", "java.nio.file.StandardWatchEventKinds" )
+
+		while ( !variables.stopped ) {
+			var key = ""
+			try {
+				key = variables.watchService.take()
+			} catch ( any e ) {
+				return
+			}
+
+			var dir = variables.watchKeys.get( key )
+			var changedPath = ""
+			var relevant = false
+
+			for ( var event in key.pollEvents() ) {
+				if ( event.kind().equals( kinds.OVERFLOW ) ) {
+					continue
+				}
+				var childPath = isNull( dir ) ? event.context().toString() : dir.resolve( event.context() ).toString()
+				if ( _isWatchedFile( childPath ) ) {
+					relevant = true
+					changedPath = childPath
+				}
+			}
+
+			var stillValid = key.reset()
+			if ( !stillValid ) {
+				variables.watchKeys.remove( key )
+			}
+
+			if ( relevant ) {
+				sleep( 150 )
+				_drainPending()
+				if ( !variables.stopped ) {
+					onChange( changedPath )
+				}
+			}
+		}
+	}
+
+	private function _drainPending() {
+		var key = variables.watchService.poll()
+		while ( !isNull( key ) ) {
+			key.pollEvents()
+			key.reset()
+			key = variables.watchService.poll()
+		}
+	}
+
+	private function _isWatchedFile( path ) {
+		var ext = listLast( path, "." ).lcase()
+		return variables.extensions.findNoCase( ext ) > 0
+	}
+
+	private function _registerTree( dir ) {
+		var kinds = createObject( "java", "java.nio.file.StandardWatchEventKinds" )
+		var dirPath = createObject( "java", "java.io.File" ).init( dir ).toPath()
+
+		try {
+			var key = dirPath.register( variables.watchService, [ kinds.ENTRY_CREATE, kinds.ENTRY_MODIFY, kinds.ENTRY_DELETE ] )
+			variables.watchKeys.put( key, dirPath )
+		} catch ( any e ) {
+			return
+		}
+
+		var children = []
+		try {
+			children = directoryList( path = dir, recurse = false, listInfo = "path", type = "dir" )
+		} catch ( any e ) {
+			return
+		}
+
+		for ( var child in children ) {
+			if ( !_isIgnoredDir( child ) ) {
+				_registerTree( child )
+			}
+		}
+	}
+
+	private function _isIgnoredDir( dirPath ) {
+		var name = createObject( "java", "java.io.File" ).init( dirPath ).getName()
+		if ( name.left( 1 ) == "." ) {
+			return true
+		}
+		return variables.ignoredDirs.findNoCase( name ) > 0
+	}
+
+}

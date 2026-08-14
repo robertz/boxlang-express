@@ -1,0 +1,17 @@
+/**
+ * Adapts a BoxLang closure to java.lang.Runnable. createDynamicProxy needs a
+ * class instance whose method matches the target interface — it can't proxy
+ * a bare closure or struct of closures directly.
+ */
+class {
+
+	function init( fn ) {
+		variables.fn = fn
+		return this
+	}
+
+	function run() {
+		variables.fn()
+	}
+
+}
