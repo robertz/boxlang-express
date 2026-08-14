@@ -26,6 +26,11 @@
     "devDependencies":{
         "testbox":"^7.0.0+19"
     },
+    "scripts":{
+        "preVersion":"boxlang run-tests.bxs",
+        "postVersion":"package set location='robertz/boxlang-express#v`package version`'",
+        "postPublish":"!git push --follow-tags"
+    },
     "installPaths":{
         "testbox":"testbox/"
     },

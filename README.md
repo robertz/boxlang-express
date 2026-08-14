@@ -509,6 +509,17 @@ Two more BoxLang-specific things that shaped how these are written:
 
 ## Changelog
 
+**0.1.10**
+- **Fix:** the router's dispatch loop sometimes called `next()`/`_final()`
+  with an explicit `null` error argument on the success path, instead of
+  calling them with no argument at all. Express's own contract distinguishes
+  the two — `next()` (no args) means "move on successfully," `next(err)`
+  means "jump to error handling" — and code downstream that cared about the
+  distinction (rather than just checking `isNull(err)`) could misread a
+  `null`-argument call as an error. `next()`/`_final()` are now called
+  argument-free whenever there's no error, matching Express. See
+  [Router.bx](models/Router.bx).
+
 **0.1.9**
 - Added `boxExpressRouter()` — a global BIF wrapping `new
   bxModules.boxexpress.models.Router()`, mirroring Express's
