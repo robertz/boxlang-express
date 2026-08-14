@@ -12,6 +12,7 @@ app.use( bodyParsers.json() )
 app.use( bodyParsers.urlencoded() )
 app.use( "/public", staticFiles.serve( expandPath( "./public" ) ) )
 app.set( "views", expandPath( "./views" ) )
+app.set( "reloadOnChange", true )
 
 app.get( "/", ( req, res ) => {
 	res.send( "Hello from BoxExpress!" )
