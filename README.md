@@ -317,6 +317,32 @@ request (`If-None-Match` or, failing that, `If-Modified-Since`) with an empty
 works. The `ETag` is a cheap weak tag (`W/"<size>-<mtime>"`, no file hash),
 so it changes whenever the file's size or modified time changes on disk.
 
+#### Range requests (partial content)
+
+Both `sendFile()`/`download()` and static file serving honor a `Range`
+request header (RFC 7233) and respond `206 Partial Content` with just the
+requested slice — what makes video/audio scrubbing and resumable downloads
+work, since the client doesn't have to (re-)download the whole file to seek
+or resume. Every file response sets `Accept-Ranges: bytes`, even a full
+`200`, so a client knows it can send a `Range` request on a later one:
+
+```js
+app.get( "/video", ( req, res ) => {
+	res.sendFile( expandPath( "./media/clip.mp4" ) )
+} )
+// curl -H "Range: bytes=0-1023" localhost:3000/video
+// -> 206, Content-Range: bytes 0-1023/<total>, body is just those 1024 bytes
+```
+
+A range naming a start beyond the file's size gets a `416 Range Not
+Satisfiable` with `Content-Range: bytes */<total>` and no body, matching the
+spec. Two things are deliberately out of scope, the same trade-off most
+minimal static-file servers make: a request naming more than one range
+(`bytes=0-10,20-30`) falls back to a full `200` response rather than a
+`multipart/byteranges` reply, and `If-Range` (a conditional range against a
+validator) isn't supported — a `Range` request is always attempted
+regardless of freshness. See [RangeParser.bx](models/RangeParser.bx).
+
 ### Views (`res.render`)
 
 Renders a view from a configured views directory and sends the result as
@@ -556,6 +582,14 @@ Two more BoxLang-specific things that shaped how these are written:
   rather than `../fixtures/...`.
 
 ## Changelog
+
+**0.1.13**
+- Added `Range` request support (RFC 7233) to `res.sendFile()`/`download()`
+  and static file serving — a request naming a byte range now gets a `206
+  Partial Content` response with just that slice instead of the whole file,
+  enabling video/audio scrubbing and resumable downloads. Every file
+  response now sets `Accept-Ranges: bytes`. Multi-range requests and
+  `If-Range` aren't supported — see [RangeParser.bx](models/RangeParser.bx).
 
 **0.1.12**
 - **Fix:** `reloadOnChange` could silently kill the server on a failed

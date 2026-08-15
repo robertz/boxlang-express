@@ -59,9 +59,8 @@ class {
 
 			var ext = listLast( fileObj.getName(), "." ).lcase()
 			var contentType = mimeTypes[ ext ] ?: "application/octet-stream"
-			var bytes = createObject( "java", "java.nio.file.Files" ).readAllBytes( realCandidate )
 
-			res.sendBytes( bytes, contentType )
+			res.sendFileRange( fileObj, contentType )
 		}
 	}
 

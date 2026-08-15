@@ -1,0 +1,101 @@
+/**
+ * Unit tests for RangeParser's header parsing — pure logic, no HTTP exchange
+ * involved, since parse() only ever touches its two string/number arguments.
+ */
+class extends="testbox.system.BaseSpec" {
+
+	function run() {
+		describe( "RangeParser", function() {
+
+			it( "returns type=none when there's no Range header", function() {
+				var parser = new "../../models/RangeParser"()
+				var result = parser.parse( "", 100 )
+				expect( result.type ).toBe( "none" )
+			} )
+
+			it( "returns type=none for a null Range header", function() {
+				var parser = new "../../models/RangeParser"()
+				var result = parser.parse( javacast( "null", "" ), 100 )
+				expect( result.type ).toBe( "none" )
+			} )
+
+			it( "parses a simple bytes=start-end range", function() {
+				var parser = new "../../models/RangeParser"()
+				var result = parser.parse( "bytes=0-9", 100 )
+				expect( result.type ).toBe( "satisfiable" )
+				expect( result.start ).toBe( 0 )
+				expect( result.end ).toBe( 9 )
+			} )
+
+			it( "clamps an end beyond the file size to the last byte", function() {
+				var parser = new "../../models/RangeParser"()
+				var result = parser.parse( "bytes=90-500", 100 )
+				expect( result.type ).toBe( "satisfiable" )
+				expect( result.start ).toBe( 90 )
+				expect( result.end ).toBe( 99 )
+			} )
+
+			it( "treats an open-ended range (bytes=start-) as start through EOF", function() {
+				var parser = new "../../models/RangeParser"()
+				var result = parser.parse( "bytes=50-", 100 )
+				expect( result.type ).toBe( "satisfiable" )
+				expect( result.start ).toBe( 50 )
+				expect( result.end ).toBe( 99 )
+			} )
+
+			it( "treats a suffix range (bytes=-N) as the last N bytes", function() {
+				var parser = new "../../models/RangeParser"()
+				var result = parser.parse( "bytes=-10", 100 )
+				expect( result.type ).toBe( "satisfiable" )
+				expect( result.start ).toBe( 90 )
+				expect( result.end ).toBe( 99 )
+			} )
+
+			it( "clamps a suffix range larger than the file to the whole file", function() {
+				var parser = new "../../models/RangeParser"()
+				var result = parser.parse( "bytes=-500", 100 )
+				expect( result.type ).toBe( "satisfiable" )
+				expect( result.start ).toBe( 0 )
+				expect( result.end ).toBe( 99 )
+			} )
+
+			it( "returns type=unsatisfiable when the range starts beyond the file", function() {
+				var parser = new "../../models/RangeParser"()
+				var result = parser.parse( "bytes=200-300", 100 )
+				expect( result.type ).toBe( "unsatisfiable" )
+			} )
+
+			it( "returns type=unsatisfiable for any range against an empty file", function() {
+				var parser = new "../../models/RangeParser"()
+				var result = parser.parse( "bytes=0-5", 0 )
+				expect( result.type ).toBe( "unsatisfiable" )
+			} )
+
+			it( "falls back to type=full for a multi-range request (not supported)", function() {
+				var parser = new "../../models/RangeParser"()
+				var result = parser.parse( "bytes=0-10,20-30", 100 )
+				expect( result.type ).toBe( "full" )
+			} )
+
+			it( "falls back to type=full for a unit other than bytes", function() {
+				var parser = new "../../models/RangeParser"()
+				var result = parser.parse( "items=0-5", 100 )
+				expect( result.type ).toBe( "none" )
+			} )
+
+			it( "falls back to type=full for an unparseable range spec", function() {
+				var parser = new "../../models/RangeParser"()
+				var result = parser.parse( "bytes=abc-def", 100 )
+				expect( result.type ).toBe( "full" )
+			} )
+
+			it( "falls back to type=full for a spec with no dash", function() {
+				var parser = new "../../models/RangeParser"()
+				var result = parser.parse( "bytes=50", 100 )
+				expect( result.type ).toBe( "full" )
+			} )
+
+		} )
+	}
+
+}

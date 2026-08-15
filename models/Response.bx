@@ -151,15 +151,58 @@ class {
 		}
 
 		var contentType = options.contentType ?: _guessMimeType( fileObj.getName() )
-		var bytes = createObject( "java", "java.nio.file.Files" ).readAllBytes( fileObj.toPath() )
 
-		type( contentType )
 		if ( options.download ?: false ) {
 			var downloadName = !isNull( options.filename ) ? options.filename : fileObj.getName()
 			set( "Content-Disposition", 'attachment; filename="#_sanitizeHeaderToken( downloadName )#"' )
 		}
 
-		return _end( bytes )
+		return sendFileRange( fileObj, contentType )
+	}
+
+	/**
+	 * Sends a file from disk, honoring a Range request header (RFC 7233) for
+	 * partial content — the shared mechanics behind both sendFile()/download()
+	 * and the static-file middleware (StaticFiles.bx calls this directly),
+	 * so range-parsing and partial reads live in one place. Always sets
+	 * Accept-Ranges, even for a full response, so a client knows it can send
+	 * a Range request next time (e.g. to seek a video before it's finished
+	 * downloading).
+	 *
+	 * Scope limits inherited from RangeParser.bx: a request naming more than
+	 * one range falls back to a full response instead of a multipart/
+	 * byteranges reply, and If-Range isn't supported — a Range request is
+	 * always attempted regardless of freshness. Call this after any
+	 * conditional-GET (304) check, since a range is meaningless once the
+	 * response has already ended.
+	 */
+	function sendFileRange( fileObj, contentType ) {
+		var totalSize = fileObj.length()
+		var rangeHeader = variables.exchange.getRequestHeaders().getFirst( "Range" ) ?: ""
+		var range = new RangeParser().parse( rangeHeader, totalSize )
+
+		type( contentType )
+		set( "Accept-Ranges", "bytes" )
+
+		if ( range.type == "unsatisfiable" ) {
+			set( "Content-Range", "bytes */#totalSize#" )
+			return status( 416 ).end()
+		}
+
+		if ( range.type != "satisfiable" ) {
+			var bytes = createObject( "java", "java.nio.file.Files" ).readAllBytes( fileObj.toPath() )
+			return _end( bytes )
+		}
+
+		var chunkLength = range.end - range.start + 1
+		var inputStream = createObject( "java", "java.io.FileInputStream" ).init( fileObj )
+		inputStream.skip( range.start )
+		var chunk = inputStream.readNBytes( javacast( "int", chunkLength ) )
+		inputStream.close()
+
+		set( "Content-Range", "bytes #range.start#-#range.end#/#totalSize#" )
+		status( 206 )
+		return _end( chunk )
 	}
 
 	/**

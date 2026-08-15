@@ -1,0 +1,81 @@
+/**
+ * Parses HTTP Range request headers (RFC 7233 §14.35) against a known total
+ * file size — used by Response.sendFileRange(), which both res.sendFile()
+ * and the static-file middleware call, so the parsing logic lives in one
+ * place rather than being duplicated per call site.
+ *
+ * Only a single byte range is supported. A request naming more than one
+ * range (`bytes=0-10,20-30`) falls back to a full response rather than the
+ * multipart/byteranges format RFC 7233 describes for that case — same
+ * scope limitation most minimal static-file servers make, since almost
+ * nothing in the wild actually sends a multi-range request outside of a
+ * handful of download managers. If-Range (conditional range against a
+ * validator) also isn't supported — a Range request is always attempted
+ * regardless of freshness.
+ */
+class {
+
+	/**
+	 * Returns one of:
+	 *   { type: "none" }                    — no Range header; caller sends a normal 200
+	 *   { type: "full" }                    — Range header present but unparseable, or
+	 *                                          names more than one range; send a normal 200
+	 *   { type: "satisfiable", start, end } — a single valid, inclusive byte range for 206
+	 *   { type: "unsatisfiable" }           — the range starts beyond the file; caller
+	 *                                          sends 416 with Content-Range: bytes * / size
+	 */
+	function parse( rangeHeader, totalSize ) {
+		if ( isNull( rangeHeader ) || !len( rangeHeader ) || rangeHeader.left( 6 ) != "bytes=" ) {
+			return { type: "none" }
+		}
+
+		var spec = rangeHeader.right( rangeHeader.len() - 6 ).trim()
+		if ( spec.find( "," ) ) {
+			return { type: "full" }
+		}
+
+		var dashPos = spec.find( "-" )
+		if ( !dashPos ) {
+			return { type: "full" }
+		}
+
+		// mid(), not left()/right() — a suffix range ("-10") or an open-ended one
+		// ("50-") needs a zero-length slice on one side, and BoxLang's left()/
+		// right() throw "Count cannot be zero" for a zero count (mid() doesn't).
+		var startPart = spec.mid( 1, dashPos - 1 )
+		var endPart = spec.mid( dashPos + 1, spec.len() - dashPos )
+
+		var start = 0
+		var end = 0
+
+		if ( !len( startPart ) ) {
+			// Suffix range, e.g. "bytes=-500" -> the last 500 bytes of the file.
+			if ( !len( endPart ) || !reFind( "^[0-9]+$", endPart ) ) {
+				return { type: "full" }
+			}
+			var suffixLength = int( endPart )
+			if ( suffixLength <= 0 ) {
+				return { type: "full" }
+			}
+			start = max( 0, totalSize - suffixLength )
+			end = totalSize - 1
+		} else {
+			if ( !reFind( "^[0-9]+$", startPart ) ) {
+				return { type: "full" }
+			}
+			start = int( startPart )
+			end = ( len( endPart ) && reFind( "^[0-9]+$", endPart ) ) ? int( endPart ) : totalSize - 1
+		}
+
+		if ( totalSize == 0 || start > end || start >= totalSize ) {
+			return { type: "unsatisfiable" }
+		}
+
+		if ( end > totalSize - 1 ) {
+			end = totalSize - 1
+		}
+
+		return { type: "satisfiable", start: start, end: end }
+	}
+
+}

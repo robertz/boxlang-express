@@ -115,7 +115,9 @@ class {
 			contentDisposition: responseHeaders.firstValue( "Content-Disposition" ).orElse( "" ),
 			etag: responseHeaders.firstValue( "ETag" ).orElse( "" ),
 			lastModified: responseHeaders.firstValue( "Last-Modified" ).orElse( "" ),
-			header: responseHeaders.firstValue( "X-Custom" ).orElse( "" )
+			header: responseHeaders.firstValue( "X-Custom" ).orElse( "" ),
+			contentRange: responseHeaders.firstValue( "Content-Range" ).orElse( "" ),
+			acceptRanges: responseHeaders.firstValue( "Accept-Ranges" ).orElse( "" )
 		}
 	}
 
