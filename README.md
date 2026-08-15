@@ -608,6 +608,68 @@ survive a restart and isn't shared across processes) — swap in something
 durable by passing `{ store: myStore }`, an object exposing
 `get(id)` / `set(id, data, maxAge)` / `destroy(id)`.
 
+##### Durable sessions (`boxExpressCacheStore()` / `CacheStore`)
+
+A ready-made `store` backed by BoxLang's own [cache service](https://boxlang.ortusbooks.com/boxlang-language/cache)
+(the `cache()` BIF) — memory by default, or a real SQL table if the named
+cache is configured with `objectStore: "JDBCStore"`:
+
+```js
+app.use( boxExpressSession( { store: boxExpressCacheStore() } ) )              // the "default" cache
+app.use( boxExpressSession( { store: boxExpressCacheStore( "sessions" ) } ) )  // a named cache
+```
+
+The named cache has to already exist — `boxExpressCacheStore()` doesn't
+register one, it just talks to it. A cache is registered in `boxlang.json`'s
+top-level `caches` block, keyed by whatever name you pass in:
+
+```json
+{
+	"datasources": {
+		"sessionDB": {
+			"driver": "mssql",
+			"host": "${env.MSSQL_HOST:localhost}",
+			"port": "${env.MSSQL_PORT:1433}",
+			"database": "${env.MSSQL_DATABASE:myapp}",
+			"username": "${env.MSSQL_USERNAME:sa}",
+			"password": "${env.MSSQL_PASSWORD}"
+		}
+	},
+	"caches": {
+		"default": { "provider": "BoxCacheProvider" },
+		"sessions": {
+			"provider": "BoxCacheProvider",
+			"properties": {
+				"objectStore": "JDBCStore",
+				"datasource": "sessionDB",
+				"table": "boxlang_sessions",
+				"autoCreate": false
+			}
+		}
+	}
+}
+```
+
+This makes sessions durable across restarts and shared across a cluster of
+processes hitting the same database — exactly what the default `MemoryStore`
+can't do. `JDBCStore` auto-detects the database vendor from the JDBC driver
+(MySQL, Postgres, SQL Server, Oracle, SQLite, Derby, HSQLDB, MariaDB) to
+generate the right `CREATE TABLE`/eviction SQL for each.
+
+Two things worth knowing, confirmed by running it against a real database
+rather than assumed from the docs:
+
+- Keep `"default"` in the `caches` block alongside any custom cache — don't
+  replace the whole block with just your own entry. BoxLang's internal
+  query engine relies on a `"default"` cache existing.
+- **`autoCreate: true` is currently unreliable** — it can fail at BoxLang
+  startup with `Cache [default] does not exist`, because
+  `JDBCStore`'s own auto-create check runs a query internally before
+  BoxLang's cache service is guaranteed to have finished registering
+  `"default"` yet, and the two aren't ordered relative to each other.
+  Safest path: create the table yourself once (a migration, or a one-time
+  script) and leave `autoCreate: false`, as in the example above.
+
 #### Security headers (`boxExpressHelmet()` / `Helmet`)
 
 Applies a set of response headers that harden common attack surfaces —
@@ -881,6 +943,12 @@ Two more BoxLang-specific things that shaped how these are written:
   (seconds) to set `Cache-Control: public, max-age=<n>` alongside the
   `ETag`/`Last-Modified` they already set — off by default, no header at
   all unless asked for.
+- Added `boxExpressCacheStore()` — a `Session` `store` backed by BoxLang's
+  own `cache()` service, so `{ store: boxExpressCacheStore( "sessions" ) }`
+  makes sessions durable across restarts and shared across a cluster when
+  the named cache is configured with `objectStore: "JDBCStore"` (a real SQL
+  table) instead of the in-memory default. See
+  [CacheStore.bx](models/stores/CacheStore.bx).
 
 **0.1.13**
 - Added `Range` request support (RFC 7233) to `res.sendFile()`/`download()`

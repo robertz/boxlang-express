@@ -1,0 +1,35 @@
+/**
+ * A Session-compatible store backed by BoxLang's own cache() service —
+ * memory by default, or a SQL table if the named cache is configured with
+ * objectStore: "JDBCStore" in boxlang.json. Implements the get(id)/
+ * set(id, data, maxAge)/destroy(id) contract Session.bx's `store` option
+ * expects, so sessions can survive a restart and be shared across a
+ * cluster — the two things the default in-memory MemoryStore can't do.
+ *
+ *   app.use( boxExpressSession( { store: boxExpressCacheStore() } ) )              // "default" cache
+ *   app.use( boxExpressSession( { store: boxExpressCacheStore( "sessions" ) } ) )   // a named cache
+ *
+ * The named cache must already be registered in boxlang.json — this class
+ * doesn't create one. See README.md for a JDBCStore example.
+ */
+class {
+
+	function init( cacheName = "default" ) {
+		variables.cacheName = cacheName
+		return this
+	}
+
+	function get( id ) {
+		var result = cache( variables.cacheName ).get( id )
+		return result.isPresent() ? result.get() : javacast( "null", "" )
+	}
+
+	function set( id, data, maxAge ) {
+		cache( variables.cacheName ).set( id, data, maxAge )
+	}
+
+	function destroy( id ) {
+		cache( variables.cacheName ).clear( id )
+	}
+
+}

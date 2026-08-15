@@ -1,0 +1,91 @@
+/**
+ * Unit tests for CacheStore — the Session-compatible store adapter backed by
+ * BoxLang's own cache() service. Runs against the "default" cache, which
+ * exists in every BoxLang environment with no extra config (unlike a
+ * JDBCStore-backed cache, which needs a registered datasource) — see
+ * README.md for the JDBCStore wiring, verified manually there.
+ */
+class extends="testbox.system.BaseSpec" {
+
+	function run() {
+		describe( "CacheStore", function() {
+
+			it( 'defaults to the "default" cache when no name is given', function() {
+				var store = new "../../models/stores/CacheStore"()
+				var id = "cachestore-test-#createUUID()#"
+				store.set( id, { views: 1 }, 60 )
+
+				expect( cache( "default" ).get( id ).isPresent() ).toBeTrue()
+				store.destroy( id )
+			} )
+
+			it( "round-trips data through set()/get()", function() {
+				var store = new "../../models/stores/CacheStore"( "default" )
+				var id = "cachestore-test-#createUUID()#"
+				store.set( id, { views: 3, name: "ada" }, 60 )
+
+				var data = store.get( id )
+				expect( data.views ).toBe( 3 )
+				expect( data.name ).toBe( "ada" )
+				store.destroy( id )
+			} )
+
+			it( "returns null for an id that was never set", function() {
+				var store = new "../../models/stores/CacheStore"( "default" )
+				expect( isNull( store.get( "cachestore-never-set-#createUUID()#" ) ) ).toBeTrue()
+			} )
+
+			it( "expires an entry after its maxAge", function() {
+				var store = new "../../models/stores/CacheStore"( "default" )
+				var id = "cachestore-test-#createUUID()#"
+				store.set( id, { views: 1 }, 1 )
+				expect( isNull( store.get( id ) ) ).toBeFalse()
+
+				sleep( 1500 )
+				expect( isNull( store.get( id ) ) ).toBeTrue()
+			} )
+
+			it( "removes an entry on destroy()", function() {
+				var store = new "../../models/stores/CacheStore"( "default" )
+				var id = "cachestore-test-#createUUID()#"
+				store.set( id, { views: 1 }, 60 )
+				store.destroy( id )
+
+				expect( isNull( store.get( id ) ) ).toBeTrue()
+			} )
+
+			it( "throws when the named cache doesn't exist", function() {
+				var store = new "../../models/stores/CacheStore"( "not-a-real-cache" )
+				expect( function() {
+					store.set( "x", {}, 60 )
+				} ).toThrow()
+			} )
+
+			it( "works as Session's store option end-to-end", function() {
+				var store = new "../../models/stores/CacheStore"( "default" )
+				var handler = new "../../models/middleware/Session"().session( { store: store } )
+
+				var req1 = { cookies: {} }
+				handler( req1, _fakeRes(), function() {} )
+				req1.session.views = 1
+
+				// Same store, simulating a second request presenting the
+				// sessionID cookie the first response set.
+				var req2 = { cookies: { "connect.sid": req1.sessionID } }
+				handler( req2, _fakeRes(), function() {} )
+
+				expect( req2.session.views ).toBe( 1 )
+
+				req1.destroySession()
+			} )
+
+		} )
+	}
+
+	private function _fakeRes() {
+		var res = {}
+		res.cookie = function( name, value, options = {} ) { return res }
+		return res
+	}
+
+}

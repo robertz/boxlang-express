@@ -1,0 +1,17 @@
+/**
+ * Global BIF wrapping CacheStore — a Session-compatible store backed by
+ * BoxLang's own cache() service.
+ *
+ *   app.use( boxExpressSession( { store: boxExpressCacheStore( "sessions" ) } ) )
+ *
+ * See README.md's "Sessions" section for wiring a JDBCStore-backed cache
+ * for durable, cross-process sessions.
+ */
+@BoxBIF
+class {
+
+	function invoke( cacheName = "default" ) {
+		return new bxModules.boxexpress.models.stores.CacheStore( cacheName )
+	}
+
+}
