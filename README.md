@@ -656,19 +656,23 @@ can't do. `JDBCStore` auto-detects the database vendor from the JDBC driver
 (MySQL, Postgres, SQL Server, Oracle, SQLite, Derby, HSQLDB, MariaDB) to
 generate the right `CREATE TABLE`/eviction SQL for each.
 
-Two things worth knowing, confirmed by running it against a real database
-rather than assumed from the docs:
+Two separate things worth knowing, confirmed by running it against a real
+database rather than assumed from the docs:
 
 - Keep `"default"` in the `caches` block alongside any custom cache — don't
-  replace the whole block with just your own entry. BoxLang's internal
-  query engine relies on a `"default"` cache existing.
-- **`autoCreate: true` is currently unreliable** — it can fail at BoxLang
-  startup with `Cache [default] does not exist`, because
-  `JDBCStore`'s own auto-create check runs a query internally before
-  BoxLang's cache service is guaranteed to have finished registering
-  `"default"` yet, and the two aren't ordered relative to each other.
-  Safest path: create the table yourself once (a migration, or a one-time
-  script) and leave `autoCreate: false`, as in the example above.
+  replace the whole block with just your own entry. Overriding `caches`
+  replaces it wholesale, and BoxLang's internal query engine relies on a
+  `"default"` cache existing somewhere in it.
+- **`autoCreate: true` is currently unreliable, and declaring `"default"`
+  does *not* fix it.** It can fail at BoxLang startup with `Cache [default]
+  does not exist`, because `JDBCStore`'s own auto-create check runs a query
+  internally, and cache creation order isn't guaranteed to reach
+  `"default"` first — this reproduced the same way whether `"default"` was
+  declared or not, and regardless of where it sat in the JSON. The two
+  bullets are unrelated fixes for unrelated problems. Safest path: create
+  the table yourself once (a migration, or a one-time script) and leave
+  `autoCreate: false`, as in the example above — that sidesteps the
+  internal query entirely.
 
 #### Security headers (`boxExpressHelmet()` / `Helmet`)
 
