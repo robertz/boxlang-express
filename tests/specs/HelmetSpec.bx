@@ -1,0 +1,74 @@
+/**
+ * Unit tests for the Helmet security-headers middleware — a fake res tracking
+ * whatever headers get set() on it, no real HttpExchange involved, since
+ * Helmet.protect()'s handler only ever calls res.set() and next().
+ */
+class extends="testbox.system.BaseSpec" {
+
+	function run() {
+		describe( "Helmet", function() {
+
+			it( "sets every default-on header, and leaves HSTS/CSP off, with no options", function() {
+				var handler = new "../../models/middleware/Helmet"().protect()
+				var res = _fakeRes()
+				var nextCalled = false
+				handler( {}, res, function() { nextCalled = true } )
+
+				var headers = res.getHeaders()
+				expect( headers[ "X-Content-Type-Options" ] ).toBe( "nosniff" )
+				expect( headers[ "X-Frame-Options" ] ).toBe( "SAMEORIGIN" )
+				expect( headers[ "X-DNS-Prefetch-Control" ] ).toBe( "off" )
+				expect( headers[ "Referrer-Policy" ] ).toBe( "no-referrer" )
+				expect( headers[ "X-Permitted-Cross-Domain-Policies" ] ).toBe( "none" )
+				expect( headers[ "Cross-Origin-Opener-Policy" ] ).toBe( "same-origin" )
+				expect( headers[ "Cross-Origin-Resource-Policy" ] ).toBe( "same-origin" )
+				expect( headers.keyExists( "Strict-Transport-Security" ) ).toBeFalse()
+				expect( headers.keyExists( "Content-Security-Policy" ) ).toBeFalse()
+				expect( nextCalled ).toBeTrue()
+			} )
+
+			it( "omits a header entirely when its option is explicitly false", function() {
+				var handler = new "../../models/middleware/Helmet"().protect( { referrerPolicy: false, frameOptions: false } )
+				var res = _fakeRes()
+				handler( {}, res, function() {} )
+
+				var headers = res.getHeaders()
+				expect( headers.keyExists( "Referrer-Policy" ) ).toBeFalse()
+				expect( headers.keyExists( "X-Frame-Options" ) ).toBeFalse()
+				// Unrelated defaults are unaffected by disabling these two.
+				expect( headers[ "X-Content-Type-Options" ] ).toBe( "nosniff" )
+			} )
+
+			it( "uses a caller-supplied string instead of the default value", function() {
+				var handler = new "../../models/middleware/Helmet"().protect( { frameOptions: "DENY" } )
+				var res = _fakeRes()
+				handler( {}, res, function() {} )
+
+				expect( res.getHeaders()[ "X-Frame-Options" ] ).toBe( "DENY" )
+			} )
+
+			it( "leaves HSTS and Content-Security-Policy off unless explicitly enabled", function() {
+				var handler = new "../../models/middleware/Helmet"().protect( {
+					hsts: true,
+					contentSecurityPolicy: "default-src 'self'"
+				} )
+				var res = _fakeRes()
+				handler( {}, res, function() {} )
+
+				var headers = res.getHeaders()
+				expect( headers[ "Strict-Transport-Security" ] ).toBe( "max-age=15552000; includeSubDomains" )
+				expect( headers[ "Content-Security-Policy" ] ).toBe( "default-src 'self'" )
+			} )
+
+		} )
+	}
+
+	private function _fakeRes() {
+		var headers = {}
+		var res = {}
+		res.set = function( name, value ) { headers[ name ] = value; return res }
+		res.getHeaders = function() { return headers }
+		return res
+	}
+
+}

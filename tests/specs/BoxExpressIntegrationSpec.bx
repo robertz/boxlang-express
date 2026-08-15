@@ -548,6 +548,33 @@ class extends="testbox.system.BaseSpec" {
 				expect( JSONDeserialize( result.body ).order ).toBe( [ "mw1", "mw2", "route" ] )
 			} )
 
+			it( "applies Helmet with caller overrides, disabled headers, and opt-in HSTS/CSP", function() {
+				var helmetPort = 4327
+				var helmetApp = new "../../models/BoxExpress"()
+				var helmet = new "../../models/middleware/Helmet"()
+				helmetApp.use( helmet.protect( {
+					frameOptions: "DENY",
+					referrerPolicy: false,
+					hsts: true,
+					contentSecurityPolicy: "default-src 'self'"
+				} ) )
+				helmetApp.get( "/", ( req, res ) => res.send( "ok" ) )
+				helmetApp.listen( port = helmetPort, options = { block: false } )
+				sleep( 300 )
+
+				try {
+					var result = variables.client.get( "http://localhost:#helmetPort#/" )
+					expect( result.getHeader( "X-Frame-Options" ) ).toBe( "DENY" )
+					expect( result.hasHeader( "Referrer-Policy" ) ).toBeFalse()
+					expect( result.getHeader( "Strict-Transport-Security" ) ).toBe( "max-age=15552000; includeSubDomains" )
+					expect( result.getHeader( "Content-Security-Policy" ) ).toBe( "default-src 'self'" )
+					// Unrelated defaults are unaffected by the overrides above.
+					expect( result.getHeader( "X-Content-Type-Options" ) ).toBe( "nosniff" )
+				} finally {
+					helmetApp.close()
+				}
+			} )
+
 			it( "runs a registered param() callback before the route handler via app.param()", function() {
 				var result = variables.client.get( variables.baseUrl & "/parented/42" )
 				expect( JSONDeserialize( result.body ).code ).toBe( "parented-42" )

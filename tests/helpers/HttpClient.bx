@@ -117,7 +117,11 @@ class {
 			lastModified: responseHeaders.firstValue( "Last-Modified" ).orElse( "" ),
 			header: responseHeaders.firstValue( "X-Custom" ).orElse( "" ),
 			contentRange: responseHeaders.firstValue( "Content-Range" ).orElse( "" ),
-			acceptRanges: responseHeaders.firstValue( "Accept-Ranges" ).orElse( "" )
+			acceptRanges: responseHeaders.firstValue( "Accept-Ranges" ).orElse( "" ),
+			// Generic escape hatch for any header not worth its own named field
+			// above — getHeader("X-Frame-Options") etc.
+			getHeader: function( name ) { return responseHeaders.firstValue( name ).orElse( "" ) },
+			hasHeader: function( name ) { return responseHeaders.firstValue( name ).isPresent() }
 		}
 	}
 

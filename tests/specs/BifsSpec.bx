@@ -1,7 +1,7 @@
 /**
  * Exercises the global BIFs (boxExpress, boxExpressRouter, boxExpressJSON,
- * boxExpressUrlencoded, boxExpressStatic, boxExpressUpload, boxExpressSession)
- * for real — a running server built entirely through the BIFs,
+ * boxExpressUrlencoded, boxExpressStatic, boxExpressUpload, boxExpressSession,
+ * boxExpressHelmet) for real — a running server built entirely through the BIFs,
  * not the bxModules.boxexpress.models.* classes directly. These only resolve as
  * global functions once BoxLang has loaded this project as an actual module, which
  * run-tests.bxs sets up via a self-referencing boxlang_modules/boxexpress symlink.
@@ -20,6 +20,7 @@ class extends="testbox.system.BaseSpec" {
 		variables.app.use( boxExpressUrlencoded() )
 		variables.app.use( "/public", boxExpressStatic( expandPath( "tests/fixtures/public" ) ) )
 		variables.app.use( boxExpressSession() )
+		variables.app.use( boxExpressHelmet() )
 
 		variables.app.get( "/", ( req, res ) => {
 			res.send( "Hello via BIFs!" )
@@ -109,6 +110,14 @@ class extends="testbox.system.BaseSpec" {
 				var parsed = JSONDeserialize( result.body )
 				expect( parsed.files.doc[ 1 ].filename ).toBe( "doc.txt" )
 				expect( fileRead( parsed.files.doc[ 1 ].path ) ).toBe( "via bif" )
+			} )
+
+			it( "boxExpressHelmet() sets its default security headers", function() {
+				var result = variables.client.get( variables.baseUrl & "/" )
+				expect( result.getHeader( "X-Frame-Options" ) ).toBe( "SAMEORIGIN" )
+				expect( result.getHeader( "X-Content-Type-Options" ) ).toBe( "nosniff" )
+				expect( result.getHeader( "Referrer-Policy" ) ).toBe( "no-referrer" )
+				expect( result.hasHeader( "Strict-Transport-Security" ) ).toBeFalse()
 			} )
 
 			it( "boxExpressRouter() returns a mountable router", function() {

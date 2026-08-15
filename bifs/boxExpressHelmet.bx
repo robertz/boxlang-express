@@ -1,0 +1,15 @@
+/**
+ * Global BIF wrapping Helmet.protect() — mirrors the npm `helmet` package's
+ * basic usage.
+ *
+ *   app.use( boxExpressHelmet() )
+ *   app.use( boxExpressHelmet( { frameOptions: "DENY", hsts: true } ) )
+ */
+@BoxBIF
+class {
+
+	function invoke( options = {} ) {
+		return new bxModules.boxexpress.models.middleware.Helmet().protect( options )
+	}
+
+}

@@ -1,0 +1,60 @@
+/**
+ * Security-headers middleware, mirroring the npm `helmet` package's most
+ * commonly used defaults. Applies a set of response headers that harden
+ * common attack surfaces — clickjacking, MIME-sniffing, referrer leakage,
+ * cross-origin reads — with no configuration needed:
+ *   app.use( boxExpressHelmet() )
+ *
+ * Every option accepts three shapes: omitted (apply the built-in default),
+ * `false` (skip that header entirely), or an exact string to use instead of
+ * the default:
+ *   app.use( boxExpressHelmet( { frameOptions: "DENY" } ) )
+ *   app.use( boxExpressHelmet( { referrerPolicy: false } ) )
+ *
+ * HSTS and Content-Security-Policy are opt-in (off by default), not
+ * on-by-default like the rest of the headers here:
+ *   - HSTS only makes sense over an actually-secure connection.
+ *     BoxExpress's own HttpServer never terminates TLS itself — see
+ *     req.secure / app.set("trust proxy", true) — so turning it on
+ *     unconditionally could advertise a guarantee the app doesn't meet.
+ *   - A generic default Content-Security-Policy is exactly the kind of
+ *     thing that breaks a real app's own inline scripts/styles or asset
+ *     domains if applied blindly, so it needs the app's own policy string
+ *     rather than a one-size-fits-all default.
+ *
+ * BoxExpress never sets an X-Powered-By header in the first place (unlike
+ * Express), so there's nothing here to remove the way `helmet` does.
+ */
+class {
+
+	function protect( options = {} ) {
+		return function( req, res, next ) {
+			_applyHeader( res, "X-Content-Type-Options", options.contentTypeOptions ?: true, "nosniff" )
+			_applyHeader( res, "X-Frame-Options", options.frameOptions ?: true, "SAMEORIGIN" )
+			_applyHeader( res, "X-DNS-Prefetch-Control", options.dnsPrefetchControl ?: true, "off" )
+			_applyHeader( res, "Referrer-Policy", options.referrerPolicy ?: true, "no-referrer" )
+			_applyHeader( res, "X-Permitted-Cross-Domain-Policies", options.permittedCrossDomainPolicies ?: true, "none" )
+			_applyHeader( res, "Cross-Origin-Opener-Policy", options.crossOriginOpenerPolicy ?: true, "same-origin" )
+			_applyHeader( res, "Cross-Origin-Resource-Policy", options.crossOriginResourcePolicy ?: true, "same-origin" )
+			_applyHeader( res, "Strict-Transport-Security", options.hsts ?: false, "max-age=15552000; includeSubDomains" )
+			_applyHeader( res, "Content-Security-Policy", options.contentSecurityPolicy ?: false, "" )
+
+			next()
+		}
+	}
+
+	/**
+	 * optionValue is either a boolean (true = use defaultValue, false = skip
+	 * this header entirely) or an exact string to set instead.
+	 */
+	private function _applyHeader( res, name, optionValue, defaultValue ) {
+		if ( isBoolean( optionValue ) ) {
+			if ( optionValue ) {
+				res.set( name, defaultValue )
+			}
+			return
+		}
+		res.set( name, optionValue )
+	}
+
+}
