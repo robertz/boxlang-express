@@ -51,6 +51,13 @@ search), so `boxlang` has to be invoked from the directory containing
 `boxlang_modules/`, same as `node_modules` resolution rules of thumb in
 npm-land.
 
+**Gotcha:** if a module of the same name exists in *both* places — a
+project-local `boxlang_modules/boxexpress/` and a global
+`~/.boxlang/modules/boxexpress/` — the global copy wins, even though
+BoxLang's own `modulesDirectory` config lists the project-local path first.
+If a local change doesn't seem to take effect, check whether a global
+install is shadowing it.
+
 To develop against a local checkout instead (e.g. to test unreleased
 changes), symlink it in rather than installing from ForgeBox:
 
@@ -141,12 +148,21 @@ app.set( "reloadOnChange", true )
 
 Dev-only convenience — watches the current working directory (recursively,
 skipping `boxlang_modules/`, `node_modules/`, `.git`, and other dot-dirs) for
-`.bx`/`.bxs`/`.bxm` changes and restarts the process on save. There's no hot
-reload inside a running JVM once BoxLang has compiled your classes, so this
-works by closing the current server, replaying the exact original launch
-command (via `ProcessHandle.current()`, so it works whatever the entry
-script is named or however it was launched), and exiting — same net effect
-as running under `entr -r` or `nodemon`, just without the extra dependency.
+`.bx`/`.bxs`/`.bxm` changes and restarts the process on save. Registration is
+a one-time recursive snapshot taken at startup — a directory created *after*
+the server starts won't be picked up until the next restart.
+
+There's no hot reload inside a running JVM once BoxLang has compiled your
+classes, so a restart replaces the whole process: launch a replacement by
+replaying the exact original JVM invocation (via `ProcessHandle.current()`,
+so it works whatever the entry script is named or however it was launched),
+then close the current server and exit — same net effect as running under
+`entr -r` or `nodemon`, just without the extra dependency. Launching the
+replacement is attempted *before* closing the current server, not after —
+if it fails for any reason (a bad reconstructed command, a transient OS
+resource limit), that's caught, logged, and the current server is left
+running rather than dying with nothing to replace it.
+
 Separate from `app.set("env", "development")` — use either independently.
 
 ### Router (mountable sub-app)
@@ -213,7 +229,9 @@ Works the same on a standalone `Router` — `router.route(path)`.
 
 `req.method`, `req.path`, `req.originalUrl`, `req.query`, `req.params`,
 `req.headers`, `req.get(name)`, `req.cookies`, `req.ip`, `req.body` (populated
-by body-parsing middleware, empty struct otherwise).
+by body-parsing middleware, empty struct otherwise), `req.rawExchange()` (an
+escape hatch to the underlying `com.sun.net.httpserver.HttpExchange`, for
+anything not covered by the rest of the API).
 
 `req.ip` is always the direct TCP peer by default — safe, since a client
 can't spoof it, but wrong behind a reverse proxy (it'll report the proxy's
@@ -228,11 +246,23 @@ directly can forge their reported IP.
 `res.send(data)`, `res.json(data)`, `res.sendStatus(code)`,
 `res.redirect(url, code=302)`, `res.cookie(name,val,options)`,
 `res.sendBytes(bytes, contentType)`, `res.sendFile(path, options)`,
-`res.download(path, filename)`, `res.end(data)`, `res.render(view, data)`.
+`res.download(path, filename)`, `res.end(data)`, `res.render(view, data)`,
+`res.dump(data)` (sends BoxLang's rich, collapsible `dump()` HTML view of a
+variable as the response — a quick debugging escape hatch; see the note
+below).
 
 Calling a second terminal method (`send`/`json`/`redirect`/`end`/`sendBytes`/
-`sendFile`/`download`/`render`) on the same response throws — mirrors
+`sendFile`/`download`/`render`/`dump`) on the same response throws — mirrors
 Express's "headers already sent".
+
+`res.dump(data)` only forwards `data` to BoxLang's `dump()` BIF — none of
+its other options (`label`, `expand`, `top`, etc.). It round-trips the HTML
+through a temp file, since `dump(format="html")` only ever writes to the
+process console under BoxExpress's CLI-based `HttpServer`; that round trip,
+plus the dump renderer itself, cost more than `res.json()`, so it's meant
+for an occasional debug route, not a hot path. Reach for the same temp-file
+pattern directly (see [Response.bx](models/Response.bx)) if you need those
+extra options.
 
 `res.sendFile(path, options)` streams a file from disk, guessing its
 `Content-Type` from the extension (override with `options.contentType`).
