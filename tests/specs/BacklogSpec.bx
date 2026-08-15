@@ -1,0 +1,56 @@
+/**
+ * Regression coverage for listen()'s options.backlog. This only asserts the
+ * option is wired through to HttpServer.create() without breaking startup —
+ * it doesn't try to reproduce actual TCP accept-queue overflow, which is a
+ * real OS-level capacity concern but not something to chase inside a fast,
+ * deterministic unit test (that was verified manually instead, with a real
+ * load test — ab — against a throwaway app; see the listen() doc comment
+ * and README for the numbers: HttpServer.create(addr, 0), the JDK default,
+ * reliably refused connections once concurrency passed roughly 65-70 in
+ * repeated runs, and raising the backlog alone pushed that past 150).
+ */
+class extends="testbox.system.BaseSpec" {
+
+	function run() {
+		describe( "listen() backlog", function() {
+
+			it( "starts and serves requests with no backlog option (default of 1024 applies)", function() {
+				var port = 4601
+				var app = new "../../models/BoxExpress"()
+				app.get( "/", ( req, res ) => res.send( "ok" ) )
+				app.listen( port = port, options = { block: false } )
+
+				try {
+					expect( _get( port ) ).toBe( "ok" )
+				} finally {
+					app.close()
+				}
+			} )
+
+			it( "starts and serves requests with an explicit options.backlog", function() {
+				var port = 4602
+				var app = new "../../models/BoxExpress"()
+				app.get( "/", ( req, res ) => res.send( "ok" ) )
+				app.listen( port = port, options = { block: false, backlog: 16 } )
+
+				try {
+					expect( _get( port ) ).toBe( "ok" )
+				} finally {
+					app.close()
+				}
+			} )
+
+		} )
+	}
+
+	private function _get( targetPort ) {
+		var httpClient = createObject( "java", "java.net.http.HttpClient" ).newHttpClient()
+		var req = createObject( "java", "java.net.http.HttpRequest" ).newBuilder()
+			.uri( createObject( "java", "java.net.URI" ).init( "http://localhost:#targetPort#/" ) )
+			.GET()
+			.build()
+		var response = httpClient.send( req, createObject( "java", "java.net.http.HttpResponse$BodyHandlers" ).ofString() )
+		return response.body()
+	}
+
+}

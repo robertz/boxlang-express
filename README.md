@@ -157,6 +157,18 @@ loop polls every second — also works when called from a *different* thread
 than the one blocked in `listen()`, e.g. a `/shutdown` route handler running
 on its own virtual thread.
 
+`options.backlog` sets the underlying `HttpServer`'s TCP accept queue depth
+(default `1024`) — how many pending connections the OS will hold before
+refusing new ones outright, independent of how fast requests are actually
+being handled. Confirmed with a real load test, not assumed: the JDK's own
+default (`0`) started refusing connections with a reset once concurrency
+passed roughly 65-70 in repeated runs, even though request handling itself
+stayed fast the whole time; raising it to `1024` pushed that past 150 with
+no other change. Rarely needs touching — a reverse proxy in front (already
+required, since BoxExpress's `HttpServer` never terminates TLS itself) will
+usually queue connections before this limit is ever reached — but it's
+there for a direct-exposure deployment or a deliberately higher ceiling.
+
 Every request gets a line on stdout as soon as it's received —
 `[2026-08-10 10:45:41] GET /users/42 127.0.0.1` — there's no setting to turn
 this off yet.
@@ -900,6 +912,16 @@ Two more BoxLang-specific things that shaped how these are written:
   rather than `../fixtures/...`.
 
 ## Changelog
+
+**0.1.15**
+- **Fix:** `listen()` created its underlying `HttpServer` with a TCP accept
+  backlog of `0` (the JDK default), which turned out to be a real capacity
+  ceiling — confirmed with a live load test (`ab`): request handling itself
+  stayed fast and error-free throughout, but new connections started getting
+  refused with a reset once concurrency passed roughly 65-70 in repeated
+  runs. `listen(port, callback, { backlog: n })` now defaults to `1024`,
+  which pushed the same test past 150 with no other change. See
+  [BoxExpress.bx](models/BoxExpress.bx).
 
 **0.1.14**
 - **Fix + feature:** `app.get(path, ...)` routes now automatically answer

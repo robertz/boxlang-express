@@ -100,12 +100,24 @@ class {
 	 * inside a larger app that manages its own lifecycle) — close() still works to stop
 	 * the server either way, and also breaks the blocking loop if something else (e.g.
 	 * a route handler, on its own virtual thread) calls it while listen() is blocked.
+	 *
+	 * options.backlog sets the TCP accept queue depth (default 1024). The JDK default
+	 * (passing 0 to HttpServer.create()) is small enough that a burst of concurrent
+	 * connections — well within what the virtual-thread executor itself can handle —
+	 * gets refused with a connection reset instead of queued, confirmed with a real
+	 * load test (ab): request handling stayed fast and error-free the whole time, but
+	 * new connections started getting reset once concurrency passed roughly 65-70 with
+	 * the JDK default, and raising the backlog alone pushed that past 150 with no other
+	 * change. Exposed here instead of hardcoded higher, since a reverse proxy in front
+	 * (already required — see req.secure) may queue connections itself and make a large
+	 * backlog here redundant.
 	 */
 	function listen( port, callback, options = {} ) {
 		var addr = createObject( "java", "java.net.InetSocketAddress" ).init( port )
+		var backlog = options.backlog ?: 1024
 
 		try {
-			variables.httpServer = createObject( "java", "com.sun.net.httpserver.HttpServer" ).create( addr, 0 )
+			variables.httpServer = createObject( "java", "com.sun.net.httpserver.HttpServer" ).create( addr, backlog )
 		} catch ( any e ) {
 			var cause = e.getCause()
 			if ( !isNull( cause ) && cause.getClass().getName() == "java.net.BindException" ) {
