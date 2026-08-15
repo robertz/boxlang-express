@@ -131,6 +131,33 @@ class extends="testbox.system.BaseSpec" {
 				expect( hits ).toBe( [ "GET", "POST", "PUT", "DELETE" ] )
 			} )
 
+			it( "matches a HEAD request against a GET-registered route, running the same handler", function() {
+				var router = new "../../models/Router"()
+				var hit = false
+				router.get( "/greet", ( req, res ) => { hit = true } )
+				router.dispatch( _fakeReq( "HEAD", "/greet" ), _fakeRes() )
+				expect( hit ).toBeTrue()
+			} )
+
+			it( "does not fall back to HEAD for a route registered under a different method", function() {
+				var router = new "../../models/Router"()
+				var hit = false
+				router.post( "/greet", ( req, res ) => { hit = true } )
+				var res = _fakeRes()
+				router.dispatch( _fakeReq( "HEAD", "/greet" ), res )
+				expect( hit ).toBeFalse()
+				expect( res.getStatusCode() ).toBe( 404 )
+			} )
+
+			it( "prefers an explicitly registered app.head() handler over falling back to GET", function() {
+				var router = new "../../models/Router"()
+				var hits = []
+				router.head( "/greet", ( req, res ) => { hits.append( "head-handler" ) } )
+				router.get( "/greet", ( req, res ) => { hits.append( "get-handler" ) } )
+				router.dispatch( _fakeReq( "HEAD", "/greet" ), _fakeRes() )
+				expect( hits ).toBe( [ "head-handler" ] )
+			} )
+
 			it( "does not match a different method", function() {
 				var router = new "../../models/Router"()
 				var hit = false

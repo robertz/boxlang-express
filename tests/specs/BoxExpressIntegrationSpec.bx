@@ -441,6 +441,27 @@ class extends="testbox.system.BaseSpec" {
 				expect( JSONDeserialize( result.body ).deleted ).toBe( "7" )
 			} )
 
+			it( "answers HEAD on a GET route with the same headers but no body", function() {
+				var result = variables.client.request( "HEAD", variables.baseUrl & "/" )
+				expect( result.statusCode ).toBe( 200 )
+				expect( result.body ).toBe( "" )
+				expect( result.contentType ).toInclude( "text/html" )
+			} )
+
+			it( "answers HEAD on a static file with no body but the usual conditional-GET headers", function() {
+				var result = variables.client.request( "HEAD", variables.baseUrl & "/public/hello.txt" )
+				expect( result.statusCode ).toBe( 200 )
+				expect( result.body ).toBe( "" )
+				expect( result.etag ).notToBe( "" )
+				expect( result.acceptRanges ).toBe( "bytes" )
+			} )
+
+			it( "answers HEAD with a 404 and no body when nothing matches", function() {
+				var result = variables.client.request( "HEAD", variables.baseUrl & "/does-not-exist" )
+				expect( result.statusCode ).toBe( 404 )
+				expect( result.body ).toBe( "" )
+			} )
+
 			it( "matches every HTTP method via app.all()", function() {
 				expect( variables.client.get( variables.baseUrl & "/any-method" ).body ).toBe( "matched: GET" )
 				expect( variables.client.post( variables.baseUrl & "/any-method" ).body ).toBe( "matched: POST" )

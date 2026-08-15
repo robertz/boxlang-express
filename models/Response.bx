@@ -342,7 +342,19 @@ class {
 		}
 		variables.sent = true
 
+		// A HEAD response must never have a body, even though every handler
+		// above this (res.json(), res.sendFile(), etc.) still built one the
+		// normal way — HEAD reuses the same GET route/handler and just has its
+		// body thrown away here. Content-Length is set explicitly first so a
+		// HEAD response still reports the size a GET would have sent; passing
+		// -1 to sendResponseHeaders() then tells the exchange not to expect
+		// (or wait for) an actual body write.
+		var isHead = variables.exchange.getRequestMethod().equalsIgnoreCase( "HEAD" )
+
 		if ( bodyBytes.len() == 0 ) {
+			variables.exchange.sendResponseHeaders( variables.statusCode, -1 )
+		} else if ( isHead ) {
+			set( "Content-Length", toString( bodyBytes.len() ) )
 			variables.exchange.sendResponseHeaders( variables.statusCode, -1 )
 		} else {
 			variables.exchange.sendResponseHeaders( variables.statusCode, bodyBytes.len() )

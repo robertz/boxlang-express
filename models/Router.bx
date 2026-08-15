@@ -35,6 +35,10 @@ class {
 		return _addRoute( "DELETE", path, _extraHandlers( arguments ) )
 	}
 
+	function head( path ) {
+		return _addRoute( "HEAD", path, _extraHandlers( arguments ) )
+	}
+
 	function all( path ) {
 		return _addRoute( "ALL", path, _extraHandlers( arguments ) )
 	}
@@ -140,7 +144,11 @@ class {
 				return next()
 			}
 
-			if ( layer.method != "USE" && layer.method != "ALL" && layer.method != req.method ) {
+			// A HEAD request also matches a GET-registered layer (same handler
+			// Express reuses for HEAD) — a layer registered with app.head() still
+			// wins if it comes first in the stack, since that's a plain exact match.
+			var methodMatches = ( layer.method == req.method ) || ( req.method == "HEAD" && layer.method == "GET" )
+			if ( layer.method != "USE" && layer.method != "ALL" && !methodMatches ) {
 				return isNull( err ) ? next() : next( err )
 			}
 

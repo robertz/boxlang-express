@@ -45,6 +45,18 @@ class {
 		return this
 	}
 
+	/**
+	 * Explicit HEAD handler — usually unnecessary, since any app.get() route
+	 * already answers HEAD automatically (same handler, body suppressed).
+	 * Register one only when HEAD should behave differently than just running
+	 * the GET handler with the body thrown away (e.g. skipping an expensive
+	 * computation the response body needed but the headers alone don't).
+	 */
+	function head( path ) {
+		variables.router.head( argumentCollection = arguments )
+		return this
+	}
+
 	function all( path ) {
 		variables.router.all( argumentCollection = arguments )
 		return this

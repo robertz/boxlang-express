@@ -122,7 +122,7 @@ which matters for a repo whose own scripts live in subdirectories
 
 ### App
 
-- `app.get/post/put/patch/delete/all(path, ...handlers)`
+- `app.get/post/put/patch/delete/head/all(path, ...handlers)`
 - `app.use(handler)` / `app.use(path, handler)` / `app.use(path, router)`
 - `app.param(name, callback)` — see [Route params](#route-params-appparamname-callback) below
 - `app.route(path)` — see [Chainable routes](#chainable-routes-approutepath) below
@@ -216,6 +216,15 @@ restriction as `*`: an optional param is only supported as the *final* path
 segment — `/a/:id?/b` throws at registration time rather than silently doing
 something you didn't ask for, since matching an optional param anywhere else
 would need real backtracking this router doesn't implement.
+
+Any `app.get(path, ...)` route automatically answers `HEAD` too — same
+handler, same headers (including `Content-Length`), just with the body
+thrown away before it reaches the client, same as Express. This applies to
+static file serving as well. Register `app.head(path, ...)` explicitly only
+when `HEAD` should behave differently than "run the `GET` handler and
+discard the body" — e.g. to skip work the body needed but the headers
+alone don't — and put it *before* the matching `app.get()` in registration
+order, since the first matching layer in the stack wins.
 
 #### Route params (`app.param(name, callback)`)
 
@@ -626,6 +635,15 @@ Two more BoxLang-specific things that shaped how these are written:
   rather than `../fixtures/...`.
 
 ## Changelog
+
+**0.1.14**
+- **Fix + feature:** `app.get(path, ...)` routes now automatically answer
+  `HEAD` too — same handler and headers (including `Content-Length`), body
+  discarded, same as Express — instead of 404ing. This also fixes a real bug
+  in static file serving: it already accepted `HEAD` requests, but sent the
+  full file body anyway, a spec violation for a `HEAD` response. Register
+  `app.head(path, ...)` explicitly (before the matching `app.get()`) only
+  when `HEAD` should behave differently than discarding the `GET` body.
 
 **0.1.13**
 - Added `Range` request support (RFC 7233) to `res.sendFile()`/`download()`
