@@ -53,10 +53,8 @@ Published on [ForgeBox](https://www.forgebox.io/) as `boxlang-express`:
 box install boxlang-express
 ```
 
-Unlike a typical CommandBox package, that installs into the runtime-wide
-`~/.boxlang/modules/` by **default** — since that's where the BoxLang
-runtime itself looks — not a project-local folder. Pass `--local` for a
-project-local install instead:
+If you would like to install the module locally, use the `--local` flag
+during installation.
 
 ```bash
 box install boxlang-express --local
