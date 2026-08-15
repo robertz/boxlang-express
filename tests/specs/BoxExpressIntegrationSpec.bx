@@ -160,6 +160,15 @@ class extends="testbox.system.BaseSpec" {
 			res.json( { id: req.params.id ?: "(absent)" } )
 		} )
 
+		variables.app.use( "/multi-use-test",
+			( req, res, next ) => { req.testOrder = [ "mw1" ]; next() },
+			( req, res, next ) => { req.testOrder.append( "mw2" ); next() }
+		)
+		variables.app.get( "/multi-use-test", ( req, res ) => {
+			req.testOrder.append( "route" )
+			res.json( { order: req.testOrder } )
+		} )
+
 		variables.app.param( "code", ( req, res, next, value ) => {
 			req.params.code = "parented-" & value
 			next()
@@ -531,6 +540,12 @@ class extends="testbox.system.BaseSpec" {
 				} finally {
 					proxyApp.close()
 				}
+			} )
+
+			it( "runs multiple middleware registered from a single app.use(path, ...) call, in order", function() {
+				var result = variables.client.get( variables.baseUrl & "/multi-use-test" )
+				expect( result.statusCode ).toBe( 200 )
+				expect( JSONDeserialize( result.body ).order ).toBe( [ "mw1", "mw2", "route" ] )
 			} )
 
 			it( "runs a registered param() callback before the route handler via app.param()", function() {

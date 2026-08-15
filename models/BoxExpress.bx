@@ -62,7 +62,13 @@ class {
 		return this
 	}
 
-	function use( pathOrHandler, handlerOrRouter ) {
+	/**
+	 * use( handler ) / use( handler1, handler2, ... )
+	 * use( mountPath, handler ) / use( mountPath, handler1, handler2, ..., router )
+	 * See Router.use() for the full signature — this just forwards every
+	 * argument through, variadic middleware chains included.
+	 */
+	function use( pathOrHandler = "" ) {
 		variables.router.use( argumentCollection = arguments )
 		return this
 	}

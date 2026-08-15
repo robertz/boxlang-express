@@ -75,33 +75,54 @@ class {
 
 	/**
 	 * use( middlewareFn )
+	 * use( middlewareFn1, middlewareFn2, ... )
 	 * use( mountPath, middlewareFn )
+	 * use( mountPath, middlewareFn1, middlewareFn2, ..., subRouter )
 	 * use( mountPath, subRouter )
+	 *
+	 * The first argument is a mount path only when it's a plain string — anything
+	 * else (a closure/function, or a Router) is a target, and every argument
+	 * after the path (or all of them, when there's no path) is registered as
+	 * its own stack layer at that same mount point, in order.
 	 */
-	function use( pathOrHandler, handlerOrRouter ) {
-		var mountPath = "/"
-		var target = pathOrHandler
-
-		if ( !isNull( handlerOrRouter ) ) {
-			mountPath = pathOrHandler
-			target = handlerOrRouter
+	function use( pathOrHandler = "" ) {
+		if ( arguments.count() == 0 ) {
+			throw( message = "use() requires at least one handler or router", type = "BoxExpress.MissingHandler" )
 		}
 
-		if ( isInstanceOf( target, "Router" ) ) {
-			variables.stack.append( {
-				method: "USE",
-				isRouter: true,
-				router: target,
-				pattern: _parsePath( mountPath )
-			} )
-		} else {
-			variables.stack.append( {
-				method: "USE",
-				isRouter: false,
-				handler: target,
-				isErrorHandler: _isErrorHandler( target ),
-				pattern: _parsePath( mountPath )
-			} )
+		var mountPath = "/"
+		var startIndex = 1
+
+		if ( isSimpleValue( pathOrHandler ) ) {
+			mountPath = pathOrHandler
+			startIndex = 2
+		}
+
+		if ( startIndex > arguments.count() ) {
+			throw( message = "use(""#mountPath#"") requires at least one handler or router", type = "BoxExpress.MissingHandler" )
+		}
+
+		var pattern = _parsePath( mountPath )
+
+		for ( var i = startIndex; i <= arguments.count(); i++ ) {
+			var target = arguments[ i ]
+
+			if ( isInstanceOf( target, "Router" ) ) {
+				variables.stack.append( {
+					method: "USE",
+					isRouter: true,
+					router: target,
+					pattern: pattern
+				} )
+			} else {
+				variables.stack.append( {
+					method: "USE",
+					isRouter: false,
+					handler: target,
+					isErrorHandler: _isErrorHandler( target ),
+					pattern: pattern
+				} )
+			}
 		}
 
 		return this

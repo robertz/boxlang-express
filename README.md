@@ -463,6 +463,24 @@ Error-handling middleware is any handler with **4** parameters —
 `(err, req, res, next) => {...}` — detected the same way Express does
 (`fn.length === 4`), and should be registered last.
 
+`app.use(handler)` / `app.use(path, handler)` both also take more than one
+handler (or a mix of handlers and a mountable `Router`) in a single call —
+`app.use(mw1, mw2, mw3)` registers three separate stack layers at once,
+running in the order given, same as `app.use(mw1); app.use(mw2);
+app.use(mw3)` would:
+
+```js
+app.use(
+	( req, res, next ) => { println( "#req.method# #req.path#" ); next() },
+	( req, res, next ) => { res.set( "X-Powered-By", "BoxExpress" ); next() }
+)
+```
+
+The first argument is only ever treated as a mount path when it's a plain
+string — anything else (a closure, or a `Router`) is a target, so
+`app.use(handler)` and `app.use(path, handler)` are told apart the same way
+regardless of how many more arguments follow.
+
 Built-in middleware factories (opt-in, same philosophy as `express.json()`),
 each with its own global BIF mirroring the Express function of the same name:
 
@@ -644,6 +662,15 @@ Two more BoxLang-specific things that shaped how these are written:
   full file body anyway, a spec violation for a `HEAD` response. Register
   `app.head(path, ...)` explicitly (before the matching `app.get()`) only
   when `HEAD` should behave differently than discarding the `GET` body.
+- **Fix:** `app.use()`/`router.use()` only ever accepted a single handler
+  (or a single path + single handler), unlike route registration
+  (`app.get(path, mw1, mw2, handler)`), which already took a variadic
+  chain. Calling `app.use(mw1, mw2, mw3)` — a common Express pattern —
+  didn't just silently drop the extra arguments, it threw a confusing
+  low-level error (the second handler got mistaken for a mount path).
+  `use()` now accepts any number of handlers (and/or a `Router`) in one
+  call, at the same mount point, registered in order. See
+  [Router.bx](models/Router.bx).
 
 **0.1.13**
 - Added `Range` request support (RFC 7233) to `res.sendFile()`/`download()`

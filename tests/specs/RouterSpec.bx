@@ -178,6 +178,56 @@ class extends="testbox.system.BaseSpec" {
 				expect( order ).toBe( [ "mw1", "mw2", "route" ] )
 			} )
 
+			it( "registers multiple middleware from a single use() call, running them in order", function() {
+				var router = new "../../models/Router"()
+				var order = []
+				router.use(
+					( req, res, next ) => { order.append( "mw1" ); next() },
+					( req, res, next ) => { order.append( "mw2" ); next() },
+					( req, res, next ) => { order.append( "mw3" ); next() }
+				)
+				router.get( "/x", ( req, res ) => { order.append( "route" ) } )
+				router.dispatch( _fakeReq( "GET", "/x" ), _fakeRes() )
+				expect( order ).toBe( [ "mw1", "mw2", "mw3", "route" ] )
+			} )
+
+			it( "registers multiple path-scoped middleware from a single use(path, ...) call", function() {
+				var router = new "../../models/Router"()
+				var order = []
+				router.use( "/api",
+					( req, res, next ) => { order.append( "api-mw1" ); next() },
+					( req, res, next ) => { order.append( "api-mw2" ); next() }
+				)
+				router.get( "/api/x", ( req, res ) => { order.append( "route" ) } )
+				router.dispatch( _fakeReq( "GET", "/api/x" ), _fakeRes() )
+				router.dispatch( _fakeReq( "GET", "/other" ), _fakeRes() )
+				expect( order ).toBe( [ "api-mw1", "api-mw2", "route" ] )
+			} )
+
+			it( "registers a mix of middleware and a router from a single use(path, ...) call", function() {
+				var router = new "../../models/Router"()
+				var order = []
+				var subRouter = new "../../models/Router"()
+				subRouter.get( "/ping", ( req, res ) => { order.append( "sub-route" ) } )
+
+				router.use( "/api",
+					( req, res, next ) => { order.append( "api-mw" ); next() },
+					subRouter
+				)
+				router.dispatch( _fakeReq( "GET", "/api/ping" ), _fakeRes() )
+				expect( order ).toBe( [ "api-mw", "sub-route" ] )
+			} )
+
+			it( "throws when use() is called with no handler or router", function() {
+				var router = new "../../models/Router"()
+				expect( function() {
+					router.use()
+				} ).toThrow( "BoxExpress.MissingHandler" )
+				expect( function() {
+					router.use( "/api" )
+				} ).toThrow( "BoxExpress.MissingHandler" )
+			} )
+
 			it( "skips remaining middleware once a response is sent", function() {
 				var router = new "../../models/Router"()
 				var reachedSecond = false
