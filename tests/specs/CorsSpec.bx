@@ -1,0 +1,124 @@
+/**
+ * Unit tests for the CORS middleware — fake req/res, no real HttpExchange,
+ * since Cors.cors()'s handler only ever reads req.method/req.headers and
+ * calls res.set()/status()/end()/next().
+ */
+class extends="testbox.system.BaseSpec" {
+
+	function run() {
+		describe( "Cors", function() {
+
+			it( "reflects the request's Origin by default and calls next()", function() {
+				var handler = new "../../models/middleware/Cors"().cors()
+				var res = _fakeRes()
+				var nextCalled = false
+				handler( _fakeReq( "GET", { "Origin": "https://example.com" } ), res, function() { nextCalled = true } )
+
+				expect( res.getHeaders()[ "Access-Control-Allow-Origin" ] ).toBe( "https://example.com" )
+				expect( res.getHeaders()[ "Vary" ] ).toBe( "Origin" )
+				expect( nextCalled ).toBeTrue()
+			} )
+
+			it( "allows any origin with a wildcard when the request has no Origin header", function() {
+				var handler = new "../../models/middleware/Cors"().cors()
+				var res = _fakeRes()
+				handler( _fakeReq( "GET", {} ), res, function() {} )
+
+				expect( res.getHeaders()[ "Access-Control-Allow-Origin" ] ).toBe( "*" )
+				expect( res.getHeaders().keyExists( "Vary" ) ).toBeFalse()
+			} )
+
+			it( "sets no Access-Control-Allow-Origin header at all when origin: false", function() {
+				var handler = new "../../models/middleware/Cors"().cors( { origin: false } )
+				var res = _fakeRes()
+				var nextCalled = false
+				handler( _fakeReq( "GET", { "Origin": "https://example.com" } ), res, function() { nextCalled = true } )
+
+				expect( res.getHeaders().keyExists( "Access-Control-Allow-Origin" ) ).toBeFalse()
+				expect( nextCalled ).toBeTrue()
+			} )
+
+			it( "allows a listed origin and rejects one not in the list", function() {
+				var handler = new "../../models/middleware/Cors"().cors( { origin: [ "https://a.com", "https://b.com" ] } )
+
+				var allowed = _fakeRes()
+				handler( _fakeReq( "GET", { "Origin": "https://a.com" } ), allowed, function() {} )
+				expect( allowed.getHeaders()[ "Access-Control-Allow-Origin" ] ).toBe( "https://a.com" )
+
+				var rejected = _fakeRes()
+				handler( _fakeReq( "GET", { "Origin": "https://evil.com" } ), rejected, function() {} )
+				expect( rejected.getHeaders().keyExists( "Access-Control-Allow-Origin" ) ).toBeFalse()
+			} )
+
+			it( "sets Access-Control-Allow-Credentials only when credentials: true", function() {
+				var handler = new "../../models/middleware/Cors"().cors( { credentials: true } )
+				var res = _fakeRes()
+				handler( _fakeReq( "GET", { "Origin": "https://example.com" } ), res, function() {} )
+
+				expect( res.getHeaders()[ "Access-Control-Allow-Credentials" ] ).toBe( "true" )
+			} )
+
+			it( "answers a preflight OPTIONS request directly with 204 and does not call next()", function() {
+				var handler = new "../../models/middleware/Cors"().cors( { maxAge: 600 } )
+				var res = _fakeRes()
+				var nextCalled = false
+				handler(
+					_fakeReq( "OPTIONS", { "Origin": "https://example.com", "Access-Control-Request-Method": "POST", "Access-Control-Request-Headers": "X-Custom" } ),
+					res,
+					function() { nextCalled = true }
+				)
+
+				expect( res.getStatusCode() ).toBe( 204 )
+				expect( res.getHeaders()[ "Access-Control-Allow-Methods" ] ).toBe( "GET, HEAD, PUT, PATCH, POST, DELETE" )
+				expect( res.getHeaders()[ "Access-Control-Allow-Headers" ] ).toBe( "X-Custom" )
+				expect( res.getHeaders()[ "Access-Control-Max-Age" ] ).toBe( "600" )
+				expect( nextCalled ).toBeFalse()
+			} )
+
+			it( "calls next() instead of short-circuiting when preflightContinue: true", function() {
+				var handler = new "../../models/middleware/Cors"().cors( { preflightContinue: true } )
+				var res = _fakeRes()
+				var nextCalled = false
+				handler(
+					_fakeReq( "OPTIONS", { "Origin": "https://example.com", "Access-Control-Request-Method": "POST" } ),
+					res,
+					function() { nextCalled = true }
+				)
+
+				expect( nextCalled ).toBeTrue()
+				expect( res.isSent() ).toBeFalse()
+			} )
+
+			it( "treats a plain OPTIONS request with no Access-Control-Request-Method as a normal request", function() {
+				var handler = new "../../models/middleware/Cors"().cors()
+				var res = _fakeRes()
+				var nextCalled = false
+				handler( _fakeReq( "OPTIONS", { "Origin": "https://example.com" } ), res, function() { nextCalled = true } )
+
+				expect( nextCalled ).toBeTrue()
+				expect( res.getHeaders().keyExists( "Access-Control-Allow-Methods" ) ).toBeFalse()
+			} )
+
+		} )
+	}
+
+	private function _fakeReq( method, headers ) {
+		return { method: method, headers: headers }
+	}
+
+	private function _fakeRes() {
+		var sent = false
+		var statusCode = 200
+		var headers = {}
+		var res = {}
+		res.isSent = function() { return sent }
+		res.status = function( code ) { statusCode = code; return res }
+		res.set = function( name, value ) { headers[ name ] = value; return res }
+		res.end = function() { sent = true; return res }
+		res.json = function( data ) { sent = true; return res }
+		res.getStatusCode = function() { return statusCode }
+		res.getHeaders = function() { return headers }
+		return res
+	}
+
+}

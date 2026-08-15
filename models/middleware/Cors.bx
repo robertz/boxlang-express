@@ -1,0 +1,107 @@
+/**
+ * Cross-Origin Resource Sharing middleware, mirroring the npm `cors`
+ * package's most commonly used options:
+ *   app.use( boxExpressCors() )                                    // reflect any Origin
+ *   app.use( boxExpressCors( { origin: "https://example.com" } ) )
+ *   app.use( boxExpressCors( { origin: [ "https://a.com", "https://b.com" ], credentials: true } ) )
+ *
+ * A CORS preflight (`OPTIONS` with an `Access-Control-Request-Method`
+ * header) is answered directly by this middleware — a `204` with the
+ * relevant `Access-Control-*` headers and no body — rather than falling
+ * through to the router, since nothing would otherwise be registered to
+ * handle `OPTIONS` on an arbitrary route. Pass `{ preflightContinue: true }`
+ * to call `next()` instead, if a later handler needs to see the preflight
+ * request itself.
+ */
+class {
+
+	function cors( options = {} ) {
+		var originOption = options.origin ?: true
+		var methodsHeader = _normalizeList( options.methods ?: [ "GET", "HEAD", "PUT", "PATCH", "POST", "DELETE" ] )
+		var allowedHeadersOption = options.allowedHeaders ?: javacast( "null", "" )
+		var exposedHeadersHeader = _normalizeList( options.exposedHeaders ?: "" )
+		var credentials = options.credentials ?: false
+		var maxAge = options.maxAge ?: javacast( "null", "" )
+		var preflightContinue = options.preflightContinue ?: false
+		var optionsSuccessStatus = options.optionsSuccessStatus ?: 204
+
+		return function( req, res, next ) {
+			var requestOrigin = req.headers[ "Origin" ] ?: ""
+			var allowedOrigin = _resolveOrigin( originOption, requestOrigin )
+
+			if ( len( allowedOrigin ) ) {
+				res.set( "Access-Control-Allow-Origin", allowedOrigin )
+				if ( allowedOrigin != "*" ) {
+					res.set( "Vary", "Origin" )
+				}
+			}
+
+			if ( credentials ) {
+				res.set( "Access-Control-Allow-Credentials", "true" )
+			}
+
+			if ( len( exposedHeadersHeader ) ) {
+				res.set( "Access-Control-Expose-Headers", exposedHeadersHeader )
+			}
+
+			var isPreflight = ( req.method == "OPTIONS" ) && len( req.headers[ "Access-Control-Request-Method" ] ?: "" )
+
+			if ( !isPreflight ) {
+				return next()
+			}
+
+			res.set( "Access-Control-Allow-Methods", methodsHeader )
+
+			var allowedHeadersHeader = !isNull( allowedHeadersOption )
+				? _normalizeList( allowedHeadersOption )
+				: ( req.headers[ "Access-Control-Request-Headers" ] ?: "" )
+			if ( len( allowedHeadersHeader ) ) {
+				res.set( "Access-Control-Allow-Headers", allowedHeadersHeader )
+			}
+
+			if ( !isNull( maxAge ) ) {
+				res.set( "Access-Control-Max-Age", toString( maxAge ) )
+			}
+
+			if ( preflightContinue ) {
+				return next()
+			}
+
+			res.status( optionsSuccessStatus ).end()
+		}
+	}
+
+	/**
+	 * true = reflect whatever Origin the request sent (or "*" if there wasn't
+	 * one); false = CORS disabled, no header set; a string = only that exact
+	 * origin (or "*" itself, sent verbatim); an array = only an origin in the
+	 * list, reflected back exactly as sent. Returns "" when nothing matches,
+	 * meaning no Access-Control-Allow-Origin header gets set at all.
+	 */
+	private function _resolveOrigin( originOption, requestOrigin ) {
+		if ( isBoolean( originOption ) ) {
+			if ( !originOption ) {
+				return ""
+			}
+			return len( requestOrigin ) ? requestOrigin : "*"
+		}
+
+		if ( isArray( originOption ) ) {
+			return originOption.findNoCase( requestOrigin ) > 0 ? requestOrigin : ""
+		}
+
+		if ( originOption == "*" ) {
+			return "*"
+		}
+
+		return originOption == requestOrigin ? requestOrigin : ""
+	}
+
+	private function _normalizeList( value ) {
+		if ( isArray( value ) ) {
+			return value.toList( ", " )
+		}
+		return value
+	}
+
+}

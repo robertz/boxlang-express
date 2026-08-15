@@ -1,7 +1,8 @@
 /**
  * Exercises the global BIFs (boxExpress, boxExpressRouter, boxExpressJSON,
  * boxExpressUrlencoded, boxExpressStatic, boxExpressUpload, boxExpressSession,
- * boxExpressHelmet) for real — a running server built entirely through the BIFs,
+ * boxExpressHelmet, boxExpressCors, boxExpressRateLimit) for real — a
+ * running server built entirely through the BIFs,
  * not the bxModules.boxexpress.models.* classes directly. These only resolve as
  * global functions once BoxLang has loaded this project as an actual module, which
  * run-tests.bxs sets up via a self-referencing boxlang_modules/boxexpress symlink.
@@ -41,6 +42,11 @@ class extends="testbox.system.BaseSpec" {
 
 		variables.app.post( "/upload", boxExpressUpload( { dest: variables.uploadDest } ), ( req, res ) => {
 			res.json( { files: req.files } )
+		} )
+
+		variables.app.use( "/cors-test", boxExpressCors( { origin: [ "https://allowed.example.com" ] } ) )
+		variables.app.get( "/cors-test", ( req, res ) => {
+			res.json( { ok: true } )
 		} )
 
 		variables.apiRouter = boxExpressRouter()
@@ -118,6 +124,40 @@ class extends="testbox.system.BaseSpec" {
 				expect( result.getHeader( "X-Content-Type-Options" ) ).toBe( "nosniff" )
 				expect( result.getHeader( "Referrer-Policy" ) ).toBe( "no-referrer" )
 				expect( result.hasHeader( "Strict-Transport-Security" ) ).toBeFalse()
+			} )
+
+			it( "boxExpressCors() reflects an allowed origin and rejects one not in the list", function() {
+				var allowed = variables.client.getWithHeaders(
+					variables.baseUrl & "/cors-test",
+					{ "Origin": "https://allowed.example.com" }
+				)
+				expect( allowed.getHeader( "Access-Control-Allow-Origin" ) ).toBe( "https://allowed.example.com" )
+
+				var rejected = variables.client.getWithHeaders(
+					variables.baseUrl & "/cors-test",
+					{ "Origin": "https://evil.example.com" }
+				)
+				expect( rejected.hasHeader( "Access-Control-Allow-Origin" ) ).toBeFalse()
+			} )
+
+			it( "boxExpressRateLimit() returns 429 once the limit is exceeded", function() {
+				var rateLimitPort = 4328
+				var rateLimitApp = boxExpress()
+				rateLimitApp.use( boxExpressRateLimit( { windowMs: 60000, max: 1 } ) )
+				rateLimitApp.get( "/", ( req, res ) => res.send( "ok" ) )
+				rateLimitApp.listen( port = rateLimitPort, options = { block: false } )
+				sleep( 300 )
+
+				try {
+					var first = variables.client.get( "http://localhost:#rateLimitPort#/" )
+					expect( first.statusCode ).toBe( 200 )
+
+					var second = variables.client.get( "http://localhost:#rateLimitPort#/" )
+					expect( second.statusCode ).toBe( 429 )
+					expect( second.hasHeader( "Retry-After" ) ).toBeTrue()
+				} finally {
+					rateLimitApp.close()
+				}
 			} )
 
 			it( "boxExpressRouter() returns a mountable router", function() {

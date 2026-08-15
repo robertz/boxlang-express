@@ -30,8 +30,8 @@ works identically if you'd rather be explicit about where it comes from. Every
 other model gets the same treatment, each its own thin BIF wrapper: the
 built-in middleware factories — `boxExpressJSON()`, `boxExpressUrlencoded()`,
 `boxExpressStatic()`, `boxExpressUpload()`, `boxExpressSession()`,
-`boxExpressHelmet()` (see [Middleware](#middleware) below) — and
-`boxExpressRouter()`, wrapping `new
+`boxExpressHelmet()`, `boxExpressCors()`, `boxExpressRateLimit()` (see
+[Middleware](#middleware) below) — and `boxExpressRouter()`, wrapping `new
 bxModules.boxexpress.models.Router()` and mirroring Express's own
 `express.Router()`.
 
@@ -491,6 +491,8 @@ app.use( boxExpressUrlencoded() )  // parses application/x-www-form-urlencoded b
 app.use( "/public", boxExpressStatic( expandPath( "./public" ) ) )
 app.use( boxExpressSession() )     // cookie-based sessions, req.session
 app.use( boxExpressHelmet() )      // security headers — see below
+app.use( boxExpressCors() )        // Cross-Origin Resource Sharing — see below
+app.use( boxExpressRateLimit() )   // 100 req/min per req.ip — see below
 ```
 
 Same thing spelled out via the underlying classes, if you'd rather not lean
@@ -638,6 +640,76 @@ own policy string rather than a one-size-fits-all default.
 BoxExpress never sets an `X-Powered-By` header in the first place (unlike
 Express), so there's nothing here to remove the way `helmet` does.
 
+#### CORS (`boxExpressCors()` / `Cors`)
+
+Cross-Origin Resource Sharing, mirroring the npm [`cors`](https://github.com/expressjs/cors)
+package's most commonly used options. With no options, reflects whatever
+`Origin` the request sent (or `*` if there wasn't one) — permissive by
+default, same as the npm package:
+
+```js
+app.use( boxExpressCors() )
+app.use( boxExpressCors( { origin: "https://example.com" } ) )
+app.use( boxExpressCors( { origin: [ "https://a.com", "https://b.com" ], credentials: true } ) )
+```
+
+| Option | Default | Effect |
+|---|---|---|
+| `origin` | `true` | `true` reflects the request's `Origin`; `false` disables CORS entirely; a string allows only that exact origin (or `"*"` verbatim); an array allows any origin in the list |
+| `methods` | `GET,HEAD,PUT,PATCH,POST,DELETE` | `Access-Control-Allow-Methods` on a preflight response |
+| `allowedHeaders` | *(reflects the preflight's own request)* | `Access-Control-Allow-Headers` on a preflight response |
+| `exposedHeaders` | *(none)* | `Access-Control-Expose-Headers` on every response |
+| `credentials` | `false` | sets `Access-Control-Allow-Credentials: true` when `true` |
+| `maxAge` | *(none)* | `Access-Control-Max-Age` (seconds) on a preflight response |
+| `preflightContinue` | `false` | call `next()` for a preflight instead of answering it directly |
+| `optionsSuccessStatus` | `204` | status code for a handled preflight |
+
+A CORS preflight — an `OPTIONS` request carrying
+`Access-Control-Request-Method` — is answered directly by this middleware
+(status `204`, the relevant headers, no body) rather than falling through
+to the router, since nothing would otherwise be registered to handle
+`OPTIONS` on an arbitrary route. Pass `{ preflightContinue: true }` if a
+later handler needs to see the preflight request itself instead.
+
+#### Rate limiting (`boxExpressRateLimit()` / `RateLimit`)
+
+Fixed-window rate limiting, mirroring the npm
+[`express-rate-limit`](https://github.com/express-rate-limit/express-rate-limit)
+package's most commonly used options:
+
+```js
+app.use( boxExpressRateLimit() )                                     // 100 req/min per req.ip
+app.use( "/login", boxExpressRateLimit( { windowMs: 15 * 60000, max: 5 } ) )  // 5 req/15min, scoped to one route
+```
+
+Each call creates its own counters — call it more than once to give
+different routes independent limits, e.g. a strict one scoped to
+`"/login"` alongside a looser one applied globally. Sets the draft-standard
+`RateLimit-Limit`/`RateLimit-Remaining`/`RateLimit-Reset` headers (disable
+with `{ standardHeaders: false }`), and responds `429` with `Retry-After`
+once a key's count exceeds `max` within `windowMs`:
+
+```js
+app.use( boxExpressRateLimit( {
+	windowMs: 60000,                              // 1 minute window
+	max: 20,                                      // 20 requests per window per key
+	keyGenerator: ( req ) => req.session.userId ?: req.ip,  // key on something other than IP
+	message: { error: true, message: "Slow down." }
+} ) )
+```
+
+Fixed window, not a sliding one or a token bucket: each key's counter
+resets to 0 the first time it's hit after its window expires, the same
+trade-off most minimal in-memory rate limiters make — a client can get up
+to 2x `max` requests through right at a window boundary, in exchange for
+O(1) bookkeeping per request instead of a timestamp log per key. The
+default key is `req.ip` — same caveat as `req.ip` itself applies: behind a
+reverse proxy without `app.set("trust proxy", true)`, every request shares
+the proxy's own IP as the key, rate-limiting the whole app together rather
+than per client. The store is in-memory on each `RateLimit` instance (same
+trade-off as `Session`'s default `MemoryStore` — fine for a single-process
+app, not a cluster).
+
 If no route matches, a default `404` JSON response is sent. If a handler
 throws (or calls `next(err)`) and no error-handling middleware is registered,
 a default `500` JSON response is sent — with a generic `"Internal Server
@@ -726,6 +798,18 @@ Two more BoxLang-specific things that shaped how these are written:
   `Referrer-Policy`, etc.), each individually overridable or disable-able.
   `Strict-Transport-Security` and `Content-Security-Policy` are opt-in
   rather than on by default. See [Helmet.bx](models/middleware/Helmet.bx).
+- Added `boxExpressCors()` — Cross-Origin Resource Sharing middleware
+  mirroring the npm [`cors`](https://github.com/expressjs/cors) package's
+  common options (`origin`, `methods`, `allowedHeaders`, `credentials`,
+  `maxAge`). Answers a CORS preflight `OPTIONS` request directly, since
+  nothing would otherwise be registered to handle it. See
+  [Cors.bx](models/middleware/Cors.bx).
+- Added `boxExpressRateLimit()` — fixed-window rate limiting mirroring the
+  npm [`express-rate-limit`](https://github.com/express-rate-limit/express-rate-limit)
+  package's common options (`windowMs`, `max`, `keyGenerator`), keyed by
+  `req.ip` by default. Sets the draft-standard `RateLimit-*` headers and
+  responds `429` with `Retry-After` once a key's count exceeds `max`. See
+  [RateLimit.bx](models/middleware/RateLimit.bx).
 
 **0.1.13**
 - Added `Range` request support (RFC 7233) to `res.sendFile()`/`download()`

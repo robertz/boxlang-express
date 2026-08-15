@@ -1,0 +1,15 @@
+/**
+ * Global BIF wrapping Cors.cors() — mirrors the npm `cors` package's basic
+ * usage.
+ *
+ *   app.use( boxExpressCors() )
+ *   app.use( boxExpressCors( { origin: "https://example.com", credentials: true } ) )
+ */
+@BoxBIF
+class {
+
+	function invoke( options = {} ) {
+		return new bxModules.boxexpress.models.middleware.Cors().cors( options )
+	}
+
+}

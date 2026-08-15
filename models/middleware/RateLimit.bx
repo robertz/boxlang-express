@@ -1,0 +1,100 @@
+/**
+ * Fixed-window rate-limiting middleware, mirroring the npm
+ * `express-rate-limit` package's most commonly used options:
+ *   app.use( boxExpressRateLimit() )                                      // 100 req/min per IP
+ *   app.use( boxExpressRateLimit( { windowMs: 15 * 60000, max: 20 } ) )   // 20 req/15min
+ *
+ * Fixed window, not a sliding one or a token bucket: each key gets a
+ * counter that resets to 0 the first time it's hit after its window
+ * expires, same trade-off most minimal in-memory rate limiters make — a
+ * client can get up to 2x `max` requests through right at a window
+ * boundary, in exchange for O(1) bookkeeping per request instead of a
+ * timestamp log per key.
+ *
+ * The default key is `req.ip` — same caveat as `req.ip` itself: behind a
+ * reverse proxy without `app.set("trust proxy", true)`, every request
+ * shares the proxy's own IP as the key, effectively rate-limiting the
+ * whole app together rather than per client. Pass `{ keyGenerator: (req)
+ * => ... }` to key on something else (an API key, `req.session.userId`,
+ * etc).
+ *
+ * The store is in-memory on this instance (so it doesn't survive a
+ * restart and isn't shared across processes) — same trade-off as
+ * Session.bx's default MemoryStore, for the same reason: fine for a
+ * single-process app, not for a cluster.
+ */
+class {
+
+	function init() {
+		variables.entries = createObject( "java", "java.util.concurrent.ConcurrentHashMap" ).init()
+		variables.hitsSinceSweep = 0
+		return this
+	}
+
+	function limit( options = {} ) {
+		var windowMs = options.windowMs ?: 60000
+		var maxRequests = options.max ?: 100
+		var statusCode = options.statusCode ?: 429
+		var message = options.message ?: { error: true, message: "Too many requests, please try again later." }
+		var standardHeaders = options.standardHeaders ?: true
+		var keyGenerator = options.keyGenerator ?: ( ( req ) => req.ip )
+
+		return function( req, res, next ) {
+			var key = keyGenerator( req )
+			var entry = _hit( key, windowMs )
+			var remaining = max( 0, maxRequests - entry.count )
+			var resetSeconds = int( ( entry.resetAt - _now() ) / 1000 )
+
+			if ( standardHeaders ) {
+				res.set( "RateLimit-Limit", toString( maxRequests ) )
+				res.set( "RateLimit-Remaining", toString( remaining ) )
+				res.set( "RateLimit-Reset", toString( resetSeconds ) )
+			}
+
+			if ( entry.count > maxRequests ) {
+				if ( standardHeaders ) {
+					res.set( "Retry-After", toString( resetSeconds ) )
+				}
+				return res.status( statusCode ).json( message )
+			}
+
+			next()
+		}
+	}
+
+	private function _hit( key, windowMs ) {
+		var now = _now()
+		var entry = variables.entries.get( key )
+
+		if ( isNull( entry ) || entry.resetAt <= now ) {
+			entry = { count: 0, resetAt: now + windowMs }
+		}
+
+		entry = { count: entry.count + 1, resetAt: entry.resetAt }
+		variables.entries.put( key, entry )
+
+		// Cheap amortized cleanup instead of a background thread — same
+		// approach as Session.bx's sweep, just on a hit-count trigger.
+		variables.hitsSinceSweep++
+		if ( variables.hitsSinceSweep >= 1000 ) {
+			variables.hitsSinceSweep = 0
+			_sweep( now )
+		}
+
+		return entry
+	}
+
+	private function _now() {
+		return createObject( "java", "java.lang.System" ).currentTimeMillis()
+	}
+
+	private function _sweep( now ) {
+		for ( var key in variables.entries.keySet().toArray() ) {
+			var entry = variables.entries.get( key )
+			if ( !isNull( entry ) && entry.resetAt <= now ) {
+				variables.entries.remove( key )
+			}
+		}
+	}
+
+}

@@ -1,0 +1,20 @@
+/**
+ * Global BIF wrapping RateLimit.limit() — mirrors the npm
+ * `express-rate-limit` package's basic usage.
+ *
+ *   app.use( boxExpressRateLimit() )
+ *   app.use( "/login", boxExpressRateLimit( { windowMs: 15 * 60000, max: 5 } ) )
+ *
+ * Each call creates its own RateLimit instance (and therefore its own
+ * counters) — call it more than once to give different routes independent
+ * limits, e.g. a strict one scoped to "/login" alongside a looser one
+ * applied globally.
+ */
+@BoxBIF
+class {
+
+	function invoke( options = {} ) {
+		return new bxModules.boxexpress.models.middleware.RateLimit().limit( options )
+	}
+
+}

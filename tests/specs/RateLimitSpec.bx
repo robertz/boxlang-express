@@ -1,0 +1,107 @@
+/**
+ * Unit tests for the fixed-window rate-limit middleware — fake req/res, no
+ * real HttpExchange, since RateLimit.limit()'s handler only ever calls
+ * res.set()/status()/json() and next().
+ */
+class extends="testbox.system.BaseSpec" {
+
+	function run() {
+		describe( "RateLimit", function() {
+
+			it( "allows requests under the limit, decrementing Remaining each time", function() {
+				var handler = new "../../models/middleware/RateLimit"().limit( { windowMs: 60000, max: 3 } )
+				var req = _fakeReq( "1.2.3.4" )
+
+				var first = _fakeRes()
+				handler( req, first, function() {} )
+				expect( first.isSent() ).toBeFalse()
+				expect( first.getHeaders()[ "RateLimit-Remaining" ] ).toBe( "2" )
+
+				var second = _fakeRes()
+				handler( req, second, function() {} )
+				expect( second.getHeaders()[ "RateLimit-Remaining" ] ).toBe( "1" )
+
+				var third = _fakeRes()
+				handler( req, third, function() {} )
+				expect( third.isSent() ).toBeFalse()
+				expect( third.getHeaders()[ "RateLimit-Remaining" ] ).toBe( "0" )
+			} )
+
+			it( "blocks the request once over max, with 429 and Retry-After, without calling next()", function() {
+				var handler = new "../../models/middleware/RateLimit"().limit( { windowMs: 60000, max: 1 } )
+				var req = _fakeReq( "5.6.7.8" )
+
+				handler( req, _fakeRes(), function() {} )
+
+				var res = _fakeRes()
+				var nextCalled = false
+				handler( req, res, function() { nextCalled = true } )
+
+				expect( nextCalled ).toBeFalse()
+				expect( res.getStatusCode() ).toBe( 429 )
+				expect( res.isSent() ).toBeTrue()
+				expect( res.getHeaders().keyExists( "Retry-After" ) ).toBeTrue()
+			} )
+
+			it( "keeps independent counters per key, so a different key isn't affected", function() {
+				var handler = new "../../models/middleware/RateLimit"().limit( { windowMs: 60000, max: 1 } )
+
+				handler( _fakeReq( "9.9.9.9" ), _fakeRes(), function() {} )
+
+				var otherKeyRes = _fakeRes()
+				var nextCalled = false
+				handler( _fakeReq( "1.1.1.1" ), otherKeyRes, function() { nextCalled = true } )
+
+				expect( nextCalled ).toBeTrue()
+				expect( otherKeyRes.isSent() ).toBeFalse()
+			} )
+
+			it( "honors a custom keyGenerator instead of the req.ip default", function() {
+				var handler = new "../../models/middleware/RateLimit"().limit( {
+					windowMs: 60000,
+					max: 1,
+					keyGenerator: ( req ) => req.apiKey
+				} )
+
+				handler( { ip: "1.1.1.1", apiKey: "shared-key" }, _fakeRes(), function() {} )
+
+				var res = _fakeRes()
+				var nextCalled = false
+				// Different req.ip, same apiKey — should still hit the same counter.
+				handler( { ip: "2.2.2.2", apiKey: "shared-key" }, res, function() { nextCalled = true } )
+
+				expect( nextCalled ).toBeFalse()
+				expect( res.getStatusCode() ).toBe( 429 )
+			} )
+
+			it( "omits RateLimit-* headers when standardHeaders: false", function() {
+				var handler = new "../../models/middleware/RateLimit"().limit( { standardHeaders: false } )
+				var res = _fakeRes()
+				handler( _fakeReq( "3.3.3.3" ), res, function() {} )
+
+				expect( res.getHeaders().keyExists( "RateLimit-Limit" ) ).toBeFalse()
+				expect( res.getHeaders().keyExists( "RateLimit-Remaining" ) ).toBeFalse()
+			} )
+
+		} )
+	}
+
+	private function _fakeReq( ip ) {
+		return { ip: ip }
+	}
+
+	private function _fakeRes() {
+		var sent = false
+		var statusCode = 200
+		var headers = {}
+		var res = {}
+		res.isSent = function() { return sent }
+		res.status = function( code ) { statusCode = code; return res }
+		res.set = function( name, value ) { headers[ name ] = value; return res }
+		res.json = function( data ) { sent = true; return res }
+		res.getStatusCode = function() { return statusCode }
+		res.getHeaders = function() { return headers }
+		return res
+	}
+
+}
