@@ -34,6 +34,17 @@ built-in middleware factories — `boxExpressJSON()`, `boxExpressUrlencoded()`,
 bxModules.boxexpress.models.Router()` and mirroring Express's own
 `express.Router()`.
 
+## Documentation
+
+This README covers the API reference. For the full documentation —
+getting started, configuration, routing, middleware, request/response,
+views, sessions, static files & uploads, error handling, and process
+lifecycle, each with runnable examples — see
+[robertz/express-test](https://github.com/robertz/express-test), a working
+demo app that doubles as BoxExpress's own docs site: every page you can
+read about, you can also click through and try live (`boxlang app.bxs`,
+then browse to `/docs`).
+
 ## Install
 
 Published on [ForgeBox](https://www.forgebox.io/) as `boxlang-express`:
