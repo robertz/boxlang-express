@@ -115,7 +115,8 @@ class {
 	 * driven by server-side route code, not user-supplied request paths) but a
 	 * root-relative escape check still runs when options.root is given, so a caller
 	 * building the path from user input (e.g. req.params) gets the same containment
-	 * guarantee as express.static().
+	 * guarantee as express.static(). options.maxAge (seconds) sets Cache-Control:
+	 * public, max-age=<n> alongside the ETag/Last-Modified this always sets.
 	 */
 	function sendFile( filePath, options = {} ) {
 		var target = filePath
@@ -146,6 +147,9 @@ class {
 		var etag = conditional.etagFor( fileObj )
 		set( "ETag", etag )
 		set( "Last-Modified", conditional.lastModifiedHeader( fileObj ) )
+		if ( !isNull( options.maxAge ) ) {
+			set( "Cache-Control", "public, max-age=" & options.maxAge )
+		}
 
 		var requestHeaders = variables.exchange.getRequestHeaders()
 		if ( conditional.isNotModified( requestHeaders.getFirst( "If-None-Match" ) ?: "", requestHeaders.getFirst( "If-Modified-Since" ) ?: "", etag, fileObj ) ) {

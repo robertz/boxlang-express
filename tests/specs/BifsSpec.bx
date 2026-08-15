@@ -1,8 +1,8 @@
 /**
  * Exercises the global BIFs (boxExpress, boxExpressRouter, boxExpressJSON,
  * boxExpressUrlencoded, boxExpressStatic, boxExpressUpload, boxExpressSession,
- * boxExpressHelmet, boxExpressCors, boxExpressRateLimit) for real — a
- * running server built entirely through the BIFs,
+ * boxExpressHelmet, boxExpressCors, boxExpressRateLimit, boxExpressCsrf) for
+ * real — a running server built entirely through the BIFs,
  * not the bxModules.boxexpress.models.* classes directly. These only resolve as
  * global functions once BoxLang has loaded this project as an actual module, which
  * run-tests.bxs sets up via a self-referencing boxlang_modules/boxexpress symlink.
@@ -157,6 +157,38 @@ class extends="testbox.system.BaseSpec" {
 					expect( second.hasHeader( "Retry-After" ) ).toBeTrue()
 				} finally {
 					rateLimitApp.close()
+				}
+			} )
+
+			it( "boxExpressCsrf() mints a token via GET and validates it on POST", function() {
+				var csrfPort = 4330
+				var csrfApp = boxExpress()
+				csrfApp.use( boxExpressUrlencoded() )
+				csrfApp.use( boxExpressSession() )
+				csrfApp.use( boxExpressCsrf() )
+				csrfApp.get( "/form", ( req, res ) => res.json( { token: req.csrfToken() } ) )
+				csrfApp.post( "/form", ( req, res ) => res.json( { ok: true } ) )
+				csrfApp.listen( port = csrfPort, options = { block: false } )
+				sleep( 300 )
+
+				try {
+					var getResult = variables.client.get( "http://localhost:#csrfPort#/form" )
+					var token = JSONDeserialize( getResult.body ).token
+					var sessionCookie = listFirst( getResult.setCookie, ";" )
+
+					var goodPost = variables.client.requestWithHeaders(
+						"POST", "http://localhost:#csrfPort#/form", { "Cookie": sessionCookie },
+						"_csrf=" & token, "application/x-www-form-urlencoded"
+					)
+					expect( goodPost.statusCode ).toBe( 200 )
+
+					var badPost = variables.client.requestWithHeaders(
+						"POST", "http://localhost:#csrfPort#/form", { "Cookie": sessionCookie },
+						"_csrf=wrong", "application/x-www-form-urlencoded"
+					)
+					expect( badPost.statusCode ).toBe( 403 )
+				} finally {
+					csrfApp.close()
 				}
 			} )
 

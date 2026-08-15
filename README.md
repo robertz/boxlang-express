@@ -30,8 +30,9 @@ works identically if you'd rather be explicit about where it comes from. Every
 other model gets the same treatment, each its own thin BIF wrapper: the
 built-in middleware factories — `boxExpressJSON()`, `boxExpressUrlencoded()`,
 `boxExpressStatic()`, `boxExpressUpload()`, `boxExpressSession()`,
-`boxExpressHelmet()`, `boxExpressCors()`, `boxExpressRateLimit()` (see
-[Middleware](#middleware) below) — and `boxExpressRouter()`, wrapping `new
+`boxExpressHelmet()`, `boxExpressCors()`, `boxExpressRateLimit()`,
+`boxExpressCsrf()` (see [Middleware](#middleware) below) — and
+`boxExpressRouter()`, wrapping `new
 bxModules.boxexpress.models.Router()` and mirroring Express's own
 `express.Router()`.
 
@@ -346,6 +347,20 @@ request (`If-None-Match` or, failing that, `If-Modified-Since`) with an empty
 `express.static()`/`res.sendFile()`, so a browser's normal caching just
 works. The `ETag` is a cheap weak tag (`W/"<size>-<mtime>"`, no file hash),
 so it changes whenever the file's size or modified time changes on disk.
+
+Both also accept `options.maxAge` (seconds) to set `Cache-Control:
+public, max-age=<n>`, letting a browser skip revalidation entirely for that
+long instead of asking on every request — off by default (no header at
+all) since caching a response the app didn't ask to be cached is the wrong
+default:
+
+```js
+app.use( "/public", boxExpressStatic( expandPath( "./public" ), { maxAge: 86400 } ) )  // 1 day
+
+app.get( "/report", ( req, res ) => {
+	res.sendFile( expandPath( "./reports/latest.pdf" ), { maxAge: 3600 } )  // 1 hour
+} )
+```
 
 #### Range requests (partial content)
 
@@ -710,6 +725,51 @@ than per client. The store is in-memory on each `RateLimit` instance (same
 trade-off as `Session`'s default `MemoryStore` — fine for a single-process
 app, not a cluster).
 
+#### CSRF protection (`boxExpressCsrf()` / `Csrf`)
+
+Mirrors the classic [`csurf`](https://github.com/expressjs/csurf) package's
+session-based token strategy. The token lives in `req.session`, not its own
+cookie, so this must be registered *after* `boxExpressSession()`:
+
+```js
+app.use( boxExpressSession() )
+app.use( boxExpressUrlencoded() )   // before Csrf if reading the token from a form field
+app.use( boxExpressCsrf() )
+
+app.get( "/form", ( req, res ) => {
+	res.render( "form", { csrfToken: req.csrfToken() } )
+} )
+```
+
+```html
+<!-- views/form.bxm -->
+<form method="POST" action="/form">
+	<input type="hidden" name="_csrf" value="#data.csrfToken#">
+	...
+</form>
+```
+
+```js
+app.post( "/form", ( req, res ) => {
+	// A missing/mismatched token never reaches this handler — it gets a
+	// 403 from the middleware first.
+	res.send( "ok" )
+} )
+```
+
+"Safe" methods (`GET`/`HEAD`/`OPTIONS` by default, override with
+`options.ignoreMethods`) never validate — a token is only minted and
+exposed via `req.csrfToken()` for those, since that's how a token gets into
+a form before any state-changing request happens. Every other method must
+submit a matching token: read from `req.body[fieldName]` first
+(`options.fieldName`, default `"_csrf"`), falling back to a request header
+(`options.headerName`, default `"X-CSRF-Token"`) for non-form (JSON/AJAX)
+clients that can't rely on a hidden form field. Calling
+`boxExpressCsrf()` before `req.session` exists (i.e. before
+`boxExpressSession()`) throws immediately rather than silently doing
+nothing — a misconfiguration here should be loud, not a security hole that
+only shows up in production.
+
 If no route matches, a default `404` JSON response is sent. If a handler
 throws (or calls `next(err)`) and no error-handling middleware is registered,
 a default `500` JSON response is sent — with a generic `"Internal Server
@@ -810,6 +870,17 @@ Two more BoxLang-specific things that shaped how these are written:
   `req.ip` by default. Sets the draft-standard `RateLimit-*` headers and
   responds `429` with `Retry-After` once a key's count exceeds `max`. See
   [RateLimit.bx](models/middleware/RateLimit.bx).
+- Added `boxExpressCsrf()` — CSRF protection mirroring the classic
+  [`csurf`](https://github.com/expressjs/csurf) package's session-based
+  token strategy. Requires `req.session` (register after
+  `boxExpressSession()`, which it throws immediately about if missing);
+  exposes `req.csrfToken()`, validates `req.body._csrf` (or a request
+  header) on every method other than `GET`/`HEAD`/`OPTIONS`. See
+  [Csrf.bx](models/middleware/Csrf.bx).
+- `boxExpressStatic()`/`res.sendFile()` now accept `options.maxAge`
+  (seconds) to set `Cache-Control: public, max-age=<n>` alongside the
+  `ETag`/`Last-Modified` they already set — off by default, no header at
+  all unless asked for.
 
 **0.1.13**
 - Added `Range` request support (RFC 7233) to `res.sendFile()`/`download()`

@@ -24,6 +24,7 @@ class extends="testbox.system.BaseSpec" {
 		variables.app = new "../../models/BoxExpress"()
 		variables.app.use( bodyParsers.json() )
 		variables.app.use( "/public", staticFiles.serve( expandPath( "tests/fixtures/public" ) ) )
+		variables.app.use( "/public-cached", staticFiles.serve( expandPath( "tests/fixtures/public" ), { maxAge: 86400 } ) )
 		// Mounted at the root (no path prefix) like the README's quickstart example —
 		// tests/fixtures/public has no index.html, so every request should fall through
 		// to the routes below via next() rather than erroring.
@@ -85,6 +86,10 @@ class extends="testbox.system.BaseSpec" {
 
 		variables.app.get( "/send-file", ( req, res ) => {
 			res.sendFile( expandPath( "tests/fixtures/public/hello.txt" ) )
+		} )
+
+		variables.app.get( "/send-file-cached", ( req, res ) => {
+			res.sendFile( expandPath( "tests/fixtures/public/hello.txt" ), { maxAge: 3600 } )
 		} )
 
 		variables.app.post( "/upload", multipart.upload( { dest: variables.uploadDest } ), ( req, res ) => {
@@ -287,6 +292,22 @@ class extends="testbox.system.BaseSpec" {
 			it( "sets Accept-Ranges on a static file response even without a Range request", function() {
 				var result = variables.client.get( variables.baseUrl & "/public/hello.txt" )
 				expect( result.acceptRanges ).toBe( "bytes" )
+			} )
+
+			it( "sets Cache-Control on a static file only when maxAge is configured", function() {
+				var withMaxAge = variables.client.get( variables.baseUrl & "/public-cached/hello.txt" )
+				expect( withMaxAge.getHeader( "Cache-Control" ) ).toBe( "public, max-age=86400" )
+
+				var withoutMaxAge = variables.client.get( variables.baseUrl & "/public/hello.txt" )
+				expect( withoutMaxAge.hasHeader( "Cache-Control" ) ).toBeFalse()
+			} )
+
+			it( "sets Cache-Control on res.sendFile() only when maxAge is configured", function() {
+				var withMaxAge = variables.client.get( variables.baseUrl & "/send-file-cached" )
+				expect( withMaxAge.getHeader( "Cache-Control" ) ).toBe( "public, max-age=3600" )
+
+				var withoutMaxAge = variables.client.get( variables.baseUrl & "/send-file" )
+				expect( withoutMaxAge.hasHeader( "Cache-Control" ) ).toBeFalse()
 			} )
 
 			it( "sends a file inline via res.sendFile()", function() {
@@ -546,6 +567,70 @@ class extends="testbox.system.BaseSpec" {
 				var result = variables.client.get( variables.baseUrl & "/multi-use-test" )
 				expect( result.statusCode ).toBe( 200 )
 				expect( JSONDeserialize( result.body ).order ).toBe( [ "mw1", "mw2", "route" ] )
+			} )
+
+			it( "enforces CSRF protection end to end: mint via GET, accept a matching token, reject a wrong/missing one", function() {
+				var csrfPort = 4329
+				var csrfApp = new "../../models/BoxExpress"()
+				var session = new "../../models/middleware/Session"()
+				var bodyParsers = new "../../models/middleware/BodyParsers"()
+				var csrf = new "../../models/middleware/Csrf"()
+
+				csrfApp.use( bodyParsers.urlencoded() )
+				csrfApp.use( session.session() )
+				csrfApp.use( csrf.protect() )
+				csrfApp.get( "/form", ( req, res ) => res.json( { token: req.csrfToken() } ) )
+				csrfApp.post( "/form", ( req, res ) => res.json( { ok: true } ) )
+				csrfApp.listen( port = csrfPort, options = { block: false } )
+				sleep( 300 )
+
+				try {
+					var getResult = variables.client.get( "http://localhost:#csrfPort#/form" )
+					expect( getResult.statusCode ).toBe( 200 )
+					var token = JSONDeserialize( getResult.body ).token
+					expect( len( token ) ).toBeGT( 0 )
+
+					var sessionCookie = listFirst( getResult.setCookie, ";" )
+
+					var correctPost = variables.client.requestWithHeaders(
+						"POST",
+						"http://localhost:#csrfPort#/form",
+						{ "Cookie": sessionCookie },
+						"_csrf=" & token,
+						"application/x-www-form-urlencoded"
+					)
+					expect( correctPost.statusCode ).toBe( 200 )
+					expect( JSONDeserialize( correctPost.body ).ok ).toBeTrue()
+
+					var wrongPost = variables.client.requestWithHeaders(
+						"POST",
+						"http://localhost:#csrfPort#/form",
+						{ "Cookie": sessionCookie },
+						"_csrf=not-the-real-token",
+						"application/x-www-form-urlencoded"
+					)
+					expect( wrongPost.statusCode ).toBe( 403 )
+
+					var missingPost = variables.client.requestWithHeaders(
+						"POST",
+						"http://localhost:#csrfPort#/form",
+						{ "Cookie": sessionCookie },
+						"note=hi",
+						"application/x-www-form-urlencoded"
+					)
+					expect( missingPost.statusCode ).toBe( 403 )
+
+					var headerPost = variables.client.requestWithHeaders(
+						"POST",
+						"http://localhost:#csrfPort#/form",
+						{ "Cookie": sessionCookie, "X-CSRF-Token": token },
+						"",
+						"application/x-www-form-urlencoded"
+					)
+					expect( headerPost.statusCode ).toBe( 200 )
+				} finally {
+					csrfApp.close()
+				}
 			} )
 
 			it( "applies Helmet with caller overrides, disabled headers, and opt-in HSTS/CSP", function() {

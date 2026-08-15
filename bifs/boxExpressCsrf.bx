@@ -1,0 +1,18 @@
+/**
+ * Global BIF wrapping Csrf.protect() — mirrors the classic `csurf`
+ * package's session-based usage.
+ *
+ *   app.use( boxExpressSession() )
+ *   app.use( boxExpressCsrf() )
+ *
+ * Requires req.session to already exist — register after boxExpressSession()
+ * (or another req.session provider), not before it.
+ */
+@BoxBIF
+class {
+
+	function invoke( options = {} ) {
+		return new bxModules.boxexpress.models.middleware.Csrf().protect( options )
+	}
+
+}

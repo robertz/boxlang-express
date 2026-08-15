@@ -3,6 +3,7 @@
  * Usage:
  *   staticFiles = new middleware.StaticFiles()
  *   app.use( "/public", staticFiles.serve( "./public" ) )
+ *   app.use( "/public", staticFiles.serve( "./public", { maxAge: 86400 } ) )  // Cache-Control, 1 day
  */
 class {
 
@@ -10,6 +11,7 @@ class {
 		var rootPath = createObject( "java", "java.io.File" ).init( rootDir ).getCanonicalFile().toPath()
 		var realRootPath = rootPath.toRealPath()
 		var indexFile = options.index ?: "index.html"
+		var maxAge = options.maxAge ?: javacast( "null", "" )
 		var conditional = new "../ConditionalGet"()
 		var mimeTypes = {
 			html: "text/html; charset=utf-8", htm: "text/html; charset=utf-8",
@@ -52,6 +54,9 @@ class {
 			var etag = conditional.etagFor( fileObj )
 			res.set( "ETag", etag )
 			res.set( "Last-Modified", conditional.lastModifiedHeader( fileObj ) )
+			if ( !isNull( maxAge ) ) {
+				res.set( "Cache-Control", "public, max-age=" & maxAge )
+			}
 
 			if ( conditional.isNotModified( req.headers[ "If-None-Match" ] ?: "", req.headers[ "If-Modified-Since" ] ?: "", etag, fileObj ) ) {
 				return res.status( 304 ).end()

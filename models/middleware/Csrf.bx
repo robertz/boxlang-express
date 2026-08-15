@@ -1,0 +1,81 @@
+/**
+ * CSRF protection middleware, mirroring the classic `csurf` package's
+ * session-based token strategy (rather than the separate double-submit-
+ * cookie strategy that package also supported) — the token lives in
+ * req.session, not its own cookie, so this must be registered *after*
+ * boxExpressSession() (or another middleware that populates req.session).
+ *
+ * Usage:
+ *   app.use( boxExpressSession() )
+ *   app.use( boxExpressUrlencoded() )   // needed before this if reading the token from a form field
+ *   app.use( boxExpressCsrf() )
+ *
+ *   app.get( "/form", ( req, res ) => {
+ *     res.render( "form", { csrfToken: req.csrfToken() } )
+ *   } )
+ *   // <input type="hidden" name="_csrf" value="#data.csrfToken#">
+ *
+ *   app.post( "/form", ( req, res ) => {
+ *     // A missing/mismatched token never reaches this handler — it gets a
+ *     // 403 from this middleware first.
+ *     res.send( "ok" )
+ *   } )
+ *
+ * "Safe" methods (GET/HEAD/OPTIONS by default) never validate — a token is
+ * only minted and exposed via req.csrfToken() for those, since that's how
+ * a token gets into a form in the first place before any state-changing
+ * request happens. Every other method must submit a matching token: read
+ * from req.body[fieldName] first, falling back to a request header
+ * (options.headerName) for non-form (JSON/AJAX) clients that can't rely on
+ * a hidden form field.
+ *
+ * The comparison itself is a plain string check, not constant-time — same
+ * simplification as the session-ID lookup this token strategy already sits
+ * on top of, not a new trade-off introduced here.
+ */
+class {
+
+	function protect( options = {} ) {
+		var fieldName = options.fieldName ?: "_csrf"
+		var headerName = options.headerName ?: "X-CSRF-Token"
+		var ignoreMethods = options.ignoreMethods ?: [ "GET", "HEAD", "OPTIONS" ]
+
+		return function( req, res, next ) {
+			if ( isNull( req.session ) ) {
+				throw(
+					message = "boxExpressCsrf() requires req.session — register boxExpressSession() (or another req.session provider) before it",
+					type = "BoxExpress.NoSession"
+				)
+			}
+
+			if ( !len( req.session.csrfToken ?: "" ) ) {
+				req.session.csrfToken = _generateToken()
+			}
+
+			var token = req.session.csrfToken
+			req.csrfToken = function() { return token }
+
+			if ( ignoreMethods.findNoCase( req.method ) > 0 ) {
+				return next()
+			}
+
+			var submitted = req.body[ fieldName ] ?: ""
+			if ( !len( submitted ) ) {
+				submitted = req.headers[ headerName ] ?: ""
+			}
+
+			if ( !len( submitted ) || submitted != token ) {
+				return res.status( 403 ).json( { error: true, message: "Invalid or missing CSRF token" } )
+			}
+
+			next()
+		}
+	}
+
+	private function _generateToken() {
+		var uuidClass = createObject( "java", "java.util.UUID" )
+		var rawId = uuidClass.randomUUID().toString() & uuidClass.randomUUID().toString()
+		return rawId.replace( "-", "", "all" )
+	}
+
+}

@@ -1,0 +1,143 @@
+/**
+ * Unit tests for the CSRF middleware — fake req/res, no real HttpExchange,
+ * since Csrf.protect()'s handler only ever touches req.session/method/body/
+ * headers and calls res.status()/json()/next().
+ */
+class extends="testbox.system.BaseSpec" {
+
+	function run() {
+		describe( "Csrf", function() {
+
+			it( "mints a token on first use and exposes it via req.csrfToken()", function() {
+				var handler = new "../../models/middleware/Csrf"().protect()
+				var req = _fakeReq( "GET" )
+				var nextCalled = false
+				handler( req, _fakeRes(), function() { nextCalled = true } )
+
+				expect( nextCalled ).toBeTrue()
+				expect( len( req.csrfToken() ) ).toBeGT( 0 )
+				expect( req.session.csrfToken ).toBe( req.csrfToken() )
+			} )
+
+			it( "reuses the same token across requests sharing a session", function() {
+				var handler = new "../../models/middleware/Csrf"().protect()
+				var sharedSession = {}
+
+				var first = _fakeReq( "GET", sharedSession )
+				handler( first, _fakeRes(), function() {} )
+
+				var second = _fakeReq( "GET", sharedSession )
+				handler( second, _fakeRes(), function() {} )
+
+				expect( second.csrfToken() ).toBe( first.csrfToken() )
+			} )
+
+			it( "allows a safe method (GET) through with no submitted token", function() {
+				var handler = new "../../models/middleware/Csrf"().protect()
+				var res = _fakeRes()
+				var nextCalled = false
+				handler( _fakeReq( "GET" ), res, function() { nextCalled = true } )
+
+				expect( nextCalled ).toBeTrue()
+				expect( res.isSent() ).toBeFalse()
+			} )
+
+			it( "allows a POST with a matching token in the request body", function() {
+				var handler = new "../../models/middleware/Csrf"().protect()
+				var sharedSession = {}
+
+				var getReq = _fakeReq( "GET", sharedSession )
+				handler( getReq, _fakeRes(), function() {} )
+				var token = getReq.csrfToken()
+
+				var postReq = _fakeReq( "POST", sharedSession, { "_csrf": token } )
+				var res = _fakeRes()
+				var nextCalled = false
+				handler( postReq, res, function() { nextCalled = true } )
+
+				expect( nextCalled ).toBeTrue()
+				expect( res.isSent() ).toBeFalse()
+			} )
+
+			it( "allows a POST with a matching token in the configured header instead of the body", function() {
+				var handler = new "../../models/middleware/Csrf"().protect()
+				var sharedSession = {}
+
+				var getReq = _fakeReq( "GET", sharedSession )
+				handler( getReq, _fakeRes(), function() {} )
+				var token = getReq.csrfToken()
+
+				var postReq = _fakeReq( "POST", sharedSession, {}, { "X-CSRF-Token": token } )
+				var res = _fakeRes()
+				var nextCalled = false
+				handler( postReq, res, function() { nextCalled = true } )
+
+				expect( nextCalled ).toBeTrue()
+			} )
+
+			it( "rejects a POST with a missing token, 403, without calling next()", function() {
+				var handler = new "../../models/middleware/Csrf"().protect()
+				var sharedSession = {}
+				handler( _fakeReq( "GET", sharedSession ), _fakeRes(), function() {} )
+
+				var res = _fakeRes()
+				var nextCalled = false
+				handler( _fakeReq( "POST", sharedSession, {} ), res, function() { nextCalled = true } )
+
+				expect( nextCalled ).toBeFalse()
+				expect( res.getStatusCode() ).toBe( 403 )
+				expect( res.isSent() ).toBeTrue()
+			} )
+
+			it( "rejects a POST with a wrong token, 403, without calling next()", function() {
+				var handler = new "../../models/middleware/Csrf"().protect()
+				var sharedSession = {}
+				handler( _fakeReq( "GET", sharedSession ), _fakeRes(), function() {} )
+
+				var res = _fakeRes()
+				var nextCalled = false
+				handler( _fakeReq( "POST", sharedSession, { "_csrf": "not-the-real-token" } ), res, function() { nextCalled = true } )
+
+				expect( nextCalled ).toBeFalse()
+				expect( res.getStatusCode() ).toBe( 403 )
+			} )
+
+			it( "throws a clear error when req.session doesn't exist", function() {
+				var handler = new "../../models/middleware/Csrf"().protect()
+				expect( function() {
+					handler( { method: "GET" }, _fakeRes(), function() {} )
+				} ).toThrow( "BoxExpress.NoSession" )
+			} )
+
+			it( "honors a custom fieldName/headerName", function() {
+				var handler = new "../../models/middleware/Csrf"().protect( { fieldName: "token", headerName: "X-My-Token" } )
+				var sharedSession = {}
+				var getReq = _fakeReq( "GET", sharedSession )
+				handler( getReq, _fakeRes(), function() {} )
+				var token = getReq.csrfToken()
+
+				var res = _fakeRes()
+				var nextCalled = false
+				handler( _fakeReq( "POST", sharedSession, { "token": token } ), res, function() { nextCalled = true } )
+				expect( nextCalled ).toBeTrue()
+			} )
+
+		} )
+	}
+
+	private function _fakeReq( method, session = {}, body = {}, headers = {} ) {
+		return { method: method, session: session, body: body, headers: headers }
+	}
+
+	private function _fakeRes() {
+		var sent = false
+		var statusCode = 200
+		var res = {}
+		res.isSent = function() { return sent }
+		res.status = function( code ) { statusCode = code; return res }
+		res.json = function( data ) { sent = true; return res }
+		res.getStatusCode = function() { return statusCode }
+		return res
+	}
+
+}

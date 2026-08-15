@@ -28,6 +28,10 @@ class {
 		return _request( method, targetUrl, body, contentType, true )
 	}
 
+	function requestWithHeaders( method, targetUrl, requestHeaders = {}, body = "", contentType = "application/json" ) {
+		return _request( method, targetUrl, body, contentType, true, requestHeaders )
+	}
+
 	/**
 	 * Builds a real multipart/form-data body: fields is {name: value}, files is
 	 * an array of {field, filename, contentType, content} — enough to exercise
