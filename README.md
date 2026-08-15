@@ -509,6 +509,18 @@ Two more BoxLang-specific things that shaped how these are written:
 
 ## Changelog
 
+**0.1.12**
+- **Fix:** `reloadOnChange` could silently kill the server on a failed
+  restart. `_restartProcess()` called `close()` unconditionally before
+  attempting to launch the replacement process — if that launch failed for
+  any reason (a transient OS resource limit, a bad reconstructed command,
+  etc.), the exception was uncaught on the watcher's daemon thread, and by
+  then the old server was already torn down with nothing left running and
+  no clear error tying the two together. Launching the replacement is now
+  attempted *before* `close()` releases the port; a failed launch is caught,
+  logged in red, and the current server is left running instead of dying
+  with it. See [BoxExpress.bx](models/BoxExpress.bx).
+
 **0.1.11**
 - Added graceful process shutdown: `listen()` now registers a JVM shutdown
   hook so Ctrl-C/SIGTERM/normal exit runs `close()` (stopping the
