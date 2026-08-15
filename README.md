@@ -26,12 +26,13 @@ app.listen( 3000, ( port ) => {
 `boxExpress()` is a custom BIF (`bifs/boxExpress.bx`), auto-registered by the
 module system the moment BoxExpress loads — no `new` or namespace needed. It's
 just a thin wrapper: `new bxModules.boxexpress.models.BoxExpress()` still
-works identically if you'd rather be explicit about where it comes from. The
-built-in middleware factories get the same treatment — `boxExpressJSON()`,
-`boxExpressUrlencoded()`, `boxExpressStatic()`, `boxExpressUpload()` (see
-[Middleware](#middleware) below) — but `Router` is only reachable via
-`new bxModules.boxexpress.models.Router()`, since Express doesn't give
-`Router` its own top-level global either.
+works identically if you'd rather be explicit about where it comes from. Every
+other model gets the same treatment, each its own thin BIF wrapper: the
+built-in middleware factories — `boxExpressJSON()`, `boxExpressUrlencoded()`,
+`boxExpressStatic()`, `boxExpressUpload()`, `boxExpressSession()` (see
+[Middleware](#middleware) below) — and `boxExpressRouter()`, wrapping `new
+bxModules.boxexpress.models.Router()` and mirroring Express's own
+`express.Router()`.
 
 ## Install
 
