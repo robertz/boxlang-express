@@ -18,6 +18,9 @@ class {
 		this.headers = _buildHeaderStruct( exchange.getRequestHeaders() )
 		this.cookies = _parseCookies( this.headers[ "Cookie" ] ?: "" )
 		this.ip = _resolveIp( exchange, settings )
+		this.protocol = _resolveProtocol( settings )
+		this.secure = ( this.protocol == "https" )
+		this.hostname = _resolveHostname( settings )
 
 		return this
 	}
@@ -92,6 +95,47 @@ class {
 		} catch ( any e ) {
 			return ""
 		}
+	}
+
+	/**
+	 * BoxExpress's own HttpServer never terminates TLS itself, so this is always
+	 * "http" unless a reverse proxy in front of it is trusted (app.set("trust
+	 * proxy", true)) to report the original scheme via X-Forwarded-Proto — the
+	 * same trust model as req.ip, and off by default for the same reason: an
+	 * untrusted client could otherwise forge that header to spoof HTTPS.
+	 */
+	private function _resolveProtocol( settings ) {
+		if ( settings[ "trust proxy" ] ?: false ) {
+			var forwardedProto = this.headers[ "X-Forwarded-Proto" ] ?: ""
+			if ( len( forwardedProto ) && forwardedProto.listFirst( "," ).trim().lcase() == "https" ) {
+				return "https"
+			}
+		}
+		return "http"
+	}
+
+	/**
+	 * The Host header with any ":port" suffix stripped, same as Express's
+	 * req.hostname. With app.set("trust proxy", true), X-Forwarded-Host (if
+	 * present) is preferred over the direct Host header, same trust model as
+	 * req.ip/req.protocol.
+	 */
+	private function _resolveHostname( settings ) {
+		var hostHeader = this.headers[ "Host" ] ?: ""
+		if ( settings[ "trust proxy" ] ?: false ) {
+			hostHeader = this.headers[ "X-Forwarded-Host" ] ?: hostHeader
+		}
+		if ( !len( hostHeader ) ) {
+			return ""
+		}
+		// An IPv6 host is bracketed ("[::1]:3000") — its own colons aren't the
+		// port separator, so strip the port only for anything after the "]".
+		if ( hostHeader.left( 1 ) == "[" ) {
+			var closeBracket = hostHeader.find( "]" )
+			return closeBracket ? hostHeader.mid( 1, closeBracket ) : hostHeader
+		}
+		var colonPos = hostHeader.find( ":" )
+		return colonPos ? hostHeader.mid( 1, colonPos - 1 ) : hostHeader
 	}
 
 }

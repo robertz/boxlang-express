@@ -325,7 +325,17 @@ class {
 
 		for ( var i = 1; i <= rawSegments.len(); i++ ) {
 			var raw = rawSegments[ i ]
-			if ( raw.left( 1 ) == ":" ) {
+			if ( raw.left( 1 ) == ":" && raw.right( 1 ) == "?" ) {
+				if ( i != rawSegments.len() ) {
+					throw(
+						message = "Invalid route path ""#path#"" — an optional param (':name?') is only supported as the final path segment",
+						type = "BoxExpress.InvalidRoutePath"
+					)
+				}
+				var paramName = raw.mid( 2, raw.len() - 2 )
+				segments.append( { type: "optionalParam", name: paramName } )
+				paramNames.append( paramName )
+			} else if ( raw.left( 1 ) == ":" ) {
 				var paramName = raw.right( raw.len() - 1 )
 				segments.append( { type: "param", name: paramName } )
 				paramNames.append( paramName )
@@ -355,11 +365,18 @@ class {
 				return { matched: true, params: params, consumed: requestSegments.len() }
 			}
 
+			// Always the final pattern segment (enforced in _parsePath()) — if the
+			// request doesn't have this segment, the route still matches, just
+			// without that param captured (like Express's req.params.id === undefined).
+			if ( seg.type == "optionalParam" && i > requestSegments.len() ) {
+				return { matched: true, params: params, consumed: i - 1 }
+			}
+
 			if ( i > requestSegments.len() ) {
 				return { matched: false, params: {}, consumed: 0 }
 			}
 
-			if ( seg.type == "param" ) {
+			if ( seg.type == "param" || seg.type == "optionalParam" ) {
 				params[ seg.name ] = requestSegments[ i ]
 			} else if ( seg.value != requestSegments[ i ] ) {
 				return { matched: false, params: {}, consumed: 0 }

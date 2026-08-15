@@ -5,9 +5,10 @@
  */
 class {
 
-	function init( router, settings ) {
+	function init( router, settings, appLocals = {} ) {
 		variables.router = router
 		variables.settings = settings
+		variables.appLocals = appLocals
 		variables.color = new AnsiColor()
 		return this
 	}
@@ -18,7 +19,7 @@ class {
 
 		try {
 			req = new Request( exchange, variables.settings )
-			res = new Response( exchange, variables.settings )
+			res = new Response( exchange, variables.settings, variables.appLocals )
 			println( variables.color.gray( "[#dateTimeFormat( now(), 'yyyy-MM-dd HH:mm:ss' )#]" ) & " " & variables.color.method( req.method ) & " #req.path# " & variables.color.dim( req.ip ) )
 		} catch ( any e ) {
 			try {

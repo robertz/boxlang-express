@@ -9,6 +9,7 @@ class {
 
 	function init() {
 		this.settings = {}
+		this.locals = {}
 		variables.router = new Router( this.settings )
 		variables.httpServer = javacast( "null", "" )
 		variables.running = false
@@ -97,7 +98,7 @@ class {
 			rethrow;
 		}
 
-		var bridge = new HttpBridge( variables.router, this.settings )
+		var bridge = new HttpBridge( variables.router, this.settings, this.locals )
 		var proxy = createDynamicProxy( bridge, [ "com.sun.net.httpserver.HttpHandler" ] )
 
 		variables.httpServer.createContext( "/", proxy )

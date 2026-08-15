@@ -1,0 +1,1 @@
+<bx:output>appValue=#data.appValue# resValue=#data.resValue# overridden=#data.overridden#</bx:output>

@@ -30,6 +30,8 @@ class extends="testbox.system.BaseSpec" {
 		variables.app.use( staticFiles.serve( expandPath( "tests/fixtures/public" ) ) )
 		variables.app.use( session.session() )
 		variables.app.set( "views", expandPath( "tests/fixtures/views" ) )
+		variables.app.locals.appValue = "fromApp"
+		variables.app.locals.overridden = "shouldBeReplaced"
 
 		variables.app.get( "/", ( req, res ) => {
 			res.send( "Hello from BoxExpress!" )
@@ -143,6 +145,19 @@ class extends="testbox.system.BaseSpec" {
 
 		variables.app.get( "/ip-test", ( req, res ) => {
 			res.json( { ip: req.ip } )
+		} )
+
+		variables.app.get( "/reqinfo-test", ( req, res ) => {
+			res.json( { protocol: req.protocol, secure: req.secure, hostname: req.hostname } )
+		} )
+
+		variables.app.get( "/locals-test", ( req, res ) => {
+			res.locals.resValue = "fromRes"
+			res.render( "locals-test", { overridden: "fromData" } )
+		} )
+
+		variables.app.get( "/optional-param-test/:id?", ( req, res ) => {
+			res.json( { id: req.params.id ?: "(absent)" } )
 		} )
 
 		variables.app.param( "code", ( req, res, next, value ) => {
@@ -500,6 +515,52 @@ class extends="testbox.system.BaseSpec" {
 			it( "runs a registered param() callback before the route handler via app.param()", function() {
 				var result = variables.client.get( variables.baseUrl & "/parented/42" )
 				expect( JSONDeserialize( result.body ).code ).toBe( "parented-42" )
+			} )
+
+			it( "reports req.protocol/secure/hostname for a plain direct request", function() {
+				var result = variables.client.get( variables.baseUrl & "/reqinfo-test" )
+				var parsed = JSONDeserialize( result.body )
+				expect( parsed.protocol ).toBe( "http" )
+				expect( parsed.secure ).toBeFalse()
+				expect( parsed.hostname ).toBe( "localhost" )
+			} )
+
+			it( "prefers X-Forwarded-Proto/X-Forwarded-Host for req.protocol/secure/hostname only when app.set('trust proxy', true) is used", function() {
+				var proxyPort = 4326
+				var proxyApp = new "../../models/BoxExpress"()
+				proxyApp.set( "trust proxy", true )
+				proxyApp.get( "/reqinfo", ( req, res ) => res.json( { protocol: req.protocol, secure: req.secure, hostname: req.hostname } ) )
+				proxyApp.listen( port = proxyPort, options = { block: false } )
+				sleep( 300 )
+
+				try {
+					var result = variables.client.getWithHeaders(
+						"http://localhost:#proxyPort#/reqinfo",
+						{ "X-Forwarded-Proto": "https", "X-Forwarded-Host": "example.com:8443" }
+					)
+					var parsed = JSONDeserialize( result.body )
+					expect( parsed.protocol ).toBe( "https" )
+					expect( parsed.secure ).toBeTrue()
+					expect( parsed.hostname ).toBe( "example.com" )
+				} finally {
+					proxyApp.close()
+				}
+			} )
+
+			it( "merges app.locals and res.locals into render() data, with data itself taking precedence", function() {
+				var result = variables.client.get( variables.baseUrl & "/locals-test" )
+				expect( result.statusCode ).toBe( 200 )
+				expect( result.body ).toInclude( "appValue=fromApp" )
+				expect( result.body ).toInclude( "resValue=fromRes" )
+				expect( result.body ).toInclude( "overridden=fromData" )
+			} )
+
+			it( "matches an optional trailing route param end to end, with and without it present", function() {
+				var withId = variables.client.get( variables.baseUrl & "/optional-param-test/42" )
+				expect( JSONDeserialize( withId.body ).id ).toBe( "42" )
+
+				var withoutId = variables.client.get( variables.baseUrl & "/optional-param-test" )
+				expect( JSONDeserialize( withoutId.body ).id ).toBe( "(absent)" )
 			} )
 
 			it( "returns a default 404 for an unmatched route", function() {

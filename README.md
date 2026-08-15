@@ -127,6 +127,8 @@ which matters for a repo whose own scripts live in subdirectories
 - `app.param(name, callback)` — see [Route params](#route-params-appparamname-callback) below
 - `app.route(path)` — see [Chainable routes](#chainable-routes-approutepath) below
 - `app.set(name, value)` / `app.getSetting(name)`
+- `app.locals` — a plain struct merged into every `res.render()` call's data;
+  see [Views](#views-resrender) below
 - `app.listen(port, callback, options)` — starts the server and blocks the calling thread by default
 - `app.close()` — stops the server, and breaks a blocked `listen()` (from any thread)
 
@@ -207,6 +209,14 @@ registration time rather than silently matching more or less than you'd
 expect. A route registered with no handler function also throws immediately,
 rather than silently registering nothing.
 
+A trailing `:name?` marks the last param as optional — `/users/:id?` matches
+both `/users/42` (`req.params.id` is `"42"`) and `/users` (`req.params.id`
+isn't set at all, so read it with `req.params.id ?: someDefault`). Same
+restriction as `*`: an optional param is only supported as the *final* path
+segment — `/a/:id?/b` throws at registration time rather than silently doing
+something you didn't ask for, since matching an optional param anywhere else
+would need real backtracking this router doesn't implement.
+
 #### Route params (`app.param(name, callback)`)
 
 `param(name, (req, res, next, value) => {...})` runs once for any matched
@@ -245,10 +255,11 @@ Works the same on a standalone `Router` — `router.route(path)`.
 ### Request
 
 `req.method`, `req.path`, `req.originalUrl`, `req.query`, `req.params`,
-`req.headers`, `req.get(name)`, `req.cookies`, `req.ip`, `req.body` (populated
-by body-parsing middleware, empty struct otherwise), `req.rawExchange()` (an
-escape hatch to the underlying `com.sun.net.httpserver.HttpExchange`, for
-anything not covered by the rest of the API).
+`req.headers`, `req.get(name)`, `req.cookies`, `req.ip`, `req.protocol`,
+`req.secure`, `req.hostname`, `req.body` (populated by body-parsing
+middleware, empty struct otherwise), `req.rawExchange()` (an escape hatch to
+the underlying `com.sun.net.httpserver.HttpExchange`, for anything not
+covered by the rest of the API).
 
 `req.ip` is always the direct TCP peer by default — safe, since a client
 can't spoof it, but wrong behind a reverse proxy (it'll report the proxy's
@@ -256,6 +267,15 @@ IP). Opt in to trusting `X-Forwarded-For` with `app.set("trust proxy", true)`,
 same as Express; leave it off (the default) unless you actually control the
 proxy in front of this, since with it on, anyone who can reach the app
 directly can forge their reported IP.
+
+`req.protocol`/`req.secure`/`req.hostname` follow the same trust model.
+BoxExpress's own `HttpServer` never terminates TLS itself, so `req.protocol`
+is always `"http"` (`req.secure` always `false`) unless `trust proxy` is on
+*and* the request carries `X-Forwarded-Proto: https` — the shape you'd see
+behind a TLS-terminating reverse proxy. `req.hostname` is the `Host` header
+(or, with `trust proxy` on, `X-Forwarded-Host` if present) with any `:port`
+suffix stripped — an IPv6 host (`[::1]:3000`) is left bracketed rather than
+mangled at the first colon.
 
 ### Response
 
@@ -401,6 +421,30 @@ path before either engine touches the file — a request for
 rendering whatever that resolves to, but treat any user input reaching
 `render()`'s first argument as something to validate yourself regardless;
 this just stops the obvious traversal case.
+
+#### `app.locals` / `res.locals`
+
+Two plain structs merged into every `render()` call's data, so values a
+route doesn't set explicitly — a site name, the current user, a nonce —
+don't have to be threaded through every single `res.render()` call by hand.
+`app.locals` is set once, application-wide; `res.locals` is set per request
+(typically from middleware) and only lives for that one request/response
+cycle. Precedence, low to high: `app.locals`, then `res.locals` (overriding
+`app.locals`), then whatever you pass as `render()`'s own `data` argument
+(overriding both) — same order Express uses:
+
+```js
+app.locals.siteName = "My Site"
+
+app.use( ( req, res, next ) => {
+	res.locals.user = req.session.user ?: "guest"
+	next()
+} )
+
+app.get( "/", ( req, res ) => {
+	res.render( "home", {} )   // views/home.bxm sees data.siteName and data.user
+} )
+```
 
 ### Middleware
 
@@ -590,6 +634,18 @@ Two more BoxLang-specific things that shaped how these are written:
   enabling video/audio scrubbing and resumable downloads. Every file
   response now sets `Accept-Ranges: bytes`. Multi-range requests and
   `If-Range` aren't supported — see [RangeParser.bx](models/RangeParser.bx).
+- Added `app.locals`/`res.locals` — two plain structs merged into every
+  `res.render()` call's data (`app.locals` < `res.locals` < the explicit
+  `data` argument, each overriding the last), so values a route doesn't set
+  explicitly don't have to be threaded through every render() call by hand.
+- Added `req.protocol`, `req.secure`, and `req.hostname` — same `trust
+  proxy` trust model as `req.ip` (`X-Forwarded-Proto`/`X-Forwarded-Host`
+  are only honored when `app.set("trust proxy", true)`), since BoxExpress's
+  own `HttpServer` never terminates TLS itself.
+- Added optional trailing route params (`/users/:id?`) — same restriction
+  as the `*` wildcard, only supported as the final path segment, since
+  matching one anywhere else would need real backtracking. See
+  [Router.bx](models/Router.bx).
 
 **0.1.12**
 - **Fix:** `reloadOnChange` could silently kill the server on a failed

@@ -5,11 +5,13 @@
  */
 class {
 
-	function init( exchange, settings = {} ) {
+	function init( exchange, settings = {}, appLocals = {} ) {
 		variables.exchange = exchange
 		variables.sent = false
 		variables.statusCode = 200
 		variables.settings = settings
+		variables.appLocals = appLocals
+		this.locals = {}
 		variables.STATUS_TEXT = {
 			200: "OK", 201: "Created", 204: "No Content",
 			301: "Moved Permanently", 302: "Found",
@@ -254,8 +256,24 @@ class {
 	 *          if you pass your view data as the top-level struct.
 	 * A view with no extension gets one appended based on app.set("view engine", ...),
 	 * defaulting to "bxm" — mirrors Express's view-engine setting.
+	 *
+	 * `data` is merged with `app.locals` and `res.locals` before it reaches the
+	 * template — app.locals first, res.locals next (overriding app.locals), then
+	 * `data` last (overriding both) — same precedence Express uses, so values a
+	 * route doesn't set explicitly (site name, a per-request user, etc.) don't
+	 * have to be threaded through every render() call.
 	 */
 	function render( view, data = {} ) {
+		// app.locals < res.locals < the data passed here, each overriding the last —
+		// same precedence as Express. Reassigning the local `data` (not a new var)
+		// so the bx:include below, which shares this function's scope, sees the
+		// merged struct under the same name the .bxm template expects.
+		var mergedData = {}
+		mergedData.append( variables.appLocals )
+		mergedData.append( this.locals )
+		mergedData.append( data )
+		data = mergedData
+
 		var viewsDir = variables.settings[ "views" ] ?: javacast( "null", "" )
 		if ( isNull( viewsDir ) ) {
 			throw(

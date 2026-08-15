@@ -75,6 +75,39 @@ class extends="testbox.system.BaseSpec" {
 				expect( hit ).toBeTrue()
 			} )
 
+			it( "matches an optional trailing param when present, capturing its value", function() {
+				var router = new "../../models/Router"()
+				var capturedId = "not set"
+				router.get( "/users/:id?", ( req, res ) => { capturedId = req.params.id ?: "(absent)" } )
+				router.dispatch( _fakeReq( "GET", "/users/42" ), _fakeRes() )
+				expect( capturedId ).toBe( "42" )
+			} )
+
+			it( "matches an optional trailing param when absent, leaving it uncaptured", function() {
+				var router = new "../../models/Router"()
+				var capturedId = "not set"
+				router.get( "/users/:id?", ( req, res ) => { capturedId = req.params.id ?: "(absent)" } )
+				router.dispatch( _fakeReq( "GET", "/users" ), _fakeRes() )
+				expect( capturedId ).toBe( "(absent)" )
+			} )
+
+			it( "does not match an optional trailing param route against extra path segments", function() {
+				var router = new "../../models/Router"()
+				var hit = false
+				router.get( "/users/:id?", ( req, res ) => { hit = true } )
+				var res = _fakeRes()
+				router.dispatch( _fakeReq( "GET", "/users/42/extra" ), res )
+				expect( hit ).toBeFalse()
+				expect( res.getStatusCode() ).toBe( 404 )
+			} )
+
+			it( "throws at registration time when an optional param isn't the final path segment", function() {
+				var router = new "../../models/Router"()
+				expect( function() {
+					router.get( "/a/:id?/b", ( req, res ) => {} )
+				} ).toThrow( "BoxExpress.InvalidRoutePath" )
+			} )
+
 			it( "matches PUT, PATCH, and DELETE routes", function() {
 				var router = new "../../models/Router"()
 				var hits = []
