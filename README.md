@@ -53,14 +53,22 @@ Published on [ForgeBox](https://www.forgebox.io/) as `boxlang-express`:
 box install boxlang-express
 ```
 
-That drops it into a project's local `boxlang_modules/boxexpress/` (or use
-`box install boxlang-express --system` for the runtime-wide
-`~/.boxlang/modules/`). The mapping (`bxModules.boxexpress`) is registered by
-the BoxLang runtime the moment it discovers the module — but that discovery
-is relative to the **process's current working directory** (no upward
-search), so `boxlang` has to be invoked from the directory containing
-`boxlang_modules/`, same as `node_modules` resolution rules of thumb in
-npm-land.
+Unlike a typical CommandBox package, that installs into the runtime-wide
+`~/.boxlang/modules/` by **default** — since that's where the BoxLang
+runtime itself looks — not a project-local folder. Pass `--local` for a
+project-local install instead:
+
+```bash
+box install boxlang-express --local
+```
+
+That drops it into a project's local `boxlang_modules/boxexpress/`. Either
+way, the mapping (`bxModules.boxexpress`) is registered by the BoxLang
+runtime the moment it discovers the module — but for a local install, that
+discovery is relative to the **process's current working directory** (no
+upward search), so `boxlang` has to be invoked from the directory
+containing `boxlang_modules/`, same as `node_modules` resolution rules of
+thumb in npm-land.
 
 **Gotcha:** if a module of the same name exists in *both* places — a
 project-local `boxlang_modules/boxexpress/` and a global
