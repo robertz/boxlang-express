@@ -927,6 +927,13 @@ Two more BoxLang-specific things that shaped how these are written:
   `app.set("env", "development")` on, unlike every other error path in the
   framework. It now logs and honors `env` the same way route/middleware
   errors already do.
+- **Fix:** a `Range` request header of exactly `bytes=` (a valid header,
+  just an empty spec) also threw a `500` — same `left()`/`right()`
+  zero-count bug, this time in [RangeParser.bx](models/RangeParser.bx),
+  whose own dash-split logic already used `mid()` specifically to avoid
+  it. Now falls back to a full `200` response, same as any other
+  unparseable `Range` header.
+- **Fix:** `listen()` created its underlying `HttpServer` with a TCP accept
   backlog of `0` (the JDK default), which turned out to be a real capacity
   ceiling — confirmed with a live load test (`ab`): request handling itself
   stayed fast and error-free throughout, but new connections started getting

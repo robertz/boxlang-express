@@ -95,6 +95,12 @@ class extends="testbox.system.BaseSpec" {
 				expect( result.type ).toBe( "full" )
 			} )
 
+			it( "falls back to type=full for 'bytes=' with nothing after it, without a 500", function() {
+				var parser = new "../../models/RangeParser"()
+				var result = parser.parse( "bytes=", 100 )
+				expect( result.type ).toBe( "full" )
+			} )
+
 		} )
 	}
 

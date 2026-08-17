@@ -29,7 +29,11 @@ class {
 			return { type: "none" }
 		}
 
-		var spec = rangeHeader.right( rangeHeader.len() - 6 ).trim()
+		// mid(), not right() — "bytes=" with nothing after it is a valid (if
+		// useless) header to receive, and rangeHeader.len() - 6 is 0 in that
+		// case, which right() throws on. Same class of bug fixed below for
+		// the dash-split case.
+		var spec = rangeHeader.mid( 7, rangeHeader.len() - 6 ).trim()
 		if ( spec.find( "," ) ) {
 			return { type: "full" }
 		}
