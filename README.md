@@ -913,6 +913,28 @@ Two more BoxLang-specific things that shaped how these are written:
 
 ## Changelog
 
+**0.1.16**
+- Added `app.set("trust proxy header", "DO-Connecting-IP")` (or an ordered
+  array of candidates) for platforms where `X-Forwarded-For` isn't safe to
+  trust even with `trust proxy` on — confirmed directly against
+  DigitalOcean App Platform (with Cloudflare in front of that) that both
+  hops *append* to `X-Forwarded-For` rather than replacing it, so a client
+  can prepend a forged entry and have it survive to the app, making
+  `req.ip` attacker-controlled rather than just wrong. Platforms that do
+  this typically also inject their own edge-set header carrying the real
+  client IP (`DO-Connecting-IP`, `CF-Connecting-IP`, `Fastly-Client-IP`,
+  etc.), set from the connection the edge itself observed rather than
+  anything the client sent — checked before `X-Forwarded-For`, and
+  independent of the `trust proxy` boolean, since it's a different, safer
+  trust model. See [Request.bx](models/Request.bx).
+- Switched `AnsiColor.bx`'s `NO_COLOR` check from
+  `createObject("java","java.lang.System").getenv(...)` to the native
+  `getSystemSetting(name, defaultValue)` BIF — confirmed directly that it
+  reads real environment variables (not just JVM system properties) and
+  never throws when a default is given, so the Java interop wasn't
+  needed. No behavior change, verified live (`NO_COLOR` still disables
+  coloring, a normal run still shows real ANSI codes).
+
 **0.1.15**
 - **Fix:** `req.query`/`req.cookies` threw a `500` on a completely ordinary
   input — a query param or cookie with an empty key or value (`?q=`,
