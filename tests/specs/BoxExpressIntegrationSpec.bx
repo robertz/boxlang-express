@@ -634,6 +634,48 @@ class extends="testbox.system.BaseSpec" {
 				}
 			} )
 
+			it( "prefers a configured trust proxy header for req.ip over X-Forwarded-For, with no trust proxy boolean needed", function() {
+				var proxyPort = 4331
+				var proxyApp = new "../../models/BoxExpress"()
+				proxyApp.set( "trust proxy header", "DO-Connecting-IP" )
+				proxyApp.get( "/ip", ( req, res ) => res.json( { ip: req.ip } ) )
+				proxyApp.listen( port = proxyPort, options = { block: false } )
+				sleep( 300 )
+
+				try {
+					var result = variables.client.getWithHeaders(
+						"http://localhost:#proxyPort#/ip",
+						{ "X-Forwarded-For": "203.0.113.9, 10.0.0.1", "DO-Connecting-IP": "198.51.100.7" }
+					)
+					expect( JSONDeserialize( result.body ).ip ).toBe( "198.51.100.7" )
+				} finally {
+					proxyApp.close()
+				}
+			} )
+
+			it( "checks trust proxy header candidates in order and falls back to the direct peer when none are present", function() {
+				var proxyPort = 4332
+				var proxyApp = new "../../models/BoxExpress"()
+				proxyApp.set( "trust proxy header", [ "DO-Connecting-IP", "CF-Connecting-IP" ] )
+				proxyApp.get( "/ip", ( req, res ) => res.json( { ip: req.ip } ) )
+				proxyApp.listen( port = proxyPort, options = { block: false } )
+				sleep( 300 )
+
+				try {
+					var withSecond = variables.client.getWithHeaders(
+						"http://localhost:#proxyPort#/ip",
+						{ "CF-Connecting-IP": "198.51.100.42" }
+					)
+					expect( JSONDeserialize( withSecond.body ).ip ).toBe( "198.51.100.42" )
+
+					var withNeither = variables.client.get( "http://localhost:#proxyPort#/ip" )
+					expect( len( JSONDeserialize( withNeither.body ).ip ) ).toBeGT( 0 )
+					expect( JSONDeserialize( withNeither.body ).ip ).notToBe( "198.51.100.42" )
+				} finally {
+					proxyApp.close()
+				}
+			} )
+
 			it( "runs multiple middleware registered from a single app.use(path, ...) call, in order", function() {
 				var result = variables.client.get( variables.baseUrl & "/multi-use-test" )
 				expect( result.statusCode ).toBe( 200 )

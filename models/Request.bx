@@ -87,8 +87,34 @@ class {
 	 * app.set("trust proxy", true) to prefer X-Forwarded-For instead, same as Express's
 	 * trust-proxy setting (off by default for the same reason: an untrusted client could
 	 * otherwise forge that header to spoof its IP).
+	 *
+	 * X-Forwarded-For is the wrong choice behind some platforms, though: verified
+	 * directly against DigitalOcean App Platform (with Cloudflare in front of that)
+	 * that both hops APPEND to X-Forwarded-For rather than replacing it, so a client
+	 * can still prepend a forged entry and have it survive to the app — trust proxy
+	 * would make req.ip attacker-controlled there, not just wrong. Platforms that do
+	 * this typically also inject their own edge-set header carrying the real client IP
+	 * (DigitalOcean's DO-Connecting-IP, Cloudflare's CF-Connecting-IP, Fastly's
+	 * Fastly-Client-IP, etc.) — set from the connection the edge itself observed, not
+	 * from anything the client sent, so trustworthy where X-Forwarded-For's leftmost
+	 * entry is not. app.set("trust proxy header", "DO-Connecting-IP") (or an array,
+	 * checked in order, first present wins) reads one of those instead. Checked before
+	 * the X-Forwarded-For path, and independent of the "trust proxy" boolean — a named
+	 * single-value edge header is a different, safer trust model than a client-writable
+	 * multi-value one.
 	 */
 	private function _resolveIp( exchange, settings ) {
+		var trustedHeaders = settings[ "trust proxy header" ] ?: []
+		if ( !isArray( trustedHeaders ) ) {
+			trustedHeaders = [ trustedHeaders ]
+		}
+		for ( var headerName in trustedHeaders ) {
+			var headerValue = this.headers[ headerName ] ?: ""
+			if ( len( headerValue ) ) {
+				return headerValue.listFirst( "," ).trim()
+			}
+		}
+
 		if ( settings[ "trust proxy" ] ?: false ) {
 			var forwardedFor = this.headers[ "X-Forwarded-For" ] ?: ""
 			if ( len( forwardedFor ) ) {
