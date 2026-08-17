@@ -403,6 +403,49 @@ class extends="testbox.system.BaseSpec" {
 				expect( fileRead( parsed.files.avatar[ 1 ].path ) ).toBe( "binary-ish content" )
 			} )
 
+			it( 'handles a file input submitted with nothing selected (filename="") without a 500', function() {
+				var result = variables.client.postMultipart(
+					variables.baseUrl & "/upload",
+					{},
+					[ { field: "avatar", filename: "", contentType: "application/octet-stream", content: "" } ]
+				)
+				expect( result.statusCode ).toBe( 200 )
+				expect( JSONDeserialize( result.body ).files ).toBeStruct()
+			} )
+
+			it( "handles a multipart part with an empty body without a 500", function() {
+				var crlf = char( 13 ) & char( 10 )
+				var body = "--BOUNDARY" & crlf
+					& 'Content-Disposition: form-data; name="note"' & crlf & crlf
+					& "--BOUNDARY--" & crlf
+				var result = variables.client.request( "POST", variables.baseUrl & "/upload", body, "multipart/form-data; boundary=BOUNDARY" )
+				expect( result.statusCode ).toBe( 200 )
+				expect( JSONDeserialize( result.body ).fields.note ).toBe( "" )
+			} )
+
+			it( "handles a part header with an empty name or value without a 500", function() {
+				var crlf = char( 13 ) & char( 10 )
+				var body = "--BOUNDARY" & crlf
+					& ":value" & crlf
+					& "Empty-Header:" & crlf
+					& 'Content-Disposition: form-data; name="note"' & crlf & crlf
+					& "hi" & crlf
+					& "--BOUNDARY--" & crlf
+				var result = variables.client.request( "POST", variables.baseUrl & "/upload", body, "multipart/form-data; boundary=BOUNDARY" )
+				expect( result.statusCode ).toBe( 200 )
+				expect( JSONDeserialize( result.body ).fields.note ).toBe( "hi" )
+			} )
+
+			it( "handles an empty boundary in Content-Type without a 500", function() {
+				var crlf = char( 13 ) & char( 10 )
+				var body = "--" & crlf
+					& 'Content-Disposition: form-data; name="note"' & crlf & crlf
+					& "hi" & crlf
+					& "----" & crlf
+				var result = variables.client.request( "POST", variables.baseUrl & "/upload", body, "multipart/form-data; boundary=" )
+				expect( result.statusCode ).toBe( 200 )
+			} )
+
 			it( "renders a .bxm view", function() {
 				var result = variables.client.get( variables.baseUrl & "/greet/Ada" )
 				expect( result.statusCode ).toBe( 200 )

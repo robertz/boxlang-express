@@ -59,9 +59,12 @@ class {
 		if ( !pos ) {
 			return javacast( "null", "" )
 		}
-		var boundary = contentType.right( contentType.len() - pos - marker.len() + 1 )
+		// mid(), not right() — an empty boundary ("...boundary=", nothing after
+		// it) makes the count 0, which right() throws on but mid() handles fine.
+		var boundaryStart = pos + marker.len()
+		var boundary = contentType.mid( boundaryStart, contentType.len() - boundaryStart + 1 )
 		boundary = boundary.listFirst( ";" )
-		if ( boundary.left( 1 ) == '"' && boundary.right( 1 ) == '"' ) {
+		if ( len( boundary ) >= 2 && boundary.left( 1 ) == '"' && boundary.right( 1 ) == '"' ) {
 			boundary = boundary.mid( 2, boundary.len() - 2 )
 		}
 		return boundary
@@ -89,16 +92,21 @@ class {
 				continue
 			}
 
-			var part = rawPart.left( 2 ) == char( 13 ) & char( 10 ) ? rawPart.right( rawPart.len() - 2 ) : rawPart
+			// mid(), not left()/right(), throughout this block — a part that's
+			// nothing but a leading CRLF, an empty header block, or an empty
+			// body (a genuinely empty file upload, or a blank field — both
+			// completely ordinary, not edge cases) all produce a zero count
+			// here, which left()/right() throw on but mid() handles fine.
+			var part = rawPart.left( 2 ) == char( 13 ) & char( 10 ) ? rawPart.mid( 3, rawPart.len() - 2 ) : rawPart
 			var headerSep = part.find( char( 13 ) & char( 10 ) & char( 13 ) & char( 10 ) )
 			if ( !headerSep ) {
 				continue
 			}
 
-			var headerBlock = part.left( headerSep - 1 )
-			var partBody = part.right( part.len() - headerSep - 3 )
-			if ( partBody.right( 2 ) == char( 13 ) & char( 10 ) ) {
-				partBody = partBody.left( partBody.len() - 2 )
+			var headerBlock = part.mid( 1, headerSep - 1 )
+			var partBody = part.mid( headerSep + 4, part.len() - headerSep - 3 )
+			if ( len( partBody ) >= 2 && partBody.right( 2 ) == char( 13 ) & char( 10 ) ) {
+				partBody = partBody.mid( 1, partBody.len() - 2 )
 			}
 
 			var headers = _parsePartHeaders( headerBlock )
@@ -139,8 +147,11 @@ class {
 		for ( var line in headerBlock.listToArray( char( 13 ) & char( 10 ) ) ) {
 			var colonPos = line.find( ":" )
 			if ( colonPos ) {
-				var key = line.left( colonPos - 1 ).trim().lcase()
-				var value = line.right( line.len() - colonPos ).trim()
+				// Same zero-count left()/right() guard as Request.bx/BodyParsers.bx —
+				// a header with no name (":value") or no value ("Header:") is
+				// malformed but shouldn't crash the parser.
+				var key = ( colonPos == 1 ? "" : line.left( colonPos - 1 ) ).trim().lcase()
+				var value = ( colonPos == line.len() ? "" : line.right( line.len() - colonPos ) ).trim()
 				headers[ key ] = value
 			}
 		}
@@ -153,12 +164,17 @@ class {
 		if ( !pos ) {
 			return javacast( "null", "" )
 		}
-		var rest = disposition.right( disposition.len() - pos - marker.len() + 1 )
+		// mid(), not right()/left() — an empty param value (name="", the
+		// filename a browser sends for a file input submitted with nothing
+		// selected being the common real-world case) makes one of these
+		// counts 0, which right()/left() throw on but mid() handles fine.
+		var restStart = pos + marker.len()
+		var rest = disposition.mid( restStart, disposition.len() - restStart + 1 )
 		var endPos = rest.find( '"' )
 		if ( !endPos ) {
 			return javacast( "null", "" )
 		}
-		return rest.left( endPos - 1 )
+		return rest.mid( 1, endPos - 1 )
 	}
 
 	private function _persistFiles( files, dest ) {

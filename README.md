@@ -933,6 +933,16 @@ Two more BoxLang-specific things that shaped how these are written:
   whose own dash-split logic already used `mid()` specifically to avoid
   it. Now falls back to a full `200` response, same as any other
   unparseable `Range` header.
+- **Fix:** a sweep of the rest of the codebase for the same
+  `left()`/`right()` zero-count bug turned up six more, all in
+  [Multipart.bx](models/middleware/Multipart.bx) — the most reachable one
+  being a plain HTML file input submitted with nothing selected
+  (`filename=""`), which crashed the whole upload instead of the field
+  simply being empty, same as it already was for a text field. Also fixed:
+  an empty `boundary=` in `Content-Type`, a multipart part with no headers
+  or an empty body (a genuinely empty file/field), and a part header with
+  an empty name or value. All converted to `mid()`, same fix shape as
+  `RangeParser.bx` above.
 - **Fix:** `listen()` created its underlying `HttpServer` with a TCP accept
   backlog of `0` (the JDK default), which turned out to be a real capacity
   ceiling — confirmed with a live load test (`ab`): request handling itself
