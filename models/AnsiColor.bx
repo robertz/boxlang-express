@@ -21,8 +21,7 @@
 class {
 
 	function init() {
-		var noColor = createObject( "java", "java.lang.System" ).getenv( "NO_COLOR" )
-		variables.enabled = isNull( noColor ) || !len( noColor )
+		variables.enabled = !len( getSystemSetting( "NO_COLOR", "" ) )
 		variables.ESC = char( 27 )
 		variables.CODES = {
 			bold: 1, dim: 2,
