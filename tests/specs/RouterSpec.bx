@@ -108,6 +108,13 @@ class extends="testbox.system.BaseSpec" {
 				} ).toThrow( "BoxExpress.InvalidRoutePath" )
 			} )
 
+			it( "throws a clear error at registration time for a bare ':' path segment, not a raw engine error", function() {
+				var router = new "../../models/Router"()
+				expect( function() {
+					router.get( "/:", ( req, res ) => {} )
+				} ).toThrow( "BoxExpress.InvalidRoutePath" )
+			} )
+
 			it( "matches PUT, PATCH, and DELETE routes", function() {
 				var router = new "../../models/Router"()
 				var hits = []

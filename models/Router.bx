@@ -365,6 +365,12 @@ class {
 				segments.append( { type: "optionalParam", name: paramName } )
 				paramNames.append( paramName )
 			} else if ( raw.left( 1 ) == ":" ) {
+				if ( raw.len() == 1 ) {
+					throw(
+						message = "Invalid route path ""#path#"" — ':' alone is not a valid param name (did you mean ':name'?)",
+						type = "BoxExpress.InvalidRoutePath"
+					)
+				}
 				var paramName = raw.right( raw.len() - 1 )
 				segments.append( { type: "param", name: paramName } )
 				paramNames.append( paramName )

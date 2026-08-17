@@ -943,6 +943,14 @@ Two more BoxLang-specific things that shaped how these are written:
   or an empty body (a genuinely empty file/field), and a part header with
   an empty name or value. All converted to `mid()`, same fix shape as
   `RangeParser.bx` above.
+- **Fix:** a bare `:` path segment (`app.get("/:", ...)`) — a typo for
+  `:name` — threw the same `left()`/`right()` zero-count error, but at
+  route *registration* time rather than per-request, so it's a developer
+  papercut rather than anything reachable by a client. Fixed the same way,
+  but also given a proper `BoxExpress.InvalidRoutePath` message (matching
+  every sibling validation in [Router.bx](models/Router.bx)) instead of
+  leaking a raw `"Count cannot be zero."` engine error with no indication
+  of what was actually wrong.
 - **Fix:** `listen()` created its underlying `HttpServer` with a TCP accept
   backlog of `0` (the JDK default), which turned out to be a real capacity
   ceiling — confirmed with a live load test (`ab`): request handling itself
