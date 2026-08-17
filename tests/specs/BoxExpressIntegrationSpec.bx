@@ -46,6 +46,10 @@ class extends="testbox.system.BaseSpec" {
 			res.json( { query: req.query } )
 		} )
 
+		variables.app.get( "/cookies", ( req, res ) => {
+			res.json( { cookies: req.cookies } )
+		} )
+
 		variables.app.post( "/echo", ( req, res ) => {
 			res.json( { youSent: req.body } )
 		} )
@@ -237,6 +241,30 @@ class extends="testbox.system.BaseSpec" {
 			it( "parses the query string", function() {
 				var result = variables.client.get( variables.baseUrl & "/search?q=cats" )
 				expect( JSONDeserialize( result.body ).query.q ).toBe( "cats" )
+			} )
+
+			it( "handles an empty query value without a 500 (key=)", function() {
+				var result = variables.client.get( variables.baseUrl & "/search?q=" )
+				expect( result.statusCode ).toBe( 200 )
+				expect( JSONDeserialize( result.body ).query.q ).toBe( "" )
+			} )
+
+			it( "handles an empty query key without a 500 (=value)", function() {
+				var result = variables.client.get( variables.baseUrl & "/search?=cats" )
+				expect( result.statusCode ).toBe( 200 )
+				expect( JSONDeserialize( result.body ).query[ "" ] ).toBe( "cats" )
+			} )
+
+			it( "handles an empty cookie value without a 500 (name=)", function() {
+				var result = variables.client.getWithHeaders( variables.baseUrl & "/cookies", { "Cookie": "name=" } )
+				expect( result.statusCode ).toBe( 200 )
+				expect( JSONDeserialize( result.body ).cookies.name ).toBe( "" )
+			} )
+
+			it( "handles an empty cookie name without a 500 (=value)", function() {
+				var result = variables.client.getWithHeaders( variables.baseUrl & "/cookies", { "Cookie": "=value" } )
+				expect( result.statusCode ).toBe( 200 )
+				expect( JSONDeserialize( result.body ).cookies[ "" ] ).toBe( "value" )
 			} )
 
 			it( "parses a JSON request body via opt-in middleware", function() {

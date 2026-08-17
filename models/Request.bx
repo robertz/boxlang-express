@@ -49,8 +49,12 @@ class {
 		for ( var pair in rawQuery.listToArray( "&" ) ) {
 			var eqPos = pair.find( "=" )
 			if ( eqPos ) {
-				var rawKey = pair.left( eqPos - 1 )
-				var rawValue = pair.right( pair.len() - eqPos )
+				// eqPos - 1 or pair.len() - eqPos can be zero (an empty key or an
+				// empty value, e.g. "key=") — BoxLang's left()/right() throw "Count
+				// cannot be zero" for a zero count. Same class of bug BodyParsers.bx
+				// already guards against.
+				var rawKey = eqPos == 1 ? "" : pair.left( eqPos - 1 )
+				var rawValue = eqPos == pair.len() ? "" : pair.right( pair.len() - eqPos )
 				result[ urlDecode( rawKey ) ] = urlDecode( rawValue )
 			} else {
 				result[ urlDecode( pair ) ] = ""
@@ -68,8 +72,9 @@ class {
 			var trimmedPair = pair.trim()
 			var eqPos = trimmedPair.find( "=" )
 			if ( eqPos ) {
-				var cookieName = trimmedPair.left( eqPos - 1 ).trim()
-				var cookieValue = trimmedPair.right( trimmedPair.len() - eqPos ).trim()
+				// Same zero-count left()/right() guard as _parseQueryString() above.
+				var cookieName = ( eqPos == 1 ? "" : trimmedPair.left( eqPos - 1 ) ).trim()
+				var cookieValue = ( eqPos == trimmedPair.len() ? "" : trimmedPair.right( trimmedPair.len() - eqPos ) ).trim()
 				result[ cookieName ] = urlDecode( cookieValue )
 			}
 		}

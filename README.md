@@ -914,7 +914,19 @@ Two more BoxLang-specific things that shaped how these are written:
 ## Changelog
 
 **0.1.15**
-- **Fix:** `listen()` created its underlying `HttpServer` with a TCP accept
+- **Fix:** `req.query`/`req.cookies` threw a `500` on a completely ordinary
+  input — a query param or cookie with an empty key or value (`?q=`,
+  `?=cats`, `Cookie: name=`, `Cookie: =value`). `Request.bx` sliced the
+  string with `left()`/`right()` using a count that could legitimately be
+  `0`, which BoxLang throws on (`"Count cannot be zero"`) — the exact bug
+  class `BodyParsers.bx` already guarded against, just never applied here.
+  Along the way, found and fixed a second issue this surfaced: a failure
+  constructing `Request`/`Response` was caught silently in
+  [HttpBridge.bx](models/HttpBridge.bx) — no server-side log line, and the
+  real error message was hidden from the response even with
+  `app.set("env", "development")` on, unlike every other error path in the
+  framework. It now logs and honors `env` the same way route/middleware
+  errors already do.
   backlog of `0` (the JDK default), which turned out to be a real capacity
   ceiling — confirmed with a live load test (`ab`): request handling itself
   stayed fast and error-free throughout, but new connections started getting

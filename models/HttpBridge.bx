@@ -22,10 +22,21 @@ class {
 			res = new Response( exchange, variables.settings, variables.appLocals )
 			println( variables.color.gray( "[#dateTimeFormat( now(), 'yyyy-MM-dd HH:mm:ss' )#]" ) & " " & variables.color.method( req.method ) & " #req.path# " & variables.color.dim( req.ip ) )
 		} catch ( any e ) {
+			println( variables.color.gray( "[#dateTimeFormat( now(), 'yyyy-MM-dd HH:mm:ss' )#]" ) & " " & variables.color.red( "Failed to construct Request/Response: #e.message#" ) )
 			try {
-				exchange.sendResponseHeaders( 500, -1 )
-				exchange.close()
+				var message = ( variables.settings[ "env" ] ?: "" ) == "development" ? e.message : "Internal Server Error"
+				var bodyBytes = JSONSerialize( { error: true, message: message } ).getBytes( "UTF-8" )
+				exchange.getResponseHeaders().set( "Content-Type", "application/json" )
+				exchange.sendResponseHeaders( 500, bodyBytes.len() )
+				var outStream = exchange.getResponseBody()
+				outStream.write( bodyBytes )
+				outStream.close()
 			} catch ( any ignore ) {
+				try {
+					exchange.sendResponseHeaders( 500, -1 )
+					exchange.close()
+				} catch ( any ignoreToo ) {
+				}
 			}
 			return
 		}
