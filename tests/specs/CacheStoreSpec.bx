@@ -79,6 +79,34 @@ class extends="testbox.system.BaseSpec" {
 				req1.destroySession()
 			} )
 
+			it( "persists a mutation made *during* the request (inside next()), not just before it, against a store that doesn't share object references", function() {
+				// BoxLang's in-memory "default" cache may well hold the same
+				// struct reference it was given, which would make this pass
+				// even with the bug this guards against (Session.bx used to
+				// call store.set() *before* next(), so anything the request
+				// mutated on req.session afterwards — a CSRF token, a login
+				// setting the user — was silently lost the moment the store
+				// actually serializes on write, e.g. a JDBCStore-backed cache
+				// or Redis). This store double duplicates on both set() and
+				// get(), the same as any real out-of-process store would, so
+				// the test can't accidentally pass via reference-sharing.
+				var entries = {}
+				var store = {
+					get: function( id ) { return structKeyExists( entries, id ) ? duplicate( entries[ id ] ) : javacast( "null", "" ) },
+					set: function( id, data, maxAge ) { entries[ id ] = duplicate( data ) },
+					destroy: function( id ) { structDelete( entries, id ) }
+				}
+				var handler = new "../../models/middleware/Session"().session( { store: store } )
+
+				var req1 = { cookies: {} }
+				handler( req1, _fakeRes(), function() { req1.session.views = 1 } )
+
+				var req2 = { cookies: { "connect.sid": req1.sessionID } }
+				handler( req2, _fakeRes(), function() {} )
+
+				expect( req2.session.views ).toBe( 1 )
+			} )
+
 		} )
 	}
 

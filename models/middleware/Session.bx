@@ -42,11 +42,12 @@ class {
 				data = {}
 			}
 
-			store.set( sessionId, data, maxAge )
+			var wasDestroyed = false
 
 			req.session = data
 			req.sessionID = sessionId
 			req.destroySession = function() {
+				wasDestroyed = true
 				store.destroy( sessionId )
 				res.cookie( cookieName, "", { path: cookiePath, maxAge: 0 } )
 			}
@@ -59,7 +60,40 @@ class {
 				sameSite: options.sameSite ?: "Lax"
 			} )
 
-			next()
+			// Persisted *after* the rest of the chain runs, not before — next()
+			// runs every downstream middleware/handler synchronously, and
+			// req.session is commonly mutated during that (boxExpressCsrf()
+			// minting a token, a login handler setting the user, etc). Saving
+			// beforehand only ever wrote the pre-request snapshot.
+			//
+			// That bug was invisible against the default in-memory store:
+			// structs are pass-by-reference, so store.set() there was really
+			// just inserting a reference into a ConcurrentHashMap, and any
+			// later mutation of req.session (the same object) was automatically
+			// visible through that reference — no second write needed. A real
+			// out-of-process store (JDBCStore-backed cache, Redis, etc.) has to
+			// serialize on write, which breaks that accidental reference
+			// sharing and exposed the bug: e.g. boxExpressCsrf() mints a token
+			// into req.session after the pre-next() save, the save never
+			// happens again, and the *next* request reads back a session with
+			// no token at all — a same-request CSRF round-trip fails with
+			// "Invalid or missing CSRF token" even though the user submitted
+			// the exact token the form just rendered.
+			//
+			// try/finally so a throw partway through the chain still persists
+			// whatever req.session held at that point, same as the happy path.
+			// Skipped when destroySession() ran: without this check, this
+			// would unconditionally resurrect the entry destroySession() just
+			// removed, using whatever req.session held right before the
+			// destroy — the store.destroy() call would have no lasting
+			// effect at all.
+			try {
+				next()
+			} finally {
+				if ( !wasDestroyed ) {
+					store.set( sessionId, req.session, maxAge )
+				}
+			}
 		}
 	}
 
