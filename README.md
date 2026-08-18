@@ -913,6 +913,27 @@ Two more BoxLang-specific things that shaped how these are written:
 
 ## Changelog
 
+**0.1.17**
+- **Fix:** `boxExpressSession()` persisted `req.session` to the store
+  *before* `next()` ran, not after — so anything the request chain
+  mutated on it (`boxExpressCsrf()` minting a token, a login handler
+  setting the user, etc.) was written to local memory only and never made
+  it back to the store. Invisible against the default in-memory
+  `MemoryStore`, since structs are pass-by-reference — that early
+  `store.set()` call was really just inserting a reference into a
+  `ConcurrentHashMap`, and any later mutation of the same object was
+  automatically visible through it. A real out-of-process store has to
+  serialize on write (a `boxExpressCacheStore()`-backed `JDBCStore`,
+  Redis, etc.), which breaks that accidental reference-sharing and
+  exposes the bug for real: a CSRF token minted mid-request never gets
+  saved, so the very next request — even the form submission that
+  follows the page that minted it — reads back a session with no token
+  and `403`s. Now persists after `next()`, wrapped in `try`/`finally` so
+  a throw partway through the chain still saves whatever `req.session`
+  held at that point; `req.destroySession()` skips that save so a
+  destroyed session isn't silently resurrected by it. See
+  [Session.bx](models/middleware/Session.bx).
+
 **0.1.16**
 - Added `app.set("trust proxy header", "DO-Connecting-IP")` (or an ordered
   array of candidates) for platforms where `X-Forwarded-For` isn't safe to
