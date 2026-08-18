@@ -913,6 +913,17 @@ Two more BoxLang-specific things that shaped how these are written:
 
 ## Changelog
 
+**0.1.18**
+- Added `Response.getStatusCode()`/`getBytesWritten()` accessors — expose
+  the eventual status code and body byte count from outside the class,
+  for request-logging middleware (registered first via `app.use()`) that
+  otherwise can't observe a request's outcome. `getBytesWritten()` is `0`
+  for a response still in flight; both reflect the real outcome even when
+  a route never called `status()` directly, since every terminal method
+  that isn't a plain `200` (`redirect()`, `sendStatus()`,
+  `sendFileRange()`'s `206`/`304`/`416`) routes through it internally.
+  See [Response.bx](models/Response.bx).
+
 **0.1.17**
 - **Fix:** `boxExpressSession()` persisted `req.session` to the store
   *before* `next()` ran, not after — so anything the request chain
