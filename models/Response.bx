@@ -9,6 +9,7 @@ class {
 		variables.exchange = exchange
 		variables.sent = false
 		variables.statusCode = 200
+		variables.bytesWritten = 0
 		variables.settings = settings
 		variables.appLocals = appLocals
 		this.locals = {}
@@ -29,6 +30,28 @@ class {
 	function status( code ) {
 		variables.statusCode = code
 		return this
+	}
+
+	/**
+	 * The status code that will be (or was) sent — whatever the last status()
+	 * call set, defaulting to 200. Every terminal method that isn't a plain
+	 * 200 (redirect, sendStatus, sendFileRange's 206/304/416) routes through
+	 * status() internally, so this reflects the real outcome even when a
+	 * caller never touched status() directly. Added for request-logging
+	 * middleware (app.use, registered first) that needs to know the outcome
+	 * of a request it can't otherwise observe from outside this class.
+	 */
+	function getStatusCode() {
+		return variables.statusCode
+	}
+
+	/**
+	 * Byte count of the body actually written by _end() — 0 for a response
+	 * still in flight. Same motivation as getStatusCode() above: the "bytes
+	 * sent" field of an Apache-style access log.
+	 */
+	function getBytesWritten() {
+		return variables.bytesWritten
 	}
 
 	function set( name, value ) {
@@ -354,6 +377,7 @@ class {
 		// -1 to sendResponseHeaders() then tells the exchange not to expect
 		// (or wait for) an actual body write.
 		var isHead = variables.exchange.getRequestMethod().equalsIgnoreCase( "HEAD" )
+		variables.bytesWritten = bodyBytes.len()
 
 		if ( bodyBytes.len() == 0 ) {
 			variables.exchange.sendResponseHeaders( variables.statusCode, -1 )
