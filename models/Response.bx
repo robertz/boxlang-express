@@ -10,6 +10,7 @@ class {
 		variables.sent = false
 		variables.statusCode = 200
 		variables.bytesWritten = 0
+		variables.beforeSendCallbacks = []
 		variables.settings = settings
 		variables.appLocals = appLocals
 		this.locals = {}
@@ -52,6 +53,24 @@ class {
 	 */
 	function getBytesWritten() {
 		return variables.bytesWritten
+	}
+
+	/**
+	 * Registers a callback to run once, synchronously, the instant before this
+	 * response's headers are actually flushed — the only point guaranteed to
+	 * run after every downstream middleware/handler has finished mutating
+	 * request/response state, but still early enough to add a header.
+	 *
+	 * Exists for middleware whose header depends on what happened during
+	 * next() (e.g. session middleware deciding whether to send a cookie
+	 * based on whether req.session was actually touched) — calling
+	 * res.cookie() *after* next() returns is usually too late, since a
+	 * terminal method further down the chain (res.json(), etc.) has
+	 * normally already called _end() and flushed the headers by then.
+	 */
+	function onBeforeSend( callback ) {
+		variables.beforeSendCallbacks.append( callback )
+		return this
 	}
 
 	function set( name, value ) {
@@ -368,6 +387,10 @@ class {
 			throw( message = "Response already sent for this request", type = "BoxExpress.ResponseAlreadySent" )
 		}
 		variables.sent = true
+
+		for ( var callback in variables.beforeSendCallbacks ) {
+			callback()
+		}
 
 		// A HEAD response must never have a body, even though every handler
 		// above this (res.json(), res.sendFile(), etc.) still built one the

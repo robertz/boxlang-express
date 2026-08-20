@@ -15,7 +15,28 @@ class extends="testbox.system.BaseSpec" {
 		var staticFiles = new "../../models/middleware/StaticFiles"()
 		var multipart = new "../../models/middleware/Multipart"()
 		var session = new "../../models/middleware/Session"()
+		var strictSession = new "../../models/middleware/Session"()
 		variables.uploadDest = expandPath( "tests/fixtures/uploads" )
+
+		// A store double with an observable write count — real assertions on
+		// resave/saveUninitialized need to see whether store.set() actually
+		// ran, not just infer it from response data. Mounted under /strict
+		// (its own cookie name, "strict.sid") so it doesn't interact with the
+		// default-options session middleware mounted at the root below.
+		variables.strictSessionWrites = 0
+		variables.strictSessionEntries = {}
+		var strictStore = {
+			get: function( id ) {
+				return structKeyExists( variables.strictSessionEntries, id ) ? duplicate( variables.strictSessionEntries[ id ] ) : javacast( "null", "" )
+			},
+			set: function( id, data, maxAge ) {
+				variables.strictSessionWrites++
+				variables.strictSessionEntries[ id ] = duplicate( data )
+			},
+			destroy: function( id ) {
+				structDelete( variables.strictSessionEntries, id )
+			}
+		}
 
 		// expandPath() resolves relative to the top-level entry script (run-tests.bxs,
 		// at the project root), not relative to this class file — hence the project-root-
@@ -30,6 +51,12 @@ class extends="testbox.system.BaseSpec" {
 		// to the routes below via next() rather than erroring.
 		variables.app.use( staticFiles.serve( expandPath( "tests/fixtures/public" ) ) )
 		variables.app.use( session.session() )
+		variables.app.use( "/strict", strictSession.session( {
+			name: "strict.sid",
+			store: strictStore,
+			resave: false,
+			saveUninitialized: false
+		} ) )
 		variables.app.set( "views", expandPath( "tests/fixtures/views" ) )
 		variables.app.locals.appValue = "fromApp"
 		variables.app.locals.overridden = "shouldBeReplaced"
@@ -78,6 +105,16 @@ class extends="testbox.system.BaseSpec" {
 		variables.app.get( "/session-logout", ( req, res ) => {
 			req.destroySession()
 			res.json( { loggedOut: true } )
+		} )
+
+		variables.app.get( "/strict/read-only", ( req, res ) => {
+			// never touches req.session
+			res.json( { writes: variables.strictSessionWrites } )
+		} )
+
+		variables.app.get( "/strict/write", ( req, res ) => {
+			req.session.views = ( req.session.views ?: 0 ) + 1
+			res.json( { views: req.session.views, writes: variables.strictSessionWrites } )
 		} )
 
 		variables.app.get( "/download", ( req, res ) => {
@@ -510,6 +547,41 @@ class extends="testbox.system.BaseSpec" {
 				expect( JSONDeserialize( after.body ).views ).toBe( 1 )
 			} )
 
+			it( "saveUninitialized: false skips both the store write and the cookie for a new, untouched session", function() {
+				var writesBefore = variables.strictSessionWrites
+				var result = variables.client.get( variables.baseUrl & "/strict/read-only" )
+				expect( JSONDeserialize( result.body ).writes ).toBe( writesBefore )
+				expect( result.setCookie ).notToInclude( "strict.sid=" )
+			} )
+
+			it( "a new session is saved (and cookied) once it's actually modified, even with saveUninitialized: false", function() {
+				var writesBefore = variables.strictSessionWrites
+				var result = variables.client.get( variables.baseUrl & "/strict/write" )
+				expect( JSONDeserialize( result.body ).views ).toBe( 1 )
+				expect( result.setCookie ).toInclude( "strict.sid=" )
+				expect( variables.strictSessionWrites ).toBe( writesBefore + 1 )
+			} )
+
+			it( "resave: false skips the store write for an existing, untouched session, but still refreshes the cookie", function() {
+				var first = variables.client.get( variables.baseUrl & "/strict/write" )
+				var strictCookie = _extractCookie( first.setCookie, "strict.sid" )
+				var writesAfterFirst = variables.strictSessionWrites
+
+				var result = variables.client.getWithHeaders( variables.baseUrl & "/strict/read-only", { "Cookie": strictCookie } )
+				expect( JSONDeserialize( result.body ).writes ).toBe( writesAfterFirst )
+				expect( result.setCookie ).toInclude( "strict.sid=" )
+			} )
+
+			it( "an existing session is still saved when modified, regardless of resave: false", function() {
+				var first = variables.client.get( variables.baseUrl & "/strict/write" )
+				var strictCookie = _extractCookie( first.setCookie, "strict.sid" )
+				var writesAfterFirst = variables.strictSessionWrites
+
+				var second = variables.client.getWithHeaders( variables.baseUrl & "/strict/write", { "Cookie": strictCookie } )
+				expect( JSONDeserialize( second.body ).views ).toBe( 2 )
+				expect( variables.strictSessionWrites ).toBe( writesAfterFirst + 1 )
+			} )
+
 			it( "redirects via res.redirect()", function() {
 				var result = variables.client.requestNoRedirect( "GET", variables.baseUrl & "/go-home" )
 				expect( result.statusCode ).toBe( 302 )
@@ -875,6 +947,22 @@ class extends="testbox.system.BaseSpec" {
 			} )
 
 		} )
+	}
+
+	/**
+	 * setCookie joins every Set-Cookie header the response carried with a
+	 * newline — /strict/* routes get two at once (the root-mounted default
+	 * session's connect.sid alongside the strict one), so listFirst(...,";")
+	 * on the whole thing grabs whichever happens to come first, not
+	 * necessarily the one being asked for.
+	 */
+	private function _extractCookie( setCookieHeader, cookieName ) {
+		for ( var line in setCookieHeader.listToArray( char( 10 ) ) ) {
+			if ( line.findNoCase( cookieName & "=" ) == 1 ) {
+				return listFirst( line, ";" )
+			}
+		}
+		throw( message = "Cookie '#cookieName#' not found in Set-Cookie header(s): #setCookieHeader#", type = "TestSetupError" )
 	}
 
 }

@@ -113,6 +113,11 @@ class extends="testbox.system.BaseSpec" {
 	private function _fakeRes() {
 		var res = {}
 		res.cookie = function( name, value, options = {} ) { return res }
+		// Simulates a response actually being sent right away — good enough
+		// for these tests, which exercise Session's store behavior, not its
+		// cookie timing (see BoxExpressIntegrationSpec for that, against a
+		// real Response and real HTTP requests).
+		res.onBeforeSend = function( callback ) { callback() }
 		return res
 	}
 

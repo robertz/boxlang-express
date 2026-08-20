@@ -11,13 +11,46 @@
  *   } )
  *
  * Sessions are rolling: every request that passes through this middleware
- * resets the cookie's and the store entry's expiry to maxAge from now.
+ * resets the cookie's expiry to maxAge from now (and the store entry's too,
+ * whenever that entry is actually written — see resave below).
  *
  * The default store is in-memory (a ConcurrentHashMap on this instance), so
  * it doesn't survive a restart and isn't shared across processes — fine for
  * a single-process app, not for a cluster. Pass { store: myStore } with an
  * object exposing get(id)/set(id, data, maxAge)/destroy(id) to swap in
  * something durable (Redis, a database, etc).
+ *
+ * Two options control when a session actually gets written to the store,
+ * mirroring express-session's own options of the same name:
+ *
+ *   resave              (default true) — when false, an existing session
+ *                        that was loaded but never modified during this
+ *                        request is not re-written to the store. The cookie
+ *                        is still refreshed either way (kept simple, and
+ *                        matches this module's existing rolling-cookie
+ *                        behavior); only the store write is skipped.
+ *
+ *   saveUninitialized    (default true) — when false, a session that was
+ *                        *newly created* for this request (no existing
+ *                        cookie/store entry) and was never modified is
+ *                        neither persisted nor given a Set-Cookie — there's
+ *                        nothing to remember, and no reason to hand this
+ *                        visitor an identifier at all.
+ *
+ * Both default to their historical always-save behavior, so turning this
+ * middleware on doesn't silently change behavior for existing consumers.
+ * Setting both to false is recommended for anything backed by a real
+ * datastore: without it, every anonymous request that merely *reads*
+ * req.session (a page checking whether a visitor is logged in, say) forces
+ * a full session write — cheap against the default in-memory store (a
+ * struct reference into a ConcurrentHashMap), but a real write against a
+ * JDBCStore-backed cache, Redis, etc., every single time, including for
+ * traffic (bots, scanners, health checks) that never had a session to
+ * begin with.
+ *
+ * A session that *is* modified during the request — new or pre-existing —
+ * is always saved regardless of either option; those only ever skip a
+ * write that would otherwise be a no-op.
  */
 class {
 
@@ -32,16 +65,24 @@ class {
 		var maxAge = options.maxAge ?: 86400
 		var cookiePath = options.path ?: "/"
 		var store = options.store ?: this
+		var resave = options.resave ?: true
+		var saveUninitialized = options.saveUninitialized ?: true
 
 		return function( req, res, next ) {
 			var sessionId = req.cookies[ cookieName ] ?: ""
 			var data = len( sessionId ) ? store.get( sessionId ) : javacast( "null", "" )
+			var isNewSession = isNull( data )
 
-			if ( isNull( data ) ) {
+			if ( isNewSession ) {
 				sessionId = _generateId()
 				data = {}
 			}
 
+			// Snapshot for the resave/saveUninitialized "was it actually
+			// touched" check below — serialize-and-compare rather than a
+			// dirty flag, since req.session is a plain struct handlers mutate
+			// directly (req.session.views = ...), with no setter to hook.
+			var originalSnapshot = JSONSerialize( data )
 			var wasDestroyed = false
 
 			req.session = data
@@ -52,12 +93,31 @@ class {
 				res.cookie( cookieName, "", { path: cookiePath, maxAge: 0 } )
 			}
 
-			res.cookie( cookieName, sessionId, {
-				path: cookiePath,
-				maxAge: maxAge,
-				httpOnly: options.httpOnly ?: true,
-				secure: options.secure ?: false,
-				sameSite: options.sameSite ?: "Lax"
+			var hasChanged = function() {
+				return JSONSerialize( req.session ) != originalSnapshot
+			}
+
+			// Registered instead of called directly here, since whether to
+			// send a cookie at all can depend on what next() does to
+			// req.session below — by the time next() *returns*, a terminal
+			// handler further down the chain has normally already flushed
+			// the response headers, too late to add one. res.onBeforeSend()
+			// fires at the one point guaranteed to run after next() but
+			// before that flush.
+			res.onBeforeSend( function() {
+				if ( wasDestroyed ) {
+					return
+				}
+				if ( isNewSession && saveUninitialized == false && !hasChanged() ) {
+					return
+				}
+				res.cookie( cookieName, sessionId, {
+					path: cookiePath,
+					maxAge: maxAge,
+					httpOnly: options.httpOnly ?: true,
+					secure: options.secure ?: false,
+					sameSite: options.sameSite ?: "Lax"
+				} )
 			} )
 
 			// Persisted *after* the rest of the chain runs, not before — next()
@@ -91,7 +151,13 @@ class {
 				next()
 			} finally {
 				if ( !wasDestroyed ) {
-					store.set( sessionId, req.session, maxAge )
+					var changed = hasChanged()
+					var shouldSave = isNewSession
+						? ( changed || saveUninitialized != false )
+						: ( changed || resave != false )
+					if ( shouldSave ) {
+						store.set( sessionId, req.session, maxAge )
+					}
 				}
 			}
 		}

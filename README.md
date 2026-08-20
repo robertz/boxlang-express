@@ -309,7 +309,14 @@ mangled at the first colon.
 `res.download(path, filename)`, `res.end(data)`, `res.render(view, data)`,
 `res.dump(data)` (sends BoxLang's rich, collapsible `dump()` HTML view of a
 variable as the response — a quick debugging escape hatch; see the note
-below).
+below), `res.getStatusCode()`/`res.getBytesWritten()` (the eventual status
+code and body byte count, for request-logging middleware that can't
+otherwise observe a request's outcome), `res.onBeforeSend(callback)`
+(registers a callback that runs once, synchronously, the instant before
+headers are actually flushed — the one point guaranteed to run after every
+downstream middleware/handler but still early enough to add a header; the
+session middleware's cookie-vs-`saveUninitialized` decision is what this
+was built for).
 
 Calling a second terminal method (`send`/`json`/`redirect`/`end`/`sendBytes`/
 `sendFile`/`download`/`render`/`dump`) on the same response throws — mirrors
@@ -590,7 +597,9 @@ Cookie-based sessions, mirroring [express-session](https://github.com/expressjs/
 default (in-memory) behavior. The cookie carries only an opaque, unguessable
 session ID — the actual data lives server-side, keyed by that ID — and is
 rolling: every request through this middleware resets both the cookie's and
-the stored data's expiry to `maxAge` from now.
+the stored data's expiry to `maxAge` from now (the store write can be
+skipped for an unmodified session — see `resave`/`saveUninitialized` below —
+in which case only the cookie's expiry actually resets).
 
 ```js
 app.use( boxExpressSession() )                                // connect.sid cookie, 24h maxAge
@@ -619,6 +628,47 @@ The default store is in-memory on the `Session` instance (so it doesn't
 survive a restart and isn't shared across processes) — swap in something
 durable by passing `{ store: myStore }`, an object exposing
 `get(id)` / `set(id, data, maxAge)` / `destroy(id)`.
+
+##### Skipping unnecessary store writes (`resave`, `saveUninitialized`)
+
+By default, every request through this middleware writes to the store —
+even one that never reads or touches `req.session` at all. That's free
+against the default in-memory store (a struct reference into a
+`ConcurrentHashMap`), but a real cost against anything out-of-process: a
+`boxExpressCacheStore()`-backed `JDBCStore`, Redis, etc. Two options,
+mirroring [express-session](https://github.com/expressjs/session)'s own
+options of the same name, turn that off:
+
+```js
+app.use( boxExpressSession( {
+	store: myStore,
+	resave: false,             // don't re-save an existing session that wasn't modified
+	saveUninitialized: false   // don't save (or cookie) a new session that wasn't modified
+} ) )
+```
+
+- **`saveUninitialized: false`** — a session created fresh for a request
+  (no existing cookie) that's never modified during it isn't saved, and
+  isn't given a `Set-Cookie` either — there's nothing to remember, and no
+  reason to hand that visitor an identifier. This is the one that matters
+  most in practice: an anonymous request that only ever *reads*
+  `req.session` (a page checking whether the visitor happens to be logged
+  in, say) shouldn't create a session at all, let alone write one to a
+  database — including, notably, the flood of unrelated 404s a
+  vulnerability scanner throws at a public site in the same second, each
+  of which would otherwise mint and persist its own throwaway session.
+- **`resave: false`** — an *existing* session that was loaded but never
+  modified isn't re-written to the store. The cookie is still refreshed
+  either way (kept simple, matching this middleware's existing rolling
+  behavior) — only the store write is skipped.
+- A session that *is* modified — new or pre-existing — is always saved
+  regardless of either option; these only ever skip a write that would
+  otherwise be a no-op.
+
+Both default to `true` (the historical always-save behavior), so adding
+this middleware — or upgrading — doesn't silently change behavior for
+existing consumers. Recommended `false` for anything backed by a real
+datastore.
 
 ##### Durable sessions (`boxExpressCacheStore()` / `CacheStore`)
 
@@ -912,6 +962,31 @@ Two more BoxLang-specific things that shaped how these are written:
   rather than `../fixtures/...`.
 
 ## Changelog
+
+**0.1.19**
+- Added `resave`/`saveUninitialized` options to `boxExpressSession()`,
+  mirroring [express-session](https://github.com/expressjs/session)'s own
+  options of the same name. By default this middleware writes to the
+  store on every request, even one that never reads or touches
+  `req.session` — free against the default in-memory store, a real cost
+  against anything out-of-process. `saveUninitialized: false` skips both
+  the store write and the `Set-Cookie` for a new session that was never
+  modified; `resave: false` skips the store write (cookie still refreshed)
+  for an existing session that wasn't modified. A session that *is*
+  modified is always saved regardless of either option. Both default to
+  `true` (the historical behavior), so this doesn't change anything for
+  existing consumers unless they opt in. See
+  [Session.bx](models/middleware/Session.bx).
+- Added `Response.onBeforeSend(callback)` — registers a callback that runs
+  once, synchronously, the instant before headers are actually flushed.
+  Needed to implement `saveUninitialized` correctly: whether to send a
+  session cookie can depend on what `next()` did to `req.session`, but by
+  the time `next()` *returns* to a middleware's own frame, a terminal
+  handler further down the chain has normally already called `_end()` and
+  flushed the headers — too late to add one there. The same technique
+  `express-session` uses via monkey-patching `res.end`, done explicitly
+  here since BoxLang can't intercept it that way. See
+  [Response.bx](models/Response.bx).
 
 **0.1.18**
 - Added `Response.getStatusCode()`/`getBytesWritten()` accessors — expose
