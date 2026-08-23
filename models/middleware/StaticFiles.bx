@@ -28,6 +28,27 @@ class {
 			}
 
 			var relativePath = req.path.left( 1 ) == "/" ? req.path.mid( 2, req.path.len() - 1 ) : req.path
+
+			// Mirror express.static(): a request for a directory *without* the
+			// trailing slash (e.g. "/games/void-harvest") gets redirected to the
+			// slash-suffixed URL rather than 404ing — the slash version is the
+			// canonical one, since relative asset links inside the served HTML
+			// resolve against it correctly and wouldn't against the bare path.
+			if ( len( relativePath ) && relativePath.right( 1 ) != "/" ) {
+				var dirCandidate = rootPath.resolve( relativePath ).normalize()
+				if ( dirCandidate.startsWith( rootPath ) && dirCandidate.toFile().isDirectory() ) {
+					// req.path may have already had a mount prefix (e.g. "/public")
+					// stripped by Router.bx by the time this middleware runs — the
+					// redirect target needs the *original*, still-prefixed URL, which
+					// only req.originalUrl (captured once at request construction,
+					// never mutated by mount-prefix stripping) still has.
+					var qIndex = req.originalUrl.find( "?" )
+					var pathPart = qIndex ? req.originalUrl.left( qIndex - 1 ) : req.originalUrl
+					var queryPart = qIndex ? req.originalUrl.mid( qIndex, req.originalUrl.len() - qIndex + 1 ) : ""
+					return res.redirect( pathPart & "/" & queryPart, 301 )
+				}
+			}
+
 			if ( !len( relativePath ) || relativePath.right( 1 ) == "/" ) {
 				relativePath &= indexFile
 			}
