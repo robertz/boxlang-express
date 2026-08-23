@@ -188,6 +188,17 @@ class {
 			if ( layer.method == "USE" ) {
 				var savedPath = req.path
 				var remainder = "/" & reqSegments.slice( matchResult.consumed + 1 ).toList( "/" )
+				// _splitPath()/listToArray() drops empty segments, so a trailing
+				// slash on the incoming path leaves no trace in reqSegments —
+				// reattach it here from the pre-mutation path string, the only
+				// place that still knows it was there. Without this, every
+				// app.use()-mounted layer (nearly everything, since even a
+				// root-mounted "/" layer takes this branch) silently strips a
+				// trailing slash from req.path, which broke static-file
+				// directory-index resolution ("/foo/" -> "/foo/index.html").
+				if ( savedPath.right( 1 ) == "/" && remainder.right( 1 ) != "/" ) {
+					remainder &= "/"
+				}
 				req.path = remainder
 				var scopedNext = function( innerErr ) {
 					req.path = savedPath

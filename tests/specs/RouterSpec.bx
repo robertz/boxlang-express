@@ -265,6 +265,30 @@ class extends="testbox.system.BaseSpec" {
 				expect( capturedItemId ).toBe( "9" )
 			} )
 
+			it( "preserves a trailing slash through a root-mounted USE layer", function() {
+				var router = new "../../models/Router"()
+				var seenPath = ""
+				router.use( ( req, res, next ) => { seenPath = req.path; next() } )
+				router.dispatch( _fakeReq( "GET", "/games/void-harvest/" ), _fakeRes() )
+				expect( seenPath ).toBe( "/games/void-harvest/" )
+			} )
+
+			it( "preserves a trailing slash through a path-scoped USE layer", function() {
+				var router = new "../../models/Router"()
+				var seenPath = ""
+				router.use( "/api", ( req, res, next ) => { seenPath = req.path; next() } )
+				router.dispatch( _fakeReq( "GET", "/api/items/" ), _fakeRes() )
+				expect( seenPath ).toBe( "/items/" )
+			} )
+
+			it( "does not add a spurious trailing slash when the original path had none", function() {
+				var router = new "../../models/Router"()
+				var seenPath = ""
+				router.use( "/api", ( req, res, next ) => { seenPath = req.path; next() } )
+				router.dispatch( _fakeReq( "GET", "/api/items" ), _fakeRes() )
+				expect( seenPath ).toBe( "/items" )
+			} )
+
 			it( "routes a thrown error to 4-arg error-handling middleware", function() {
 				var router = new "../../models/Router"()
 				var caughtMessage = ""
