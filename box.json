@@ -40,6 +40,5 @@
         "examples/**",
         "run-tests.bxs",
         "testbox/**"
-    ],
-    "location":"robertz/boxlang-express#v0.1.19"
+    ]
 }
