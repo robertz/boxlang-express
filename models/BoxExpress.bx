@@ -11,7 +11,7 @@ class {
 		this.settings = {}
 		this.locals = {}
 		variables.router = new Router( this.settings )
-		variables.httpServer = javacast( "null", "" )
+		variables.serverAdapter = new adapters.JdkHttpServerAdapter()
 		variables.running = false
 		variables.reloadWatcher = javacast( "null", "" )
 		variables.shutdownHook = javacast( "null", "" )
@@ -113,14 +113,13 @@ class {
 	 * backlog here redundant.
 	 */
 	function listen( port, callback, options = {} ) {
-		var addr = createObject( "java", "java.net.InetSocketAddress" ).init( port )
 		var backlog = options.backlog ?: 1024
+		var bridge = new HttpBridge( variables.router, this.settings, this.locals )
 
 		try {
-			variables.httpServer = createObject( "java", "com.sun.net.httpserver.HttpServer" ).create( addr, backlog )
+			variables.serverAdapter.start( port, backlog, bridge )
 		} catch ( any e ) {
-			var cause = e.getCause()
-			if ( !isNull( cause ) && cause.getClass().getName() == "java.net.BindException" ) {
+			if ( e.type == "BoxExpress.PortInUse" ) {
 				println( variables.color.red( "[BoxExpress] Port #port# is already in use — exiting." ) )
 				createObject( "java", "java.lang.System" ).exit( 1 )
 				return this
@@ -128,12 +127,6 @@ class {
 			rethrow;
 		}
 
-		var bridge = new HttpBridge( variables.router, this.settings, this.locals )
-		var proxy = createDynamicProxy( bridge, [ "com.sun.net.httpserver.HttpHandler" ] )
-
-		variables.httpServer.createContext( "/", proxy )
-		variables.httpServer.setExecutor( createObject( "java", "java.util.concurrent.Executors" ).newVirtualThreadPerTaskExecutor() )
-		variables.httpServer.start()
 		variables.running = true
 		_registerShutdownHook()
 
@@ -175,10 +168,7 @@ class {
 			variables.shutdownHook = javacast( "null", "" )
 		}
 
-		if ( !isNull( variables.httpServer ) ) {
-			variables.httpServer.stop( 0 )
-			variables.httpServer = javacast( "null", "" )
-		}
+		variables.serverAdapter.stop()
 
 		return this
 	}
@@ -187,7 +177,7 @@ class {
 	 * Ensures close() runs on Ctrl-C / SIGTERM / normal JVM exit, not just on
 	 * an explicit app.close() call. Without this, listen()'s blocking loop
 	 * and the reload watcher's daemon thread just get torn down by the JVM
-	 * without ever calling httpServer.stop() or reloadWatcher.stop() — the
+	 * without ever calling serverAdapter.stop() or reloadWatcher.stop() — the
 	 * process dies, but nothing runs the cleanup path, which is what let the
 	 * dev-mode watcher outlive a Ctrl-C'd server.
 	 */

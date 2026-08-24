@@ -1,0 +1,54 @@
+/**
+ * HttpServerAdapter backed by com.sun.net.httpserver.HttpServer — the
+ * default adapter, and (for now) the only one BoxExpress ships. Wraps
+ * exactly what BoxExpress.bx did directly before this extraction; this
+ * step changes nothing about behavior, just where the JDK-specific calls
+ * live.
+ *
+ * Adapter contract (duck-typed — BoxLang has no formal interface type):
+ *   start( port, backlog, bridge ) — binds and starts the server, routing
+ *     every request to bridge (an object usable as this engine's own
+ *     request-handler shape — see below). Throws type="BoxExpress.PortInUse"
+ *     specifically when the port is already bound, so callers can handle
+ *     that case without knowing which engine is underneath; any other
+ *     startup failure rethrows as-is.
+ *   stop() — stops the server. Safe to call even if never started.
+ *
+ * bridge still has to be usable as a raw com.sun.net.httpserver.HttpHandler
+ * today — HttpBridge.bx (and the Request/Response objects it constructs)
+ * aren't engine-neutral yet, only the server lifecycle around them is.
+ * That's a separate, larger step (see the Undertow-adapter phased plan,
+ * Phase 2 step 2): this class is deliberately just the mechanical
+ * extraction of what BoxExpress.bx's listen()/close() did directly.
+ */
+class {
+
+	function start( port, backlog, bridge ) {
+		var addr = createObject( "java", "java.net.InetSocketAddress" ).init( port )
+
+		try {
+			variables.httpServer = createObject( "java", "com.sun.net.httpserver.HttpServer" ).create( addr, backlog )
+		} catch ( any e ) {
+			var cause = e.getCause()
+			if ( !isNull( cause ) && cause.getClass().getName() == "java.net.BindException" ) {
+				throw( message = "Port #port# is already in use", type = "BoxExpress.PortInUse" )
+			}
+			rethrow;
+		}
+
+		var proxy = createDynamicProxy( bridge, [ "com.sun.net.httpserver.HttpHandler" ] )
+		variables.httpServer.createContext( "/", proxy )
+		variables.httpServer.setExecutor( createObject( "java", "java.util.concurrent.Executors" ).newVirtualThreadPerTaskExecutor() )
+		variables.httpServer.start()
+		return this
+	}
+
+	function stop() {
+		if ( !isNull( variables.httpServer ) ) {
+			variables.httpServer.stop( 0 )
+			variables.httpServer = javacast( "null", "" )
+		}
+		return this
+	}
+
+}
