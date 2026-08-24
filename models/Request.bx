@@ -38,6 +38,18 @@ class {
 		return variables.exchangeAdapter.getRawExchange()
 	}
 
+	/**
+	 * The raw request body as a java.io.InputStream, engine-neutral —
+	 * what body-reading middleware (BodyParsers.bx, Multipart.bx) should
+	 * use instead of rawExchange().getRequestBody()/getInputStream(),
+	 * since that method exists under a different name (or not at all)
+	 * per engine. rawExchange() itself is unchanged, for anyone who needs
+	 * genuinely engine-specific access beyond just the body stream.
+	 */
+	function bodyStream() {
+		return variables.exchangeAdapter.getRequestBodyStream()
+	}
+
 	private function _parseQueryString( rawQuery ) {
 		var result = {}
 		if ( isNull( rawQuery ) || !len( rawQuery ) ) {

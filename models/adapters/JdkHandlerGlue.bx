@@ -1,0 +1,22 @@
+/**
+ * Adapts an engine-neutral HttpBridge to the JDK's own
+ * com.sun.net.httpserver.HttpHandler interface (createDynamicProxy needs a
+ * class instance whose method matches the target interface, same reason
+ * ThreadRunnable.bx exists for java.lang.Runnable elsewhere in this repo).
+ * Wraps each incoming raw exchange in a JdkExchangeAdapter before handing
+ * it to the bridge — this is the one place in the JDK adapter that knows
+ * both "the JDK's handler shape" and "how to build this engine's exchange
+ * adapter", so HttpBridge itself never has to know either.
+ */
+class {
+
+	function init( bridge ) {
+		variables.bridge = bridge
+		return this
+	}
+
+	function handle( exchange ) {
+		variables.bridge.handle( new JdkExchangeAdapter( exchange ) )
+	}
+
+}

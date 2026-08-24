@@ -1,0 +1,56 @@
+/**
+ * HttpServerAdapter backed by io.undertow.Undertow — an alternative to the
+ * default JdkHttpServerAdapter.bx (see that class for the full adapter
+ * contract; this implements the same start()/stop() shape).
+ *
+ * Not wired into BoxExpress.bx's default startup path yet — that's
+ * Phase 4 of the Undertow-adapter plan (a config option to select the
+ * engine at boot). This class exists and is verified for parity now;
+ * choosing it is a separate step.
+ */
+class {
+
+	function start( port, backlog, bridge ) {
+		var glue = new UndertowHandlerGlue( bridge )
+		var proxy = createDynamicProxy( glue, [ "io.undertow.server.HttpHandler" ] )
+
+		// Undertow dispatches handlers on its own I/O thread by default,
+		// where blocking I/O throws IllegalStateException — confirmed
+		// directly, reading the request body via getInputStream() (needed
+		// for BodyParsers.bx/Multipart.bx) failed exactly this way without
+		// this wrapper. BlockingHandler dispatches to a worker thread
+		// first, which is what every other adapter method here already
+		// assumes it can do (synchronous, in-memory body reads, direct
+		// writes) — this project's whole handler model is blocking by
+		// design, not async, so this isn't a workaround, it's the correct
+		// Undertow idiom for this shape of app.
+		var blockingHandler = createObject( "java", "io.undertow.server.handlers.BlockingHandler" ).init( proxy )
+
+		var builder = createObject( "java", "io.undertow.Undertow" ).builder()
+		builder.addHttpListener( port, "0.0.0.0" )
+		builder.setHandler( blockingHandler )
+		builder.setSocketOption( createObject( "java", "org.xnio.Options" ).BACKLOG, javacast( "int", backlog ) )
+
+		try {
+			variables.undertowServer = builder.build()
+			variables.undertowServer.start()
+		} catch ( any e ) {
+			var cause = e.getCause()
+			if ( !isNull( cause ) && cause.getClass().getName() == "java.net.BindException" ) {
+				throw( message = "Port #port# is already in use", type = "BoxExpress.PortInUse" )
+			}
+			rethrow;
+		}
+
+		return this
+	}
+
+	function stop() {
+		if ( !isNull( variables.undertowServer ) ) {
+			variables.undertowServer.stop()
+			variables.undertowServer = javacast( "null", "" )
+		}
+		return this
+	}
+
+}

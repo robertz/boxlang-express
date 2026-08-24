@@ -61,6 +61,16 @@ class {
 		}
 	}
 
+	/**
+	 * The raw request body as a java.io.InputStream — what BodyParsers.bx/
+	 * Multipart.bx actually need, engine-neutral (unlike rawExchange(),
+	 * which stays JDK/Undertow-specific on purpose). The JDK's own exchange
+	 * already returns a plain, immediately-readable InputStream here.
+	 */
+	function getRequestBodyStream() {
+		return variables.exchange.getRequestBody()
+	}
+
 	function setHeader( name, value ) {
 		variables.exchange.getResponseHeaders().set( name, value )
 	}

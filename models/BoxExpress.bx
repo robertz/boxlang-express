@@ -7,11 +7,20 @@
  */
 class {
 
-	function init() {
+	/**
+	 * serverAdapter defaults to the JDK-backed adapter — pass a different
+	 * one (e.g. new bxModules.boxexpress.models.adapters.UndertowHttpServerAdapter())
+	 * to run on a different engine. This is a minimal injection seam for
+	 * Phase 3's own parity testing against the Undertow adapter, not the
+	 * config-driven "server.engine" selection Phase 4 of the Undertow-
+	 * adapter plan describes — that's a separate, not-yet-built step on
+	 * top of this.
+	 */
+	function init( serverAdapter = javacast( "null", "" ) ) {
 		this.settings = {}
 		this.locals = {}
 		variables.router = new Router( this.settings )
-		variables.serverAdapter = new adapters.JdkHttpServerAdapter()
+		variables.serverAdapter = isNull( serverAdapter ) ? new adapters.JdkHttpServerAdapter() : serverAdapter
 		variables.running = false
 		variables.reloadWatcher = javacast( "null", "" )
 		variables.shutdownHook = javacast( "null", "" )

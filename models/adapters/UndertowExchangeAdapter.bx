@@ -1,0 +1,99 @@
+/**
+ * Wraps a single io.undertow.server.HttpServerExchange, implementing the
+ * same exchange-adapter contract as JdkExchangeAdapter.bx (see that file's
+ * docblock for the full contract and the getRawExchange() exception it
+ * documents — identical here, just backed by Undertow's own API instead
+ * of the JDK's).
+ *
+ * Every method name/signature below was verified directly against a real
+ * running Undertow server before writing this (not assumed from docs):
+ * getRequestPath() returns the decoded path with no query string, same
+ * shape as the JDK adapter's getPath(); getQueryString() returns "" (not
+ * null) when absent; HeaderMap's put()/add()/getFirst() map onto
+ * setHeader()/addHeader()/getHeader() the same way the JDK's Headers
+ * class does; getResponseSender().send(ByteBuffer) both writes the body
+ * and finalizes the exchange in one call, confirmed against a real
+ * response over the wire.
+ */
+class {
+
+	function init( exchange ) {
+		variables.exchange = exchange
+		return this
+	}
+
+	function getRawExchange() {
+		return variables.exchange
+	}
+
+	function getMethod() {
+		return variables.exchange.getRequestMethod().toString()
+	}
+
+	function getPath() {
+		return variables.exchange.getRequestPath()
+	}
+
+	function getQueryString() {
+		return variables.exchange.getQueryString()
+	}
+
+	function getRequestHeaders() {
+		var headerMap = variables.exchange.getRequestHeaders()
+		var headerStruct = {}
+		for ( var headerName in headerMap.getHeaderNames() ) {
+			headerStruct[ headerName.toString() ] = headerMap.getFirst( headerName )
+		}
+		return headerStruct
+	}
+
+	function getRemoteAddress() {
+		try {
+			return variables.exchange.getSourceAddress().getAddress().getHostAddress()
+		} catch ( any e ) {
+			return ""
+		}
+	}
+
+	/**
+	 * The raw request body as a java.io.InputStream — same contract as
+	 * JdkExchangeAdapter's getRequestBodyStream(). Undertow's exchange
+	 * needs startBlocking() called first (confirmed directly — without it,
+	 * getInputStream() throws "Cannot get stream as startBlocking has not
+	 * been invoked"); safe to call here since UndertowHttpServerAdapter
+	 * wraps every request in Undertow's own BlockingHandler, which already
+	 * moved execution off the I/O thread before this ever runs.
+	 */
+	function getRequestBodyStream() {
+		variables.exchange.startBlocking()
+		return variables.exchange.getInputStream()
+	}
+
+	function setHeader( name, value ) {
+		variables.exchange.getResponseHeaders().put( _httpString( name ), value )
+	}
+
+	function addHeader( name, value ) {
+		variables.exchange.getResponseHeaders().add( _httpString( name ), value )
+	}
+
+	function getHeader( name ) {
+		return variables.exchange.getResponseHeaders().getFirst( _httpString( name ) ) ?: javacast( "null", "" )
+	}
+
+	function sendBody( statusCode, bodyBytes ) {
+		variables.exchange.setStatusCode( statusCode )
+		setHeader( "Content-Length", toString( bodyBytes.len() ) )
+		variables.exchange.getResponseSender().send( createObject( "java", "java.nio.ByteBuffer" ).wrap( bodyBytes ) )
+	}
+
+	function sendHeadersOnly( statusCode ) {
+		variables.exchange.setStatusCode( statusCode )
+		variables.exchange.endExchange()
+	}
+
+	private function _httpString( name ) {
+		return createObject( "java", "io.undertow.util.HttpString" ).init( name )
+	}
+
+}

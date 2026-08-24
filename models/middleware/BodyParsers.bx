@@ -74,7 +74,7 @@ class {
 	 * buffering an unbounded stream. Returns null if the body exceeds limit.
 	 */
 	private function _readRawBody( req, limit ) {
-		var inStream = req.rawExchange().getRequestBody()
+		var inStream = req.bodyStream()
 		var bytes = inStream.readNBytes( limit + 1 )
 		if ( bytes.len() > limit ) {
 			return javacast( "null", "" )
