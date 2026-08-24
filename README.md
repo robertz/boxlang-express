@@ -169,6 +169,16 @@ required, since BoxExpress's `HttpServer` never terminates TLS itself) will
 usually queue connections before this limit is ever reached — but it's
 there for a direct-exposure deployment or a deliberately higher ceiling.
 
+**Experimental:** `app.set("server.engine", "undertow")` runs on
+[Undertow](https://undertow.io/) instead of the default JDK-bundled
+`com.sun.net.httpserver.HttpServer` — an alternative server backend,
+verified at full behavioral parity (the entire test suite passes running
+for real against either engine), but not yet load-tested against the
+default, and not a stable guarantee — `server.engine` is `"jdk"` (the
+default when unset) or `"undertow"`; anything else throws
+`BoxExpress.UnknownServerEngine` immediately rather than silently falling
+back. `"jdk"` remains the default and the one actually recommended for now.
+
 Every request gets a line on stdout as soon as it's received —
 `[2026-08-10 10:45:41] GET /users/42 127.0.0.1` — there's no setting to turn
 this off yet.

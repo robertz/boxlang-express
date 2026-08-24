@@ -8,19 +8,28 @@
 class {
 
 	/**
-	 * serverAdapter defaults to the JDK-backed adapter — pass a different
-	 * one (e.g. new bxModules.boxexpress.models.adapters.UndertowHttpServerAdapter())
-	 * to run on a different engine. This is a minimal injection seam for
-	 * Phase 3's own parity testing against the Undertow adapter, not the
-	 * config-driven "server.engine" selection Phase 4 of the Undertow-
-	 * adapter plan describes — that's a separate, not-yet-built step on
-	 * top of this.
+	 * serverAdapter, if passed, is used as-is — an explicit override that
+	 * wins over app.set("server.engine", ...) below, e.g.
+	 *   new BoxExpress( new bxModules.boxexpress.models.adapters.UndertowHttpServerAdapter() )
+	 * Left unset (the normal case), the adapter is instead chosen from
+	 * app.set("server.engine", "jdk" | "undertow") at listen() time — not
+	 * here in init(), since settings are only populated by app.set() calls
+	 * made *after* construction, same reason every other setting in this
+	 * class (views, trust proxy, reloadOnChange, ...) is read lazily at the
+	 * point it matters rather than captured at construction. Defaults to
+	 * "jdk" if never set.
 	 */
 	function init( serverAdapter = javacast( "null", "" ) ) {
 		this.settings = {}
 		this.locals = {}
 		variables.router = new Router( this.settings )
-		variables.serverAdapter = isNull( serverAdapter ) ? new adapters.JdkHttpServerAdapter() : serverAdapter
+		// isNull(x) ? ... : x, not a plain "variables.serverAdapter = serverAdapter"
+		// — confirmed directly that a parameter defaulted to javacast("null","")
+		// throws "key not located in any scope" on a bare read when the caller
+		// didn't pass it, even though isNull() itself can check it safely. The
+		// ternary's false branch (the bare read) only evaluates when an
+		// argument really was passed, sidestepping the bug entirely.
+		variables.serverAdapter = isNull( serverAdapter ) ? javacast( "null", "" ) : serverAdapter
 		variables.running = false
 		variables.reloadWatcher = javacast( "null", "" )
 		variables.shutdownHook = javacast( "null", "" )
@@ -125,6 +134,10 @@ class {
 		var backlog = options.backlog ?: 1024
 		var bridge = new HttpBridge( variables.router, this.settings, this.locals )
 
+		if ( isNull( variables.serverAdapter ) ) {
+			variables.serverAdapter = _resolveServerAdapter()
+		}
+
 		try {
 			variables.serverAdapter.start( port, backlog, bridge )
 		} catch ( any e ) {
@@ -180,6 +193,29 @@ class {
 		variables.serverAdapter.stop()
 
 		return this
+	}
+
+	/**
+	 * app.set("server.engine", "jdk" | "undertow") picks the HttpServerAdapter
+	 * at listen() time — "jdk" (also the default when never set) for
+	 * JdkHttpServerAdapter, "undertow" for UndertowHttpServerAdapter. Throws
+	 * immediately on anything else rather than silently falling back to the
+	 * default — a typo'd engine name should be loud, not a surprise about
+	 * which server actually ended up running.
+	 */
+	private function _resolveServerAdapter() {
+		var engine = this.settings[ "server.engine" ] ?: "jdk"
+		switch ( engine ) {
+			case "jdk":
+				return new adapters.JdkHttpServerAdapter()
+			case "undertow":
+				return new adapters.UndertowHttpServerAdapter()
+			default:
+				throw(
+					message = "Unknown server.engine ""#engine#"" — expected ""jdk"" or ""undertow""",
+					type = "BoxExpress.UnknownServerEngine"
+				)
+		}
 	}
 
 	/**
