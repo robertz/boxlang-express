@@ -1,12 +1,13 @@
 /**
- * Wraps a com.sun.net.httpserver.HttpExchange as an Express-style response object.
- * All terminal methods (send/json/sendStatus/redirect) funnel through _end() which
- * writes headers + body exactly once and closes the exchange.
+ * Express-style response object, backed by an exchange adapter (see
+ * models/adapters/) rather than a raw com.sun.net.httpserver.HttpExchange
+ * directly. All terminal methods (send/json/sendStatus/redirect) funnel
+ * through _end() which writes headers + body exactly once via the adapter.
  */
 class {
 
-	function init( exchange, settings = {}, appLocals = {} ) {
-		variables.exchange = exchange
+	function init( exchangeAdapter, settings = {}, appLocals = {} ) {
+		variables.exchangeAdapter = exchangeAdapter
 		variables.sent = false
 		variables.statusCode = 200
 		variables.bytesWritten = 0
@@ -74,7 +75,7 @@ class {
 	}
 
 	function set( name, value ) {
-		variables.exchange.getResponseHeaders().set( name, value )
+		variables.exchangeAdapter.setHeader( name, value )
 		return this
 	}
 
@@ -101,7 +102,7 @@ class {
 		if ( !isNull( options.sameSite ) ) {
 			parts.append( "SameSite=" & options.sameSite )
 		}
-		variables.exchange.getResponseHeaders().add( "Set-Cookie", parts.toList( "; " ) )
+		variables.exchangeAdapter.addHeader( "Set-Cookie", parts.toList( "; " ) )
 		return this
 	}
 
@@ -112,7 +113,7 @@ class {
 
 		var body = isNull( data ) ? "" : toString( data )
 
-		if ( isNull( variables.exchange.getResponseHeaders().getFirst( "Content-Type" ) ) ) {
+		if ( isNull( variables.exchangeAdapter.getHeader( "Content-Type" ) ) ) {
 			type( "text/html; charset=utf-8" )
 		}
 
@@ -193,8 +194,8 @@ class {
 			set( "Cache-Control", "public, max-age=" & options.maxAge )
 		}
 
-		var requestHeaders = variables.exchange.getRequestHeaders()
-		if ( conditional.isNotModified( requestHeaders.getFirst( "If-None-Match" ) ?: "", requestHeaders.getFirst( "If-Modified-Since" ) ?: "", etag, fileObj ) ) {
+		var requestHeaders = variables.exchangeAdapter.getRequestHeaders()
+		if ( conditional.isNotModified( requestHeaders[ "If-None-Match" ] ?: "", requestHeaders[ "If-Modified-Since" ] ?: "", etag, fileObj ) ) {
 			return status( 304 ).end()
 		}
 
@@ -226,7 +227,7 @@ class {
 	 */
 	function sendFileRange( fileObj, contentType ) {
 		var totalSize = fileObj.length()
-		var rangeHeader = variables.exchange.getRequestHeaders().getFirst( "Range" ) ?: ""
+		var rangeHeader = variables.exchangeAdapter.getRequestHeaders()[ "Range" ] ?: ""
 		var range = new RangeParser().parse( rangeHeader, totalSize )
 
 		type( contentType )
@@ -396,25 +397,21 @@ class {
 		// above this (res.json(), res.sendFile(), etc.) still built one the
 		// normal way — HEAD reuses the same GET route/handler and just has its
 		// body thrown away here. Content-Length is set explicitly first so a
-		// HEAD response still reports the size a GET would have sent; passing
-		// -1 to sendResponseHeaders() then tells the exchange not to expect
-		// (or wait for) an actual body write.
-		var isHead = variables.exchange.getRequestMethod().equalsIgnoreCase( "HEAD" )
+		// HEAD response still reports the size a GET would have sent; the
+		// adapter's sendHeadersOnly() then tells the underlying engine not to
+		// expect (or wait for) an actual body write.
+		var isHead = variables.exchangeAdapter.getMethod() == "HEAD"
 		variables.bytesWritten = bodyBytes.len()
 
 		if ( bodyBytes.len() == 0 ) {
-			variables.exchange.sendResponseHeaders( variables.statusCode, -1 )
+			variables.exchangeAdapter.sendHeadersOnly( variables.statusCode )
 		} else if ( isHead ) {
 			set( "Content-Length", toString( bodyBytes.len() ) )
-			variables.exchange.sendResponseHeaders( variables.statusCode, -1 )
+			variables.exchangeAdapter.sendHeadersOnly( variables.statusCode )
 		} else {
-			variables.exchange.sendResponseHeaders( variables.statusCode, bodyBytes.len() )
-			var outStream = variables.exchange.getResponseBody()
-			outStream.write( bodyBytes )
-			outStream.close()
+			variables.exchangeAdapter.sendBody( variables.statusCode, bodyBytes )
 		}
 
-		variables.exchange.close()
 		return this
 	}
 

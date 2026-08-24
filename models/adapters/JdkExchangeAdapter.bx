@@ -1,0 +1,98 @@
+/**
+ * Wraps a single com.sun.net.httpserver.HttpExchange, exposing the request/
+ * response I/O primitives Request.bx/Response.bx actually need in
+ * engine-neutral terms, instead of those two classes calling JDK-specific
+ * methods directly throughout their bodies. One instance per request,
+ * constructed once in HttpBridge.bx and handed to both Request and Response.
+ *
+ * getRawExchange() is a deliberate, narrow exception to "engine-neutral":
+ * req.rawExchange() (a public, documented escape hatch) and two built-in
+ * middleware (BodyParsers.bx, Multipart.bx) still reach through this to the
+ * raw JDK exchange for streaming the request body. Making that engine-
+ * neutral too is a real design question of its own — deferred rather than
+ * forced, since there's no second engine's actual shape to design against
+ * yet. Recorded here rather than silently narrowed: everything else on
+ * Request/Response no longer touches com.sun.net.httpserver directly, but
+ * this one seam still does, on purpose, for now.
+ */
+class {
+
+	function init( exchange ) {
+		variables.exchange = exchange
+		return this
+	}
+
+	function getRawExchange() {
+		return variables.exchange
+	}
+
+	function getMethod() {
+		return variables.exchange.getRequestMethod().ucase()
+	}
+
+	function getPath() {
+		return variables.exchange.getRequestURI().getPath()
+	}
+
+	function getQueryString() {
+		return variables.exchange.getRequestURI().getQuery() ?: ""
+	}
+
+	/**
+	 * Converts the JDK's own com.sun.net.httpserver.Headers into a plain
+	 * BoxLang struct — the conversion itself is engine-specific (a
+	 * different engine's own header type needs its own iteration logic),
+	 * so it belongs here rather than in Request.bx/Response.bx.
+	 */
+	function getRequestHeaders() {
+		var javaHeaders = variables.exchange.getRequestHeaders()
+		var headerStruct = {}
+		for ( var key in javaHeaders.keySet() ) {
+			headerStruct[ key ] = javaHeaders.getFirst( key )
+		}
+		return headerStruct
+	}
+
+	function getRemoteAddress() {
+		try {
+			return variables.exchange.getRemoteAddress().getAddress().getHostAddress()
+		} catch ( any e ) {
+			return ""
+		}
+	}
+
+	function setHeader( name, value ) {
+		variables.exchange.getResponseHeaders().set( name, value )
+	}
+
+	function addHeader( name, value ) {
+		variables.exchange.getResponseHeaders().add( name, value )
+	}
+
+	function getHeader( name ) {
+		return variables.exchange.getResponseHeaders().getFirst( name ) ?: javacast( "null", "" )
+	}
+
+	/**
+	 * Writes headers with a real Content-Length, then the body, then closes.
+	 */
+	function sendBody( statusCode, bodyBytes ) {
+		variables.exchange.sendResponseHeaders( statusCode, bodyBytes.len() )
+		var outStream = variables.exchange.getResponseBody()
+		outStream.write( bodyBytes )
+		outStream.close()
+		variables.exchange.close()
+	}
+
+	/**
+	 * Writes headers with no body expected (the JDK's -1-length sentinel),
+	 * then closes — used for both a genuinely empty body and a HEAD
+	 * response (which sets its own Content-Length via setHeader() first,
+	 * reflecting what a GET would have sent, before calling this).
+	 */
+	function sendHeadersOnly( statusCode ) {
+		variables.exchange.sendResponseHeaders( statusCode, -1 )
+		variables.exchange.close()
+	}
+
+}

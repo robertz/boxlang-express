@@ -1,6 +1,8 @@
 /**
  * Internal adapter: implements java's HttpHandler (via createDynamicProxy) and
- * bridges a raw HttpExchange into the Request/Response/Router world.
+ * bridges a raw HttpExchange into the Request/Response/Router world, via a
+ * JdkExchangeAdapter (see models/adapters/) rather than handing the raw
+ * exchange to Request/Response directly.
  * Never used directly by application code.
  */
 class {
@@ -18,11 +20,17 @@ class {
 		var res = ""
 
 		try {
-			req = new Request( exchange, variables.settings )
-			res = new Response( exchange, variables.settings, variables.appLocals )
+			var exchangeAdapter = new adapters.JdkExchangeAdapter( exchange )
+			req = new Request( exchangeAdapter, variables.settings )
+			res = new Response( exchangeAdapter, variables.settings, variables.appLocals )
 			println( variables.color.gray( "[#dateTimeFormat( now(), 'yyyy-MM-dd HH:mm:ss' )#]" ) & " " & variables.color.method( req.method ) & " #req.path# " & variables.color.dim( req.ip ) )
 		} catch ( any e ) {
 			println( variables.color.gray( "[#dateTimeFormat( now(), 'yyyy-MM-dd HH:mm:ss' )#]" ) & " " & variables.color.red( "Failed to construct Request/Response: #e.message#" ) )
+			// Deliberately still raw exchange calls, not the adapter — this is
+			// the last-resort path for when construction itself failed, which
+			// could include the adapter's own construction. Keeping it
+			// self-contained and JDK-specific here is fine: it doesn't need
+			// to be engine-neutral, just reliable as a final safety net.
 			try {
 				var message = ( variables.settings[ "env" ] ?: "" ) == "development" ? e.message : "Internal Server Error"
 				var bodyBytes = JSONSerialize( { error: true, message: message } ).getBytes( "UTF-8" )
