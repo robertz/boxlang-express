@@ -28,7 +28,6 @@
     },
     "scripts":{
         "preVersion":"!boxlang run-tests.bxs",
-        "postVersion":"package set location='robertz/boxlang-express#v`package version`'",
         "postPublish":"!git push --follow-tags"
     },
     "installPaths":{
@@ -40,6 +39,5 @@
         "examples/**",
         "run-tests.bxs",
         "testbox/**"
-    ],
-    "location":"robertz/boxlang-express#v0.1.20"
+    ]
 }

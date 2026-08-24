@@ -11,7 +11,7 @@
  */
 class {
 
-	function init( rootDir, extensions = [ "bx", "bxs", "bxm" ] ) {
+	function init( rootDir, extensions = [ "bx", "bxs" ] ) {
 		variables.extensions = extensions
 		variables.ignoredDirs = [ "boxlang_modules", "node_modules", "target", "build", "dist" ]
 		variables.watchService = createObject( "java", "java.nio.file.FileSystems" ).getDefault().newWatchService()
