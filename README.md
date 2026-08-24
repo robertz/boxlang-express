@@ -963,6 +963,29 @@ Two more BoxLang-specific things that shaped how these are written:
 
 ## Changelog
 
+**0.1.20**
+- **Fix:** `Router.bx` reconstructs `req.path` for `app.use()`-mounted
+  middleware/sub-routers from segments produced by splitting on `/`,
+  which drops empty segments — so a trailing slash on the incoming path
+  left no trace once rejoined. Since nearly every request passes through
+  at least one `app.use()` layer (even one mounted at root `/`), this
+  silently stripped trailing slashes from `req.path` everywhere
+  downstream, breaking anything that distinguishes `/foo/` from `/foo` —
+  notably `boxExpressStatic()`'s directory-index resolution (`/foo/` →
+  `/foo/index.html`). Now reattached from the pre-mutation path string,
+  the only place that still has it by the time the remainder is computed.
+  See [Router.bx](models/Router.bx).
+- Static file serving now mirrors `express.static()`: a request for a
+  directory *without* the trailing slash (`/games/void-harvest`) redirects
+  (`301`) to the slash-suffixed URL instead of 404ing — the slash version
+  is the canonical one, since relative asset links inside the served HTML
+  only resolve correctly against it. The redirect target is built from
+  `req.originalUrl` rather than `req.path`, since this middleware commonly
+  runs after a mount prefix has already been stripped from `req.path` by
+  `Router.bx`, but `originalUrl` is captured once at request construction
+  and never mutated by that stripping. See
+  [StaticFiles.bx](models/middleware/StaticFiles.bx).
+
 **0.1.19**
 - Added `resave`/`saveUninitialized` options to `boxExpressSession()`,
   mirroring [express-session](https://github.com/expressjs/session)'s own
