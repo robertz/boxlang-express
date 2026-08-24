@@ -1,0 +1,53 @@
+/**
+ * Undertow adapter — Phase 1 dependency & classloading spike.
+ *
+ * Verifies (nothing more — no routing/middleware/adapter interface yet,
+ * that's Phase 2/3): can io.undertow:undertow-core and its transitive
+ * runtime dependencies (XNIO, JBoss Logging, JBoss Threads, smallrye-common,
+ * wildfly-common/wildfly-client-config) load cleanly under BoxLang's module
+ * classloading, start an embedded server, serve one route, and stop cleanly.
+ *
+ *   boxlang examples/undertow-spike/spike.bxs
+ */
+println( "=== Undertow classloading spike ===" )
+
+try {
+	undertowClass = createObject( "java", "io.undertow.Undertow" )
+	pathHandlerClass = createObject( "java", "io.undertow.server.handlers.PathHandler" )
+
+	healthHandler = new "HealthHandler"()
+	proxy = createDynamicProxy( healthHandler, [ "io.undertow.server.HttpHandler" ] )
+
+	pathHandler = pathHandlerClass.init()
+	pathHandler.addExactPath( "/health", proxy )
+
+	builder = undertowClass.builder()
+	builder.addHttpListener( 3701, "localhost" )
+	builder.setHandler( pathHandler )
+	undertowServer = builder.build()
+
+	undertowServer.start()
+	println( "Undertow started OK on :3701" )
+
+	sleep( 500 )
+
+	httpClient = createObject( "java", "java.net.http.HttpClient" ).newHttpClient()
+	req = createObject( "java", "java.net.http.HttpRequest" ).newBuilder()
+		.uri( createObject( "java", "java.net.URI" ).init( "http://localhost:3701/health" ) )
+		.GET()
+		.build()
+	response = httpClient.send( req, createObject( "java", "java.net.http.HttpResponse$BodyHandlers" ).ofString() )
+
+	println( "Response status: " & response.statusCode() )
+	println( "Response body: " & response.body() )
+
+	undertowServer.stop()
+	println( "Undertow stopped OK" )
+	println( "=== SPIKE SUCCEEDED ===" )
+
+} catch ( any e ) {
+	println( "=== SPIKE FAILED ===" )
+	println( "Type: " & e.type )
+	println( "Message: " & e.message )
+	rethrow;
+}

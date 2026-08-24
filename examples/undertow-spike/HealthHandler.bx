@@ -1,0 +1,15 @@
+/**
+ * Minimal io.undertow.server.HttpHandler implementation — Undertow calls
+ * handleRequest(exchange) directly, so this needs to be a real class
+ * (createDynamicProxy() can't proxy a bare closure/struct, same reason
+ * ThreadRunnable.bx exists for java.lang.Runnable elsewhere in this repo).
+ */
+class {
+	function handleRequest( exchange ) {
+		exchange.getResponseHeaders().put(
+			createObject( "java", "io.undertow.util.Headers" ).CONTENT_TYPE,
+			"text/plain"
+		)
+		exchange.getResponseSender().send( "ok" )
+	}
+}
