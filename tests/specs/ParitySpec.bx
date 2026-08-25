@@ -1,0 +1,138 @@
+/**
+ * Phase 5 of the Undertow-adapter plan: real parity coverage — the same
+ * requests fired at two live BoxExpress apps (identical route tables, one on
+ * JdkHttpServerAdapter, one on UndertowHttpServerAdapter) and the two
+ * responses diffed against each other, rather than each engine separately
+ * checked against a hardcoded expectation (that's what UndertowAdapterSpec
+ * and the JDK-default run of BoxExpressIntegrationSpec already do). This is
+ * the literal "same routes/requests against both adapters, assert identical
+ * responses" check the phase asked for.
+ */
+class extends="testbox.system.BaseSpec" {
+
+	function beforeAll() {
+		variables.client = new "../helpers/HttpClient"()
+		variables.jdkPort = 4601
+		variables.undertowPort = 4602
+
+		variables.jdkApp = new "../../models/BoxExpress"( new "../../models/adapters/JdkHttpServerAdapter"() )
+		_registerRoutes( variables.jdkApp )
+		variables.jdkApp.listen( port = variables.jdkPort, options = { block: false } )
+
+		variables.undertowApp = new "../../models/BoxExpress"( new "../../models/adapters/UndertowHttpServerAdapter"() )
+		_registerRoutes( variables.undertowApp )
+		variables.undertowApp.listen( port = variables.undertowPort, options = { block: false } )
+
+		sleep( 300 )
+	}
+
+	function afterAll() {
+		variables.jdkApp.close()
+		variables.undertowApp.close()
+	}
+
+	/**
+	 * Identical route table registered on both apps — kept in one place so
+	 * "the same routes" is a fact about the code, not just about the two
+	 * describe blocks matching by hand.
+	 */
+	private function _registerRoutes( app ) {
+		var bodyParsers = new "../../models/middleware/BodyParsers"()
+		var staticFiles = new "../../models/middleware/StaticFiles"()
+
+		app.use( bodyParsers.json() )
+		app.use( "/public", staticFiles.serve( expandPath( "tests/fixtures/public" ) ) )
+
+		app.get( "/", ( req, res ) => res.send( "Hello from BoxExpress!" ) )
+		app.get( "/users/:id", ( req, res ) => res.json( { id: req.params.id } ) )
+		app.get( "/search", ( req, res ) => res.json( { query: req.query } ) )
+		app.post( "/echo", ( req, res ) => res.json( { youSent: req.body } ) )
+		app.put( "/items/:id", ( req, res ) => res.json( { updated: req.params.id, body: req.body } ) )
+		app.delete( "/items/:id", ( req, res ) => res.json( { deleted: req.params.id } ) )
+		app.get( "/cookie", ( req, res ) => res.cookie( "a", "1" ).cookie( "b", "2" ).send( "cookied" ) )
+		app.get( "/header-echo", ( req, res ) => res.json( { got: req.get( "X-Ping" ) ?: "" } ) )
+		app.get( "/boom", ( req, res ) => {
+			throw( message = "kaboom", type = "TestError" )
+		} )
+
+		app.use( ( err, req, res, next ) => {
+			res.status( 500 ).json( { error: true, message: err.message } )
+		} )
+	}
+
+	function run() {
+		describe( "Engine parity (JDK vs Undertow) — identical requests, identical responses", function() {
+
+			it( "GET / — plain text response", function() {
+				_assertParity( "GET", "/" )
+			} )
+
+			it( "GET /users/:id — route param", function() {
+				_assertParity( "GET", "/users/42" )
+			} )
+
+			it( "GET /search — query string parsing", function() {
+				_assertParity( "GET", "/search?q=cats&empty=" )
+			} )
+
+			it( "POST /echo — JSON request body", function() {
+				_assertParity( "POST", "/echo", '{"a":1,"b":"two"}', "application/json" )
+			} )
+
+			it( "PUT /items/:id — JSON request body with route param", function() {
+				_assertParity( "PUT", "/items/7", '{"name":"widget"}', "application/json" )
+			} )
+
+			it( "DELETE /items/:id", function() {
+				_assertParity( "DELETE", "/items/7" )
+			} )
+
+			it( "GET /cookie — multiple Set-Cookie headers", function() {
+				_assertParity( "GET", "/cookie" )
+			} )
+
+			it( "GET /header-echo — reads an arbitrary request header", function() {
+				var jdkResult = variables.client.getWithHeaders( _url( variables.jdkPort, "/header-echo" ), { "X-Ping": "pong" } )
+				var undertowResult = variables.client.getWithHeaders( _url( variables.undertowPort, "/header-echo" ), { "X-Ping": "pong" } )
+				_assertSameResponse( jdkResult, undertowResult )
+			} )
+
+			it( "HEAD / — body suppressed on both engines", function() {
+				var jdkResult = variables.client.request( "HEAD", _url( variables.jdkPort, "/" ) )
+				var undertowResult = variables.client.request( "HEAD", _url( variables.undertowPort, "/" ) )
+				_assertSameResponse( jdkResult, undertowResult )
+			} )
+
+			it( "GET /does-not-exist — default 404", function() {
+				_assertParity( "GET", "/does-not-exist" )
+			} )
+
+			it( "GET /boom — thrown error reaches the error-handling middleware", function() {
+				_assertParity( "GET", "/boom" )
+			} )
+
+			it( "GET /public/hello.txt — static file", function() {
+				_assertParity( "GET", "/public/hello.txt" )
+			} )
+
+		} )
+	}
+
+	private function _url( port, path ) {
+		return "http://localhost:#port##path#"
+	}
+
+	private function _assertParity( method, path, body = "", contentType = "application/json" ) {
+		var jdkResult = variables.client.request( method, _url( variables.jdkPort, path ), body, contentType )
+		var undertowResult = variables.client.request( method, _url( variables.undertowPort, path ), body, contentType )
+		_assertSameResponse( jdkResult, undertowResult )
+	}
+
+	private function _assertSameResponse( jdkResult, undertowResult ) {
+		expect( undertowResult.statusCode ).toBe( jdkResult.statusCode )
+		expect( undertowResult.body ).toBe( jdkResult.body )
+		expect( undertowResult.contentType ).toBe( jdkResult.contentType )
+		expect( undertowResult.setCookie ).toBe( jdkResult.setCookie )
+	}
+
+}
