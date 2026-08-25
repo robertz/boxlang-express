@@ -1,17 +1,14 @@
 /**
- * Dedicated coverage for the Undertow-backed HttpServerAdapter, BoxExpress's
- * server transport. Not a full behavior suite (that's what the rest of
- * tests/specs/ already exercises against this same adapter via the default
- * `new BoxExpress()`) — just regression coverage for this adapter's own
- * code, including the real bug found while building it: Undertow dispatches
- * handlers on its own I/O thread by default, where blocking body reads
- * throw IllegalStateException — fixed by dispatching each request onto its
- * own virtual thread first (see UndertowVirtualThreadHandler.bx), verified
- * here by actually exercising a JSON body.
- *
- * Constructs BoxExpress with an explicit UndertowHttpServerAdapter instance
- * (rather than relying on the default) only so each test gets its own
- * adapter instance instead of sharing one.
+ * Dedicated coverage for BoxExpress's Undertow server wiring
+ * (listen()/close() in BoxExpress.bx, plus the adapters/ classes they use).
+ * Not a full behavior suite (that's what the rest of tests/specs/ already
+ * exercises against the same server) — just regression coverage for the
+ * real bugs found while building it: Undertow dispatches handlers on its
+ * own I/O thread by default, where blocking body reads throw
+ * IllegalStateException — fixed by dispatching each request onto its own
+ * virtual thread first (see UndertowVirtualThreadHandler.bx), verified
+ * here by actually exercising a JSON body and by checking the handling
+ * thread directly.
  */
 class extends="testbox.system.BaseSpec" {
 
@@ -20,7 +17,7 @@ class extends="testbox.system.BaseSpec" {
 		variables.baseUrl = "http://localhost:#variables.testPort#"
 		variables.client = new "../helpers/HttpClient"()
 
-		variables.app = new "../../models/BoxExpress"( new "../../models/adapters/UndertowHttpServerAdapter"() )
+		variables.app = new "../../models/BoxExpress"()
 		variables.app.use( new "../../models/middleware/BodyParsers"().json() )
 
 		variables.app.get( "/", ( req, res ) => {
@@ -57,7 +54,7 @@ class extends="testbox.system.BaseSpec" {
 	}
 
 	function run() {
-		describe( "UndertowHttpServerAdapter", function() {
+		describe( "BoxExpress's Undertow server", function() {
 
 			it( "serves a basic GET route", function() {
 				var result = variables.client.get( variables.baseUrl & "/" )
@@ -97,22 +94,6 @@ class extends="testbox.system.BaseSpec" {
 			it( "returns a default 404 for an unmatched route", function() {
 				var result = variables.client.get( variables.baseUrl & "/does-not-exist" )
 				expect( result.statusCode ).toBe( 404 )
-			} )
-
-			it( "throws type=BoxExpress.PortInUse when the port is already bound", function() {
-				// Testing the adapter's own start() directly, not
-				// BoxExpress.listen() — listen() catches this type and
-				// calls System.exit(1) for the real "friendly message and
-				// quit" UX, which would kill the test runner itself if
-				// triggered in-process (same reason ProcessLifecycleSpec
-				// tests that specific behavior via a real subprocess
-				// instead).
-				var conflictingAdapter = new "../../models/adapters/UndertowHttpServerAdapter"()
-				var noopBridge = new "../../models/HttpBridge"( new "../../models/Router"( {} ), {}, {} )
-
-				expect( function() {
-					conflictingAdapter.start( variables.testPort, 1024, noopBridge )
-				} ).toThrow( "BoxExpress.PortInUse" )
 			} )
 
 		} )

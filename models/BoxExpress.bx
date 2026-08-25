@@ -7,22 +7,11 @@
  */
 class {
 
-	/**
-	 * serverAdapter, if passed, is used as-is instead of the default
-	 * UndertowHttpServerAdapter — mainly for tests that want a fresh adapter
-	 * instance per app rather than sharing state.
-	 */
-	function init( serverAdapter = javacast( "null", "" ) ) {
+	function init() {
 		this.settings = {}
 		this.locals = {}
 		variables.router = new Router( this.settings )
-		// isNull(x) ? ... : x, not a plain "variables.serverAdapter = serverAdapter"
-		// — confirmed directly that a parameter defaulted to javacast("null","")
-		// throws "key not located in any scope" on a bare read when the caller
-		// didn't pass it, even though isNull() itself can check it safely. The
-		// ternary's false branch (the bare read) only evaluates when an
-		// argument really was passed, sidestepping the bug entirely.
-		variables.serverAdapter = isNull( serverAdapter ) ? new adapters.UndertowHttpServerAdapter() : serverAdapter
+		variables.undertowServer = javacast( "null", "" )
 		variables.running = false
 		variables.reloadWatcher = javacast( "null", "" )
 		variables.shutdownHook = javacast( "null", "" )
@@ -125,10 +114,33 @@ class {
 		var backlog = options.backlog ?: 1024
 		var bridge = new HttpBridge( variables.router, this.settings, this.locals )
 
+		var glue = new adapters.UndertowHandlerGlue( bridge )
+		var innerProxy = createDynamicProxy( glue, [ "io.undertow.server.HttpHandler" ] )
+
+		// Undertow dispatches handlers on its own I/O thread by default,
+		// where blocking I/O throws IllegalStateException — confirmed
+		// directly, reading the request body via getInputStream() (needed
+		// for BodyParsers.bx/Multipart.bx) failed exactly this way without
+		// dispatching off of it first. UndertowVirtualThreadHandler moves
+		// each request onto its own virtual thread before the handler ever
+		// runs, matching the virtual-thread-per-request model this project
+		// uses everywhere else (this project's whole handler model is
+		// blocking by design, not async, so every request needs a thread
+		// it's safe to block on).
+		var dispatchHandler = new adapters.UndertowVirtualThreadHandler( innerProxy )
+		var proxy = createDynamicProxy( dispatchHandler, [ "io.undertow.server.HttpHandler" ] )
+
+		var builder = createObject( "java", "io.undertow.Undertow" ).builder()
+		builder.addHttpListener( port, "0.0.0.0" )
+		builder.setHandler( proxy )
+		builder.setSocketOption( createObject( "java", "org.xnio.Options" ).BACKLOG, javacast( "int", backlog ) )
+
 		try {
-			variables.serverAdapter.start( port, backlog, bridge )
+			variables.undertowServer = builder.build()
+			variables.undertowServer.start()
 		} catch ( any e ) {
-			if ( e.type == "BoxExpress.PortInUse" ) {
+			var cause = e.getCause()
+			if ( !isNull( cause ) && cause.getClass().getName() == "java.net.BindException" ) {
 				println( variables.color.red( "[BoxExpress] Port #port# is already in use — exiting." ) )
 				createObject( "java", "java.lang.System" ).exit( 1 )
 				return this
@@ -177,7 +189,10 @@ class {
 			variables.shutdownHook = javacast( "null", "" )
 		}
 
-		variables.serverAdapter.stop()
+		if ( !isNull( variables.undertowServer ) ) {
+			variables.undertowServer.stop()
+			variables.undertowServer = javacast( "null", "" )
+		}
 
 		return this
 	}
@@ -186,7 +201,7 @@ class {
 	 * Ensures close() runs on Ctrl-C / SIGTERM / normal JVM exit, not just on
 	 * an explicit app.close() call. Without this, listen()'s blocking loop
 	 * and the reload watcher's daemon thread just get torn down by the JVM
-	 * without ever calling serverAdapter.stop() or reloadWatcher.stop() — the
+	 * without ever calling undertowServer.stop() or reloadWatcher.stop() — the
 	 * process dies, but nothing runs the cleanup path, which is what let the
 	 * dev-mode watcher outlive a Ctrl-C'd server.
 	 */

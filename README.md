@@ -964,18 +964,21 @@ Two more BoxLang-specific things that shaped how these are written:
 
 ## Changelog
 
-**0.1.21**
+**0.2.0**
 - **Breaking:** BoxExpress's server transport is now
   [Undertow](https://undertow.io/) exclusively, replacing the JDK-bundled
   `com.sun.net.httpserver.HttpServer` it ran on before. Verified at full
   behavioral parity against the previous JDK-backed server before the
   switch (the entire test suite passed running for real against either),
   and load-tested with no meaningful throughput/latency difference on the
-  routes tested. The `HttpServerAdapter` seam (`models/adapters/`) that
-  made the switch possible stays in place — `new BoxExpress(customAdapter)`
-  still accepts an explicit adapter override — but there's now exactly one
-  built-in implementation, `UndertowHttpServerAdapter`, and the
-  `server.engine` setting this module briefly carried has been removed.
+  routes tested. The pluggable `HttpServerAdapter` seam this module briefly
+  carried while both engines existed (an injectable adapter via
+  `new BoxExpress(customAdapter)`, plus a `server.engine` setting) has been
+  removed now that Undertow is the only engine — `listen()`/`close()` in
+  `models/BoxExpress.bx` talk to Undertow directly. `models/adapters/`
+  still holds the Undertow-specific wiring classes (exchange wrapping,
+  handler glue, the virtual-thread dispatcher), just not as a swappable
+  interface.
 
 **0.1.20**
 - **Fix:** `Router.bx` reconstructs `req.path` for `app.use()`-mounted

@@ -72,8 +72,8 @@ class {
 	 * The raw request body as a java.io.InputStream. Undertow's exchange
 	 * needs startBlocking() called first (confirmed directly — without it,
 	 * getInputStream() throws "Cannot get stream as startBlocking has not
-	 * been invoked"); safe to call here since UndertowHttpServerAdapter
-	 * dispatches every request onto its own virtual thread (see
+	 * been invoked"); safe to call here since BoxExpress.listen() dispatches
+	 * every request onto its own virtual thread (see
 	 * UndertowVirtualThreadHandler.bx) before this ever runs, moving
 	 * execution off the I/O thread.
 	 */
