@@ -169,15 +169,17 @@ required, since BoxExpress's `HttpServer` never terminates TLS itself) will
 usually queue connections before this limit is ever reached — but it's
 there for a direct-exposure deployment or a deliberately higher ceiling.
 
-**Experimental:** `app.set("server.engine", "undertow")` runs on
-[Undertow](https://undertow.io/) instead of the default JDK-bundled
-`com.sun.net.httpserver.HttpServer` — an alternative server backend,
-verified at full behavioral parity (the entire test suite passes running
-for real against either engine), but not yet load-tested against the
-default, and not a stable guarantee — `server.engine` is `"jdk"` (the
-default when unset) or `"undertow"`; anything else throws
+`app.set("server.engine", "undertow")` runs on [Undertow](https://undertow.io/)
+instead of the default JDK-bundled `com.sun.net.httpserver.HttpServer` — a
+supported alternative server backend, verified at full behavioral parity
+(the entire test suite passes running for real against either engine) and
+load-tested (`examples/load-test/`) with no meaningful throughput or latency
+difference from the JDK default on the routes tested. `server.engine` is
+`"jdk"` (the default when unset) or `"undertow"`; anything else throws
 `BoxExpress.UnknownServerEngine` immediately rather than silently falling
-back. `"jdk"` remains the default and the one actually recommended for now.
+back. `"jdk"` remains the default — the two engines are kept side by side
+rather than one deprecating the other, so pick `"undertow"` deliberately
+(e.g. for its own feature set) rather than for a performance win.
 
 Every request gets a line on stdout as soon as it's received —
 `[2026-08-10 10:45:41] GET /users/42 127.0.0.1` — there's no setting to turn
@@ -972,6 +974,21 @@ Two more BoxLang-specific things that shaped how these are written:
   rather than `../fixtures/...`.
 
 ## Changelog
+
+**0.1.21**
+- Added an Undertow-backed server engine as a supported alternative to the
+  default JDK-bundled `com.sun.net.httpserver.HttpServer`:
+  `app.set("server.engine", "undertow")`. Built behind a new
+  `HttpServerAdapter` seam (`models/adapters/`) that both engines implement,
+  verified at full behavioral parity — the entire test suite passes for
+  real against either engine (see
+  [ParitySpec.bx](tests/specs/ParitySpec.bx), which runs identical requests
+  against live JDK and Undertow apps and diffs the responses directly) —
+  and load-tested (`examples/load-test/`) with no meaningful
+  throughput/latency difference from the JDK default on the routes tested.
+  `"jdk"` stays the default; the two engines are kept side by side rather
+  than one replacing the other. See the `server.engine` docs under
+  [App](#app) above.
 
 **0.1.20**
 - **Fix:** `Router.bx` reconstructs `req.path` for `app.use()`-mounted
