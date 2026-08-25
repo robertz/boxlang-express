@@ -42,10 +42,7 @@ This README covers the API reference. For the full documentation —
 getting started, configuration, routing, middleware, request/response,
 views, sessions, static files & uploads, error handling, and process
 lifecycle, each with runnable examples — see
-[robertz/express-test](https://github.com/robertz/express-test), a working
-demo app that doubles as BoxExpress's own docs site: every page you can
-read about, you can also click through and try live (`boxlang app.bxs`,
-then browse to `/docs`).
+[kisdigital.com/projects/boxlang-express/docs/getting-started](https://kisdigital.com/projects/boxlang-express/docs/getting-started).
 
 ## Install
 
