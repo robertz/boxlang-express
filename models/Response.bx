@@ -195,8 +195,9 @@ class {
 			set( "Cache-Control", "public, max-age=" & options.maxAge )
 		}
 
-		var requestHeaders = variables.exchangeAdapter.getRequestHeaders()
-		if ( conditional.isNotModified( requestHeaders[ "If-None-Match" ] ?: "", requestHeaders[ "If-Modified-Since" ] ?: "", etag, fileObj ) ) {
+		var ifNoneMatch = variables.exchangeAdapter.getRequestHeader( "If-None-Match" )
+		var ifModifiedSince = variables.exchangeAdapter.getRequestHeader( "If-Modified-Since" )
+		if ( conditional.isNotModified( ifNoneMatch, ifModifiedSince, etag, fileObj ) ) {
 			return status( 304 ).end()
 		}
 
@@ -228,7 +229,7 @@ class {
 	 */
 	function sendFileRange( fileObj, contentType ) {
 		var totalSize = fileObj.length()
-		var rangeHeader = variables.exchangeAdapter.getRequestHeaders()[ "Range" ] ?: ""
+		var rangeHeader = variables.exchangeAdapter.getRequestHeader( "Range" )
 		var range = new RangeParser().parse( rangeHeader, totalSize )
 
 		type( contentType )

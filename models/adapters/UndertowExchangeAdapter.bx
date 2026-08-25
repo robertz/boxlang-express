@@ -2,8 +2,9 @@
  * Wraps a single io.undertow.server.HttpServerExchange, implementing the
  * exchange-adapter contract that Request.bx/Response.bx are built against:
  * getRawExchange(), getMethod(), getPath(), getQueryString(),
- * getRequestHeaders(), getRemoteAddress(), getRequestBodyStream(),
- * setHeader()/addHeader()/getHeader(), sendBody()/sendHeadersOnly().
+ * getRequestHeaders(), getRequestHeader(), getRemoteAddress(),
+ * getRequestBodyStream(), setHeader()/addHeader()/getHeader(),
+ * sendBody()/sendHeadersOnly().
  * getRawExchange() is a deliberate, documented escape hatch — see
  * Request.bx's rawExchange() docblock — everything else here is
  * engine-neutral by construction.
@@ -49,6 +50,16 @@ class {
 		return headerStruct
 	}
 
+	/**
+	 * A single request header, without building the full struct
+	 * getRequestHeaders() does — for callers (Response.bx's conditional-GET
+	 * and Range handling) that only need one or two header values per
+	 * request and shouldn't pay for iterating every header name to get them.
+	 */
+	function getRequestHeader( name ) {
+		return variables.exchange.getRequestHeaders().getFirst( _httpString( name ) ) ?: ""
+	}
+
 	function getRemoteAddress() {
 		try {
 			return variables.exchange.getSourceAddress().getAddress().getHostAddress()
@@ -62,8 +73,9 @@ class {
 	 * needs startBlocking() called first (confirmed directly — without it,
 	 * getInputStream() throws "Cannot get stream as startBlocking has not
 	 * been invoked"); safe to call here since UndertowHttpServerAdapter
-	 * wraps every request in Undertow's own BlockingHandler, which already
-	 * moved execution off the I/O thread before this ever runs.
+	 * dispatches every request onto its own virtual thread (see
+	 * UndertowVirtualThreadHandler.bx) before this ever runs, moving
+	 * execution off the I/O thread.
 	 */
 	function getRequestBodyStream() {
 		variables.exchange.startBlocking()

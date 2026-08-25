@@ -6,23 +6,24 @@ class {
 
 	function start( port, backlog, bridge ) {
 		var glue = new UndertowHandlerGlue( bridge )
-		var proxy = createDynamicProxy( glue, [ "io.undertow.server.HttpHandler" ] )
+		var innerProxy = createDynamicProxy( glue, [ "io.undertow.server.HttpHandler" ] )
 
 		// Undertow dispatches handlers on its own I/O thread by default,
 		// where blocking I/O throws IllegalStateException — confirmed
 		// directly, reading the request body via getInputStream() (needed
 		// for BodyParsers.bx/Multipart.bx) failed exactly this way without
-		// this wrapper. BlockingHandler dispatches to a worker thread
-		// first, which is what every other adapter method here already
-		// assumes it can do (synchronous, in-memory body reads, direct
-		// writes) — this project's whole handler model is blocking by
-		// design, not async, so this isn't a workaround, it's the correct
-		// Undertow idiom for this shape of app.
-		var blockingHandler = createObject( "java", "io.undertow.server.handlers.BlockingHandler" ).init( proxy )
+		// dispatching off of it first. UndertowVirtualThreadHandler moves
+		// each request onto its own virtual thread before this handler
+		// ever runs, matching the virtual-thread-per-request model this
+		// project uses everywhere else (this project's whole handler model
+		// is blocking by design, not async, so every request needs a
+		// thread it's safe to block on).
+		var dispatchHandler = new UndertowVirtualThreadHandler( innerProxy )
+		var proxy = createDynamicProxy( dispatchHandler, [ "io.undertow.server.HttpHandler" ] )
 
 		var builder = createObject( "java", "io.undertow.Undertow" ).builder()
 		builder.addHttpListener( port, "0.0.0.0" )
-		builder.setHandler( blockingHandler )
+		builder.setHandler( proxy )
 		builder.setSocketOption( createObject( "java", "org.xnio.Options" ).BACKLOG, javacast( "int", backlog ) )
 
 		try {

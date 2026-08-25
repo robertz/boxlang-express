@@ -5,9 +5,9 @@
  * `new BoxExpress()`) — just regression coverage for this adapter's own
  * code, including the real bug found while building it: Undertow dispatches
  * handlers on its own I/O thread by default, where blocking body reads
- * throw IllegalStateException — fixed with
- * io.undertow.server.handlers.BlockingHandler, verified here by actually
- * exercising a JSON body.
+ * throw IllegalStateException — fixed by dispatching each request onto its
+ * own virtual thread first (see UndertowVirtualThreadHandler.bx), verified
+ * here by actually exercising a JSON body.
  *
  * Constructs BoxExpress with an explicit UndertowHttpServerAdapter instance
  * (rather than relying on the default) only so each test gets its own
@@ -43,6 +43,11 @@ class extends="testbox.system.BaseSpec" {
 			res.send( "should not appear in a HEAD response" )
 		} )
 
+		variables.app.get( "/thread-info", ( req, res ) => {
+			var currentThread = createObject( "java", "java.lang.Thread" ).currentThread()
+			res.json( { virtual: currentThread.isVirtual() } )
+		} )
+
 		variables.app.listen( port = variables.testPort, options = { block: false } )
 		sleep( 500 )
 	}
@@ -66,7 +71,7 @@ class extends="testbox.system.BaseSpec" {
 				expect( JSONDeserialize( result.body ).query.b ).toBe( "hello" )
 			} )
 
-			it( "reads a JSON request body — the actual bug this adapter had until BlockingHandler was added", function() {
+			it( "reads a JSON request body — the actual bug this adapter had until requests were dispatched onto virtual threads", function() {
 				var result = variables.client.post( variables.baseUrl & "/echo", '{"x":42}', "application/json" )
 				expect( result.statusCode ).toBe( 200 )
 				expect( JSONDeserialize( result.body ).youSent.x ).toBe( 42 )
@@ -82,6 +87,11 @@ class extends="testbox.system.BaseSpec" {
 				var result = variables.client.requestNoRedirect( "HEAD", variables.baseUrl & "/head-test" )
 				expect( result.statusCode ).toBe( 200 )
 				expect( result.body ).toBe( "" )
+			} )
+
+			it( "runs each request on its own virtual thread, not Undertow's XNIO worker pool", function() {
+				var result = variables.client.get( variables.baseUrl & "/thread-info" )
+				expect( JSONDeserialize( result.body ).virtual ).toBeTrue()
 			} )
 
 			it( "returns a default 404 for an unmatched route", function() {
