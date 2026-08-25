@@ -1,9 +1,11 @@
 /**
- * Recursively watches a directory tree for .bx/.bxs/.bxm changes using
+ * Recursively watches a directory tree for .bx/.bxs changes using
  * java.nio.file.WatchService, debouncing bursty save events (most editors
  * fire 2-3 filesystem events per save) into a single callback invocation.
  * Powers BoxExpress's app.set("reloadOnChange", true) — see
- * BoxExpress.bx#_startReloadWatcher().
+ * BoxExpress.bx#_startReloadWatcher(). .bxm is deliberately not in the
+ * default extensions list — a view template change doesn't need a full
+ * process restart to take effect, only actual code does.
  *
  * Registration is a one-time recursive snapshot taken in init(); a directory
  * created after that won't be picked up until the process restarts, which is

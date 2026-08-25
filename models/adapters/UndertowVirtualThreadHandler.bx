@@ -1,0 +1,29 @@
+/**
+ * Top-level Undertow io.undertow.server.HttpHandler that dispatches every
+ * request onto its own virtual thread via
+ * HttpServerExchange.dispatch(Executor, HttpHandler) — confirmed directly
+ * with a throwaway spike server that this moves execution off Undertow's
+ * I/O thread and onto a real java.lang.VirtualThread (isInIoThread() false,
+ * Thread.isVirtual() true), where blocking calls like startBlocking()/
+ * getInputStream() work fine.
+ *
+ * Replaces io.undertow.server.handlers.BlockingHandler, which gives the
+ * same "safe to block here" guarantee but by handing requests to
+ * Undertow's own fixed-size XNIO worker thread pool — this project's
+ * previous JDK-backed HttpServer used
+ * Executors.newVirtualThreadPerTaskExecutor(), and this restores that same
+ * one-thread-per-request model instead of a bounded pool.
+ */
+class {
+
+	function init( delegate ) {
+		variables.delegate = delegate
+		variables.executor = createObject( "java", "java.util.concurrent.Executors" ).newVirtualThreadPerTaskExecutor()
+		return this
+	}
+
+	function handleRequest( exchange ) {
+		exchange.dispatch( variables.executor, variables.delegate )
+	}
+
+}

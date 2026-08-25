@@ -11,7 +11,7 @@ class {
 		this.settings = {}
 		this.locals = {}
 		variables.router = new Router( this.settings )
-		variables.httpServer = javacast( "null", "" )
+		variables.undertowServer = javacast( "null", "" )
 		variables.running = false
 		variables.reloadWatcher = javacast( "null", "" )
 		variables.shutdownHook = javacast( "null", "" )
@@ -101,23 +101,43 @@ class {
 	 * the server either way, and also breaks the blocking loop if something else (e.g.
 	 * a route handler, on its own virtual thread) calls it while listen() is blocked.
 	 *
-	 * options.backlog sets the TCP accept queue depth (default 1024). The JDK default
-	 * (passing 0 to HttpServer.create()) is small enough that a burst of concurrent
-	 * connections — well within what the virtual-thread executor itself can handle —
-	 * gets refused with a connection reset instead of queued, confirmed with a real
-	 * load test (ab): request handling stayed fast and error-free the whole time, but
-	 * new connections started getting reset once concurrency passed roughly 65-70 with
-	 * the JDK default, and raising the backlog alone pushed that past 150 with no other
-	 * change. Exposed here instead of hardcoded higher, since a reverse proxy in front
+	 * options.backlog sets the TCP accept queue depth (default 1024), passed through to
+	 * Undertow's org.xnio.Options.BACKLOG. A small backlog is enough that a burst of
+	 * concurrent connections — well within what the virtual-thread executor itself can
+	 * handle — can get refused with a connection reset instead of queued, which is why
+	 * this defaults higher than Undertow's own default rather than being left unset.
+	 * Exposed here instead of hardcoded higher still, since a reverse proxy in front
 	 * (already required — see req.secure) may queue connections itself and make a large
 	 * backlog here redundant.
 	 */
 	function listen( port, callback, options = {} ) {
-		var addr = createObject( "java", "java.net.InetSocketAddress" ).init( port )
 		var backlog = options.backlog ?: 1024
+		var bridge = new HttpBridge( variables.router, this.settings, this.locals )
+
+		var glue = new adapters.UndertowHandlerGlue( bridge )
+		var innerProxy = createDynamicProxy( glue, [ "io.undertow.server.HttpHandler" ] )
+
+		// Undertow dispatches handlers on its own I/O thread by default,
+		// where blocking I/O throws IllegalStateException — confirmed
+		// directly, reading the request body via getInputStream() (needed
+		// for BodyParsers.bx/Multipart.bx) failed exactly this way without
+		// dispatching off of it first. UndertowVirtualThreadHandler moves
+		// each request onto its own virtual thread before the handler ever
+		// runs, matching the virtual-thread-per-request model this project
+		// uses everywhere else (this project's whole handler model is
+		// blocking by design, not async, so every request needs a thread
+		// it's safe to block on).
+		var dispatchHandler = new adapters.UndertowVirtualThreadHandler( innerProxy )
+		var proxy = createDynamicProxy( dispatchHandler, [ "io.undertow.server.HttpHandler" ] )
+
+		var builder = createObject( "java", "io.undertow.Undertow" ).builder()
+		builder.addHttpListener( port, "0.0.0.0" )
+		builder.setHandler( proxy )
+		builder.setSocketOption( createObject( "java", "org.xnio.Options" ).BACKLOG, javacast( "int", backlog ) )
 
 		try {
-			variables.httpServer = createObject( "java", "com.sun.net.httpserver.HttpServer" ).create( addr, backlog )
+			variables.undertowServer = builder.build()
+			variables.undertowServer.start()
 		} catch ( any e ) {
 			var cause = e.getCause()
 			if ( !isNull( cause ) && cause.getClass().getName() == "java.net.BindException" ) {
@@ -128,12 +148,6 @@ class {
 			rethrow;
 		}
 
-		var bridge = new HttpBridge( variables.router, this.settings, this.locals )
-		var proxy = createDynamicProxy( bridge, [ "com.sun.net.httpserver.HttpHandler" ] )
-
-		variables.httpServer.createContext( "/", proxy )
-		variables.httpServer.setExecutor( createObject( "java", "java.util.concurrent.Executors" ).newVirtualThreadPerTaskExecutor() )
-		variables.httpServer.start()
 		variables.running = true
 		_registerShutdownHook()
 
@@ -175,9 +189,9 @@ class {
 			variables.shutdownHook = javacast( "null", "" )
 		}
 
-		if ( !isNull( variables.httpServer ) ) {
-			variables.httpServer.stop( 0 )
-			variables.httpServer = javacast( "null", "" )
+		if ( !isNull( variables.undertowServer ) ) {
+			variables.undertowServer.stop()
+			variables.undertowServer = javacast( "null", "" )
 		}
 
 		return this
@@ -187,7 +201,7 @@ class {
 	 * Ensures close() runs on Ctrl-C / SIGTERM / normal JVM exit, not just on
 	 * an explicit app.close() call. Without this, listen()'s blocking loop
 	 * and the reload watcher's daemon thread just get torn down by the JVM
-	 * without ever calling httpServer.stop() or reloadWatcher.stop() — the
+	 * without ever calling undertowServer.stop() or reloadWatcher.stop() — the
 	 * process dies, but nothing runs the cleanup path, which is what let the
 	 * dev-mode watcher outlive a Ctrl-C'd server.
 	 */
@@ -204,8 +218,11 @@ class {
 
 	/**
 	 * Dev-mode convenience: app.set("reloadOnChange", true) watches the
-	 * current working directory for .bx/.bxs/.bxm changes (via FileWatcher)
-	 * and restarts the process on save. Deliberately separate from
+	 * current working directory for .bx/.bxs changes (via FileWatcher) and
+	 * restarts the process on save — .bxm views aren't watched, since
+	 * render()'s bx:include re-reads the template from disk on every
+	 * request, so a view edit already takes effect on the next request
+	 * with no restart needed. Deliberately separate from
 	 * app.set("env", "development") — the two are orthogonal settings, so
 	 * either can be used without the other.
 	 */

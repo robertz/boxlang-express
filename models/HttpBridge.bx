@@ -1,6 +1,8 @@
 /**
- * Internal adapter: implements java's HttpHandler (via createDynamicProxy) and
- * bridges a raw HttpExchange into the Request/Response/Router world.
+ * Bridges an exchange adapter (see models/adapters/UndertowExchangeAdapter)
+ * into the Request/Response/Router world. Engine-neutral by construction:
+ * this class never builds the adapter itself — UndertowHandlerGlue wraps
+ * the raw Undertow exchange into an adapter and calls handle() with it.
  * Never used directly by application code.
  */
 class {
@@ -13,28 +15,28 @@ class {
 		return this
 	}
 
-	function handle( exchange ) {
+	function handle( exchangeAdapter ) {
 		var req = ""
 		var res = ""
 
 		try {
-			req = new Request( exchange, variables.settings )
-			res = new Response( exchange, variables.settings, variables.appLocals )
+			req = new Request( exchangeAdapter, variables.settings )
+			res = new Response( exchangeAdapter, variables.settings, variables.appLocals )
 			println( variables.color.gray( "[#dateTimeFormat( now(), 'yyyy-MM-dd HH:mm:ss' )#]" ) & " " & variables.color.method( req.method ) & " #req.path# " & variables.color.dim( req.ip ) )
 		} catch ( any e ) {
 			println( variables.color.gray( "[#dateTimeFormat( now(), 'yyyy-MM-dd HH:mm:ss' )#]" ) & " " & variables.color.red( "Failed to construct Request/Response: #e.message#" ) )
+			// Safe to use the adapter here now (unlike before step 2b's
+			// refactor) — by the time handle() runs, the adapter itself is
+			// already constructed successfully by the caller's glue; only
+			// Request/Response construction from it can fail here.
 			try {
 				var message = ( variables.settings[ "env" ] ?: "" ) == "development" ? e.message : "Internal Server Error"
 				var bodyBytes = JSONSerialize( { error: true, message: message } ).getBytes( "UTF-8" )
-				exchange.getResponseHeaders().set( "Content-Type", "application/json" )
-				exchange.sendResponseHeaders( 500, bodyBytes.len() )
-				var outStream = exchange.getResponseBody()
-				outStream.write( bodyBytes )
-				outStream.close()
+				exchangeAdapter.setHeader( "Content-Type", "application/json" )
+				exchangeAdapter.sendBody( 500, bodyBytes )
 			} catch ( any ignore ) {
 				try {
-					exchange.sendResponseHeaders( 500, -1 )
-					exchange.close()
+					exchangeAdapter.sendHeadersOnly( 500 )
 				} catch ( any ignoreToo ) {
 				}
 			}

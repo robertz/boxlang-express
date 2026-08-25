@@ -29,7 +29,7 @@ class {
 				return next( { message: "Missing multipart boundary", type: "BoxExpress.MultipartError" } )
 			}
 
-			var inStream = req.rawExchange().getRequestBody()
+			var inStream = req.bodyStream()
 			var bodyBytes = inStream.readNBytes( limit + 1 )
 			if ( bodyBytes.len() > limit ) {
 				return res.status( 413 ).json( { error: true, message: "Upload exceeds the #limit#-byte limit" } )

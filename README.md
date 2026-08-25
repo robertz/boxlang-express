@@ -1,8 +1,8 @@
 # BoxExpress
 
 An Express.js-style web framework for BoxLang. Runs as a standalone HTTP server
-(backed by the JDK's built-in `com.sun.net.httpserver.HttpServer`, with a
-virtual thread per request) — no servlet container required.
+(backed by [Undertow](https://undertow.io/), with a virtual thread per
+request) — no servlet container required.
 
 BoxExpress is a BoxLang module (`ModuleConfig.bx` at the project root, `type:
 "boxlang-modules"` in `box.json`). Installed into a project's
@@ -42,10 +42,7 @@ This README covers the API reference. For the full documentation —
 getting started, configuration, routing, middleware, request/response,
 views, sessions, static files & uploads, error handling, and process
 lifecycle, each with runnable examples — see
-[robertz/express-test](https://github.com/robertz/express-test), a working
-demo app that doubles as BoxExpress's own docs site: every page you can
-read about, you can also click through and try live (`boxlang app.bxs`,
-then browse to `/docs`).
+[kisdigital.com/projects/boxlang-express/docs/getting-started](https://kisdigital.com/projects/boxlang-express/docs/getting-started).
 
 ## Install
 
@@ -87,8 +84,10 @@ ln -s /path/to/boxlang-express boxlang_modules/boxexpress
 
 ## Hacking on BoxExpress itself
 
-Requires BoxLang (tested against 1.15.0) on the JVM. No external dependencies
-beyond TestBox for the test suite (`box install`).
+Requires BoxLang (tested against 1.15.0) on the JVM. Undertow and its
+transitive runtime dependencies (XNIO, JBoss Logging, etc.) are vendored in
+`libs/` — nothing to install for those. TestBox is the only thing that
+needs pulling in, and only for the test suite (`box install`).
 
 ```bash
 boxlang examples/server.bxs
@@ -157,17 +156,18 @@ loop polls every second — also works when called from a *different* thread
 than the one blocked in `listen()`, e.g. a `/shutdown` route handler running
 on its own virtual thread.
 
-`options.backlog` sets the underlying `HttpServer`'s TCP accept queue depth
-(default `1024`) — how many pending connections the OS will hold before
-refusing new ones outright, independent of how fast requests are actually
-being handled. Confirmed with a real load test, not assumed: the JDK's own
-default (`0`) started refusing connections with a reset once concurrency
-passed roughly 65-70 in repeated runs, even though request handling itself
-stayed fast the whole time; raising it to `1024` pushed that past 150 with
-no other change. Rarely needs touching — a reverse proxy in front (already
-required, since BoxExpress's `HttpServer` never terminates TLS itself) will
-usually queue connections before this limit is ever reached — but it's
-there for a direct-exposure deployment or a deliberately higher ceiling.
+`options.backlog` sets Undertow's TCP accept queue depth (default `1024`,
+passed through to `org.xnio.Options.BACKLOG`) — how many pending connections
+the OS will hold before refusing new ones outright, independent of how fast
+requests are actually being handled. A small backlog is enough that a burst
+of concurrent connections can get refused with a reset instead of queued,
+even while request handling itself stays fast — confirmed with a real load
+test against an earlier JDK-backed version of this server, which is why the
+default here is `1024` rather than left unset. Rarely needs touching — a
+reverse proxy in front (already required, since BoxExpress never terminates
+TLS itself) will usually queue connections before this limit is ever
+reached — but it's there for a direct-exposure deployment or a deliberately
+higher ceiling.
 
 Every request gets a line on stdout as soon as it's received —
 `[2026-08-10 10:45:41] GET /users/42 127.0.0.1` — there's no setting to turn
@@ -181,9 +181,14 @@ app.set( "reloadOnChange", true )
 
 Dev-only convenience — watches the current working directory (recursively,
 skipping `boxlang_modules/`, `node_modules/`, `.git`, and other dot-dirs) for
-`.bx`/`.bxs`/`.bxm` changes and restarts the process on save. Registration is
-a one-time recursive snapshot taken at startup — a directory created *after*
+`.bx`/`.bxs` changes and restarts the process on save. Registration is a
+one-time recursive snapshot taken at startup — a directory created *after*
 the server starts won't be picked up until the next restart.
+
+`.bxm` view files aren't watched — `res.render()` re-reads a `.bxm` template
+from disk on every request, so an edit already shows up on the next request
+with no restart needed; only actual `.bx`/`.bxs` source, which BoxLang
+compiles once and caches, needs a fresh process to pick up a change.
 
 There's no hot reload inside a running JVM once BoxLang has compiled your
 classes, so a restart replaces the whole process: launch a replacement by
@@ -281,7 +286,7 @@ Works the same on a standalone `Router` — `router.route(path)`.
 `req.headers`, `req.get(name)`, `req.cookies`, `req.ip`, `req.protocol`,
 `req.secure`, `req.hostname`, `req.body` (populated by body-parsing
 middleware, empty struct otherwise), `req.rawExchange()` (an escape hatch to
-the underlying `com.sun.net.httpserver.HttpExchange`, for anything not
+the underlying `io.undertow.server.HttpServerExchange`, for anything not
 covered by the rest of the API).
 
 `req.ip` is always the direct TCP peer by default — safe, since a client
@@ -928,16 +933,27 @@ or a `pretest` script). Structure:
 
 - `tests/specs/RouterSpec.bx` — unit tests for path matching and the
   middleware/`next()` chain, using lightweight fake `req`/`res` structs
-  instead of a real `HttpExchange` (Router never touches anything else).
+  instead of a real exchange (Router never touches anything else).
 - `tests/specs/BoxExpressIntegrationSpec.bx` — spins up a real app on
   `localhost:4321` in `beforeAll()` and hits it with real HTTP requests
-  (`tests/helpers/HttpClient.bx`, a thin `HttpURLConnection` wrapper),
-  exercising `Request`/`Response`/`BodyParsers`/`StaticFiles`/`render()`
-  together, plus a concurrency check using `bx:thread`.
+  (`tests/helpers/HttpClient.bx`, a thin `java.net.http.HttpClient`
+  wrapper), exercising `Request`/`Response`/`BodyParsers`/`StaticFiles`/
+  `render()` together, plus a concurrency check using `bx:thread`.
 - `tests/specs/BifsSpec.bx` — the same idea, but built entirely through the
   global BIFs (`boxExpress()`, `boxExpressJSON()`, etc.) on `localhost:4322`,
   to make sure the friendly entry points actually work, not just the
   underlying classes.
+- `tests/specs/UndertowAdapterSpec.bx` — dedicated regression coverage for
+  BoxExpress's Undertow wiring specifically (`models/adapters/`), including
+  the real bugs found while building it: reading a request body from
+  Undertow's own I/O thread, and confirming each request actually runs on
+  its own virtual thread rather than Undertow's default worker pool.
+- `tests/specs/ProcessLifecycleSpec.bx` — the handful of behaviors that need
+  a real OS process boundary rather than an in-process `block: false`
+  server: a clean exit (not a raw stack trace) on a port conflict, a real
+  `SIGTERM` releasing the socket, and `reloadOnChange` actually replacing
+  the running process. Spawns `boxlang` as a real subprocess against a
+  generated script and asserts on its stdout/exit code.
 - `tests/fixtures/` — a static file and a `.bxm` view the integration specs
   serve/render.
 
@@ -962,6 +978,22 @@ Two more BoxLang-specific things that shaped how these are written:
   rather than `../fixtures/...`.
 
 ## Changelog
+
+**0.2.0**
+- **Breaking:** BoxExpress's server transport is now
+  [Undertow](https://undertow.io/) exclusively, replacing the JDK-bundled
+  `com.sun.net.httpserver.HttpServer` it ran on before. Verified at full
+  behavioral parity against the previous JDK-backed server before the
+  switch (the entire test suite passed running for real against either),
+  and load-tested with no meaningful throughput/latency difference on the
+  routes tested. The pluggable `HttpServerAdapter` seam this module briefly
+  carried while both engines existed (an injectable adapter via
+  `new BoxExpress(customAdapter)`, plus a `server.engine` setting) has been
+  removed now that Undertow is the only engine — `listen()`/`close()` in
+  `models/BoxExpress.bx` talk to Undertow directly. `models/adapters/`
+  still holds the Undertow-specific wiring classes (exchange wrapping,
+  handler glue, the virtual-thread dispatcher), just not as a swappable
+  interface.
 
 **0.1.20**
 - **Fix:** `Router.bx` reconstructs `req.path` for `app.use()`-mounted
@@ -1312,7 +1344,7 @@ default 404/500 handling.
 `static` are reserved BoxLang scope names — assigning a variable one of those
 names silently shadows the built-in scope instead of erroring at parse time,
 which produces confusing runtime errors. This codebase avoids all of them
-(e.g. `httpServer` instead of `server`, `formData` instead of `form`, the
+(e.g. `undertowServer` instead of `server`, `formData` instead of `form`, the
 static-file middleware class is named `StaticFiles` rather than `Static`).
 
 `JSONSerialize()` (and therefore `res.json()`) only serializes literal

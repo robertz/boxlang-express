@@ -1,0 +1,112 @@
+/**
+ * Wraps a single io.undertow.server.HttpServerExchange, implementing the
+ * exchange-adapter contract that Request.bx/Response.bx are built against:
+ * getRawExchange(), getMethod(), getPath(), getQueryString(),
+ * getRequestHeaders(), getRequestHeader(), getRemoteAddress(),
+ * getRequestBodyStream(), setHeader()/addHeader()/getHeader(),
+ * sendBody()/sendHeadersOnly().
+ * getRawExchange() is a deliberate, documented escape hatch — see
+ * Request.bx's rawExchange() docblock — everything else here is
+ * engine-neutral by construction.
+ *
+ * Every method name/signature below was verified directly against a real
+ * running Undertow server before writing this (not assumed from docs):
+ * getRequestPath() returns the decoded path with no query string;
+ * getQueryString() returns "" (not null) when absent; HeaderMap's
+ * put()/add()/getFirst() map onto setHeader()/addHeader()/getHeader();
+ * getResponseSender().send(ByteBuffer) both writes the body and finalizes
+ * the exchange in one call, confirmed against a real response over the
+ * wire.
+ */
+class {
+
+	function init( exchange ) {
+		variables.exchange = exchange
+		return this
+	}
+
+	function getRawExchange() {
+		return variables.exchange
+	}
+
+	function getMethod() {
+		return variables.exchange.getRequestMethod().toString()
+	}
+
+	function getPath() {
+		return variables.exchange.getRequestPath()
+	}
+
+	function getQueryString() {
+		return variables.exchange.getQueryString()
+	}
+
+	function getRequestHeaders() {
+		var headerMap = variables.exchange.getRequestHeaders()
+		var headerStruct = {}
+		for ( var headerName in headerMap.getHeaderNames() ) {
+			headerStruct[ headerName.toString() ] = headerMap.getFirst( headerName )
+		}
+		return headerStruct
+	}
+
+	/**
+	 * A single request header, without building the full struct
+	 * getRequestHeaders() does — for callers (Response.bx's conditional-GET
+	 * and Range handling) that only need one or two header values per
+	 * request and shouldn't pay for iterating every header name to get them.
+	 */
+	function getRequestHeader( name ) {
+		return variables.exchange.getRequestHeaders().getFirst( _httpString( name ) ) ?: ""
+	}
+
+	function getRemoteAddress() {
+		try {
+			return variables.exchange.getSourceAddress().getAddress().getHostAddress()
+		} catch ( any e ) {
+			return ""
+		}
+	}
+
+	/**
+	 * The raw request body as a java.io.InputStream. Undertow's exchange
+	 * needs startBlocking() called first (confirmed directly — without it,
+	 * getInputStream() throws "Cannot get stream as startBlocking has not
+	 * been invoked"); safe to call here since BoxExpress.listen() dispatches
+	 * every request onto its own virtual thread (see
+	 * UndertowVirtualThreadHandler.bx) before this ever runs, moving
+	 * execution off the I/O thread.
+	 */
+	function getRequestBodyStream() {
+		variables.exchange.startBlocking()
+		return variables.exchange.getInputStream()
+	}
+
+	function setHeader( name, value ) {
+		variables.exchange.getResponseHeaders().put( _httpString( name ), value )
+	}
+
+	function addHeader( name, value ) {
+		variables.exchange.getResponseHeaders().add( _httpString( name ), value )
+	}
+
+	function getHeader( name ) {
+		return variables.exchange.getResponseHeaders().getFirst( _httpString( name ) ) ?: javacast( "null", "" )
+	}
+
+	function sendBody( statusCode, bodyBytes ) {
+		variables.exchange.setStatusCode( statusCode )
+		setHeader( "Content-Length", toString( bodyBytes.len() ) )
+		variables.exchange.getResponseSender().send( createObject( "java", "java.nio.ByteBuffer" ).wrap( bodyBytes ) )
+	}
+
+	function sendHeadersOnly( statusCode ) {
+		variables.exchange.setStatusCode( statusCode )
+		variables.exchange.endExchange()
+	}
+
+	private function _httpString( name ) {
+		return createObject( "java", "io.undertow.util.HttpString" ).init( name )
+	}
+
+}

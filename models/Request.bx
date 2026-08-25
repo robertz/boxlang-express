@@ -1,23 +1,29 @@
 /**
- * Wraps a com.sun.net.httpserver.HttpExchange as an Express-style request object.
+ * Express-style request object, backed by an exchange adapter (see
+ * models/adapters/UndertowExchangeAdapter.bx) rather than a raw
+ * io.undertow.server.HttpServerExchange directly — everything here reads
+ * the adapter once at construction into plain BoxLang values, so the rest
+ * of this class (query/cookie parsing, IP/hostname resolution) doesn't
+ * touch Undertow's API at all. rawExchange() is the one deliberate
+ * exception — see UndertowExchangeAdapter.bx's docblock.
  */
 class {
 
-	function init( exchange, settings = {} ) {
-		variables.exchange = exchange
+	function init( exchangeAdapter, settings = {} ) {
+		variables.exchangeAdapter = exchangeAdapter
 
-		var uri = exchange.getRequestURI()
+		var queryString = exchangeAdapter.getQueryString()
 
-		this.method = exchange.getRequestMethod().ucase()
-		this.path = uri.getPath()
-		this.originalUrl = uri.getPath() & ( len( uri.getQuery() ?: "" ) ? "?" & uri.getQuery() : "" )
-		this.query = _parseQueryString( uri.getQuery() )
+		this.method = exchangeAdapter.getMethod()
+		this.path = exchangeAdapter.getPath()
+		this.originalUrl = this.path & ( len( queryString ) ? "?" & queryString : "" )
+		this.query = _parseQueryString( queryString )
 		this.params = {}
 		this.body = {}
 		this.files = {}
-		this.headers = _buildHeaderStruct( exchange.getRequestHeaders() )
+		this.headers = exchangeAdapter.getRequestHeaders()
 		this.cookies = _parseCookies( this.headers[ "Cookie" ] ?: "" )
-		this.ip = _resolveIp( exchange, settings )
+		this.ip = _resolveIp( exchangeAdapter, settings )
 		this.protocol = _resolveProtocol( settings )
 		this.secure = ( this.protocol == "https" )
 		this.hostname = _resolveHostname( settings )
@@ -30,15 +36,19 @@ class {
 	}
 
 	function rawExchange() {
-		return variables.exchange
+		return variables.exchangeAdapter.getRawExchange()
 	}
 
-	private function _buildHeaderStruct( javaHeaders ) {
-		var headerStruct = {}
-		for ( var key in javaHeaders.keySet() ) {
-			headerStruct[ key ] = javaHeaders.getFirst( key )
-		}
-		return headerStruct
+	/**
+	 * The raw request body as a java.io.InputStream, engine-neutral —
+	 * what body-reading middleware (BodyParsers.bx, Multipart.bx) should
+	 * use instead of rawExchange().getRequestBody()/getInputStream(),
+	 * since that method exists under a different name (or not at all)
+	 * per engine. rawExchange() itself is unchanged, for anyone who needs
+	 * genuinely engine-specific access beyond just the body stream.
+	 */
+	function bodyStream() {
+		return variables.exchangeAdapter.getRequestBodyStream()
 	}
 
 	private function _parseQueryString( rawQuery ) {
@@ -103,7 +113,7 @@ class {
 	 * single-value edge header is a different, safer trust model than a client-writable
 	 * multi-value one.
 	 */
-	private function _resolveIp( exchange, settings ) {
+	private function _resolveIp( exchangeAdapter, settings ) {
 		var trustedHeaders = settings[ "trust proxy header" ] ?: []
 		if ( !isArray( trustedHeaders ) ) {
 			trustedHeaders = [ trustedHeaders ]
@@ -121,11 +131,7 @@ class {
 				return forwardedFor.listFirst( "," ).trim()
 			}
 		}
-		try {
-			return exchange.getRemoteAddress().getAddress().getHostAddress()
-		} catch ( any e ) {
-			return ""
-		}
+		return exchangeAdapter.getRemoteAddress()
 	}
 
 	/**

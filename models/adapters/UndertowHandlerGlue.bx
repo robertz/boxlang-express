@@ -1,0 +1,18 @@
+/**
+ * Adapts an engine-neutral HttpBridge to Undertow's own
+ * io.undertow.server.HttpHandler interface (createDynamicProxy needs a
+ * class instance whose method matches the target interface — same pattern
+ * as ThreadRunnable.bx for java.lang.Runnable elsewhere in this repo).
+ */
+class {
+
+	function init( bridge ) {
+		variables.bridge = bridge
+		return this
+	}
+
+	function handleRequest( exchange ) {
+		variables.bridge.handle( new UndertowExchangeAdapter( exchange ) )
+	}
+
+}
