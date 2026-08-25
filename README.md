@@ -132,6 +132,12 @@ which matters for a repo whose own scripts live in subdirectories
   see [Views](#views-resrender) below
 - `app.listen(port, callback, options)` — starts the server and blocks the calling thread by default
 - `app.close()` — stops the server, and breaks a blocked `listen()` (from any thread)
+- `app.getConnectorStatistics()` — live HTTP-layer metrics straight from
+  Undertow's listener: active connections/requests, total request count,
+  bytes sent/received, error count, processing time. `null` before
+  `listen()` has run or after `close()`. Useful for a server-monitoring
+  dashboard alongside JVM/OS-level metrics (memory, CPU, GC), which don't
+  see anything at the HTTP layer.
 
 Node keeps a CLI process alive via its event loop; BoxLang's CLI runtime has
 no equivalent, so unlike Express, `listen()` blocks the calling thread by
@@ -978,6 +984,18 @@ Two more BoxLang-specific things that shaped how these are written:
   rather than `../fixtures/...`.
 
 ## Changelog
+
+**0.2.1**
+- Added `app.getConnectorStatistics()` — live HTTP-layer metrics straight
+  from Undertow's own listener (active connections/requests, total request
+  count, bytes sent/received, error count, processing time), for a
+  server-monitoring dashboard or similar that needs numbers
+  `java.lang.management`'s JVM/OS MXBeans can't see. `listen()` now turns
+  on `UndertowOptions.ENABLE_STATISTICS` unconditionally (off by default in
+  Undertow itself, but the per-request tracking overhead is negligible next
+  to everything else already happening per request here) — without it,
+  `getConnectorStatistics()` would just return `null` always instead of
+  real numbers. See [BoxExpress.bx](models/BoxExpress.bx).
 
 **0.2.0**
 - **Breaking:** BoxExpress's server transport is now

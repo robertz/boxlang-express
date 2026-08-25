@@ -109,6 +109,13 @@ class {
 	 * Exposed here instead of hardcoded higher still, since a reverse proxy in front
 	 * (already required — see req.secure) may queue connections itself and make a large
 	 * backlog here redundant.
+	 *
+	 * UndertowOptions.ENABLE_STATISTICS is turned on unconditionally — off by
+	 * default in Undertow itself since tracking adds a small amount of overhead
+	 * per request, but that cost is negligible next to everything else already
+	 * happening per request here (virtual thread dispatch, routing, BoxLang
+	 * closure invocation), and having it always on is what makes
+	 * getConnectorStatistics() below actually return something instead of null.
 	 */
 	function listen( port, callback, options = {} ) {
 		var backlog = options.backlog ?: 1024
@@ -134,6 +141,7 @@ class {
 		builder.addHttpListener( port, "0.0.0.0" )
 		builder.setHandler( proxy )
 		builder.setSocketOption( createObject( "java", "org.xnio.Options" ).BACKLOG, javacast( "int", backlog ) )
+		builder.setServerOption( createObject( "java", "io.undertow.UndertowOptions" ).ENABLE_STATISTICS, javacast( "boolean", true ) )
 
 		try {
 			variables.undertowServer = builder.build()
@@ -195,6 +203,31 @@ class {
 		}
 
 		return this
+	}
+
+	/**
+	 * Live request-level metrics straight from Undertow's own listener — active
+	 * connections/requests, total request count, bytes sent/received, error
+	 * count, and processing time. Complements JVM/OS-level monitoring (memory,
+	 * CPU, GC via java.lang.management) with the HTTP-layer numbers those
+	 * MXBeans can't see. Returns null before listen() has run, after close(),
+	 * or on the rare build where Undertow has no listener registered — always
+	 * non-null otherwise, since listen() unconditionally turns statistics
+	 * tracking on (see its docblock).
+	 *
+	 * @return {io.undertow.server.ConnectorStatistics} or null.
+	 */
+	function getConnectorStatistics() {
+		if ( isNull( variables.undertowServer ) ) {
+			return javacast( "null", "" )
+		}
+
+		var listeners = variables.undertowServer.getListenerInfo()
+		if ( listeners.isEmpty() ) {
+			return javacast( "null", "" )
+		}
+
+		return listeners.get( javacast( "int", 0 ) ).getConnectorStatistics()
 	}
 
 	/**
