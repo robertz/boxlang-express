@@ -96,6 +96,17 @@ class extends="testbox.system.BaseSpec" {
 				expect( result.statusCode ).toBe( 404 )
 			} )
 
+			it( "exposes live request counts via getConnectorStatistics()", function() {
+				var before = variables.app.getConnectorStatistics()
+				expect( before ).notToBeNull()
+				var countBefore = before.getRequestCount()
+
+				variables.client.get( variables.baseUrl & "/" )
+
+				var after = variables.app.getConnectorStatistics()
+				expect( after.getRequestCount() ).toBeGT( countBefore )
+			} )
+
 		} )
 	}
 
