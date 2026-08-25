@@ -1,10 +1,11 @@
 /**
  * Express-style request object, backed by an exchange adapter (see
- * models/adapters/) rather than a raw com.sun.net.httpserver.HttpExchange
- * directly — everything here reads the adapter once at construction into
- * plain BoxLang values, so the rest of this class (query/cookie parsing,
- * IP/hostname resolution) is already engine-neutral. rawExchange() is the
- * one deliberate exception — see JdkExchangeAdapter.bx's docblock.
+ * models/adapters/UndertowExchangeAdapter.bx) rather than a raw
+ * io.undertow.server.HttpServerExchange directly — everything here reads
+ * the adapter once at construction into plain BoxLang values, so the rest
+ * of this class (query/cookie parsing, IP/hostname resolution) doesn't
+ * touch Undertow's API at all. rawExchange() is the one deliberate
+ * exception — see UndertowExchangeAdapter.bx's docblock.
  */
 class {
 

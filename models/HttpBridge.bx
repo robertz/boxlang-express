@@ -1,11 +1,9 @@
 /**
- * Bridges an exchange adapter (see models/adapters/ — JdkExchangeAdapter,
- * UndertowExchangeAdapter) into the Request/Response/Router world. Fully
- * engine-neutral: unlike before Phase 2 step 2b, this class never
- * constructs an engine-specific adapter itself — each server adapter's own
- * small "handler glue" (JdkHandlerGlue, UndertowHandlerGlue) is responsible
- * for wrapping its engine's raw exchange type into the right adapter and
- * calling handle() with it. Never used directly by application code.
+ * Bridges an exchange adapter (see models/adapters/UndertowExchangeAdapter)
+ * into the Request/Response/Router world. Engine-neutral by construction:
+ * this class never builds the adapter itself — UndertowHandlerGlue wraps
+ * the raw Undertow exchange into an adapter and calls handle() with it.
+ * Never used directly by application code.
  */
 class {
 

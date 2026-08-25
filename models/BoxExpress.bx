@@ -8,16 +8,9 @@
 class {
 
 	/**
-	 * serverAdapter, if passed, is used as-is — an explicit override that
-	 * wins over app.set("server.engine", ...) below, e.g.
-	 *   new BoxExpress( new bxModules.boxexpress.models.adapters.UndertowHttpServerAdapter() )
-	 * Left unset (the normal case), the adapter is instead chosen from
-	 * app.set("server.engine", "jdk" | "undertow") at listen() time — not
-	 * here in init(), since settings are only populated by app.set() calls
-	 * made *after* construction, same reason every other setting in this
-	 * class (views, trust proxy, reloadOnChange, ...) is read lazily at the
-	 * point it matters rather than captured at construction. Defaults to
-	 * "jdk" if never set.
+	 * serverAdapter, if passed, is used as-is instead of the default
+	 * UndertowHttpServerAdapter — mainly for tests that want a fresh adapter
+	 * instance per app rather than sharing state.
 	 */
 	function init( serverAdapter = javacast( "null", "" ) ) {
 		this.settings = {}
@@ -29,7 +22,7 @@ class {
 		// didn't pass it, even though isNull() itself can check it safely. The
 		// ternary's false branch (the bare read) only evaluates when an
 		// argument really was passed, sidestepping the bug entirely.
-		variables.serverAdapter = isNull( serverAdapter ) ? javacast( "null", "" ) : serverAdapter
+		variables.serverAdapter = isNull( serverAdapter ) ? new adapters.UndertowHttpServerAdapter() : serverAdapter
 		variables.running = false
 		variables.reloadWatcher = javacast( "null", "" )
 		variables.shutdownHook = javacast( "null", "" )
@@ -119,24 +112,18 @@ class {
 	 * the server either way, and also breaks the blocking loop if something else (e.g.
 	 * a route handler, on its own virtual thread) calls it while listen() is blocked.
 	 *
-	 * options.backlog sets the TCP accept queue depth (default 1024). The JDK default
-	 * (passing 0 to HttpServer.create()) is small enough that a burst of concurrent
-	 * connections — well within what the virtual-thread executor itself can handle —
-	 * gets refused with a connection reset instead of queued, confirmed with a real
-	 * load test (ab): request handling stayed fast and error-free the whole time, but
-	 * new connections started getting reset once concurrency passed roughly 65-70 with
-	 * the JDK default, and raising the backlog alone pushed that past 150 with no other
-	 * change. Exposed here instead of hardcoded higher, since a reverse proxy in front
+	 * options.backlog sets the TCP accept queue depth (default 1024), passed through to
+	 * Undertow's org.xnio.Options.BACKLOG. A small backlog is enough that a burst of
+	 * concurrent connections — well within what the virtual-thread executor itself can
+	 * handle — can get refused with a connection reset instead of queued, which is why
+	 * this defaults higher than Undertow's own default rather than being left unset.
+	 * Exposed here instead of hardcoded higher still, since a reverse proxy in front
 	 * (already required — see req.secure) may queue connections itself and make a large
 	 * backlog here redundant.
 	 */
 	function listen( port, callback, options = {} ) {
 		var backlog = options.backlog ?: 1024
 		var bridge = new HttpBridge( variables.router, this.settings, this.locals )
-
-		if ( isNull( variables.serverAdapter ) ) {
-			variables.serverAdapter = _resolveServerAdapter()
-		}
 
 		try {
 			variables.serverAdapter.start( port, backlog, bridge )
@@ -193,29 +180,6 @@ class {
 		variables.serverAdapter.stop()
 
 		return this
-	}
-
-	/**
-	 * app.set("server.engine", "jdk" | "undertow") picks the HttpServerAdapter
-	 * at listen() time — "jdk" (also the default when never set) for
-	 * JdkHttpServerAdapter, "undertow" for UndertowHttpServerAdapter. Throws
-	 * immediately on anything else rather than silently falling back to the
-	 * default — a typo'd engine name should be loud, not a surprise about
-	 * which server actually ended up running.
-	 */
-	private function _resolveServerAdapter() {
-		var engine = this.settings[ "server.engine" ] ?: "jdk"
-		switch ( engine ) {
-			case "jdk":
-				return new adapters.JdkHttpServerAdapter()
-			case "undertow":
-				return new adapters.UndertowHttpServerAdapter()
-			default:
-				throw(
-					message = "Unknown server.engine ""#engine#"" — expected ""jdk"" or ""undertow""",
-					type = "BoxExpress.UnknownServerEngine"
-				)
-		}
 	}
 
 	/**

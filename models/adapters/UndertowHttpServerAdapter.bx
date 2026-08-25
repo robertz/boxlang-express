@@ -1,12 +1,6 @@
 /**
- * HttpServerAdapter backed by io.undertow.Undertow — an alternative to the
- * default JdkHttpServerAdapter.bx (see that class for the full adapter
- * contract; this implements the same start()/stop() shape).
- *
- * Not wired into BoxExpress.bx's default startup path yet — that's
- * Phase 4 of the Undertow-adapter plan (a config option to select the
- * engine at boot). This class exists and is verified for parity now;
- * choosing it is a separate step.
+ * HttpServerAdapter backed by io.undertow.Undertow — BoxExpress's server
+ * transport. Contract: start(port, backlog, bridge) / stop().
  */
 class {
 

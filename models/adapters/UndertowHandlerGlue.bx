@@ -2,8 +2,7 @@
  * Adapts an engine-neutral HttpBridge to Undertow's own
  * io.undertow.server.HttpHandler interface (createDynamicProxy needs a
  * class instance whose method matches the target interface — same pattern
- * as JdkHandlerGlue.bx for the JDK adapter, and ThreadRunnable.bx for
- * java.lang.Runnable elsewhere in this repo).
+ * as ThreadRunnable.bx for java.lang.Runnable elsewhere in this repo).
  */
 class {
 

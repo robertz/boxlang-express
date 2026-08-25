@@ -1,7 +1,8 @@
 /**
  * Express-style response object, backed by an exchange adapter (see
- * models/adapters/) rather than a raw com.sun.net.httpserver.HttpExchange
- * directly. All terminal methods (send/json/sendStatus/redirect) funnel
+ * models/adapters/UndertowExchangeAdapter.bx) rather than a raw
+ * io.undertow.server.HttpServerExchange directly. All terminal methods
+ * (send/json/sendStatus/redirect) funnel
  * through _end() which writes headers + body exactly once via the adapter.
  */
 class {

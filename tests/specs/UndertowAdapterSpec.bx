@@ -1,16 +1,17 @@
 /**
- * Dedicated coverage for the Undertow-backed HttpServerAdapter (Phase 3 of
- * the Undertow-adapter plan) — not a full parity suite (that's Phase 5's
- * job, running the *whole* existing suite against both engines), just
- * regression coverage for this adapter's own code, including the real bug
- * found while building it: Undertow dispatches handlers on its own I/O
- * thread by default, where blocking body reads throw
- * IllegalStateException — fixed with io.undertow.server.handlers.
- * BlockingHandler, verified here by actually exercising a JSON body.
+ * Dedicated coverage for the Undertow-backed HttpServerAdapter, BoxExpress's
+ * server transport. Not a full behavior suite (that's what the rest of
+ * tests/specs/ already exercises against this same adapter via the default
+ * `new BoxExpress()`) — just regression coverage for this adapter's own
+ * code, including the real bug found while building it: Undertow dispatches
+ * handlers on its own I/O thread by default, where blocking body reads
+ * throw IllegalStateException — fixed with
+ * io.undertow.server.handlers.BlockingHandler, verified here by actually
+ * exercising a JSON body.
  *
- * Constructs BoxExpress with an explicit UndertowHttpServerAdapter override
- * rather than relying on the default (still the JDK adapter — engine
- * selection is Phase 4, not built yet).
+ * Constructs BoxExpress with an explicit UndertowHttpServerAdapter instance
+ * (rather than relying on the default) only so each test gets its own
+ * adapter instance instead of sharing one.
  */
 class extends="testbox.system.BaseSpec" {
 
@@ -88,7 +89,7 @@ class extends="testbox.system.BaseSpec" {
 				expect( result.statusCode ).toBe( 404 )
 			} )
 
-			it( "throws type=BoxExpress.PortInUse when the port is already bound, same as the JDK adapter", function() {
+			it( "throws type=BoxExpress.PortInUse when the port is already bound", function() {
 				// Testing the adapter's own start() directly, not
 				// BoxExpress.listen() — listen() catches this type and
 				// calls System.exit(1) for the real "friendly message and

@@ -1,19 +1,21 @@
 /**
  * Wraps a single io.undertow.server.HttpServerExchange, implementing the
- * same exchange-adapter contract as JdkExchangeAdapter.bx (see that file's
- * docblock for the full contract and the getRawExchange() exception it
- * documents — identical here, just backed by Undertow's own API instead
- * of the JDK's).
+ * exchange-adapter contract that Request.bx/Response.bx are built against:
+ * getRawExchange(), getMethod(), getPath(), getQueryString(),
+ * getRequestHeaders(), getRemoteAddress(), getRequestBodyStream(),
+ * setHeader()/addHeader()/getHeader(), sendBody()/sendHeadersOnly().
+ * getRawExchange() is a deliberate, documented escape hatch — see
+ * Request.bx's rawExchange() docblock — everything else here is
+ * engine-neutral by construction.
  *
  * Every method name/signature below was verified directly against a real
  * running Undertow server before writing this (not assumed from docs):
- * getRequestPath() returns the decoded path with no query string, same
- * shape as the JDK adapter's getPath(); getQueryString() returns "" (not
- * null) when absent; HeaderMap's put()/add()/getFirst() map onto
- * setHeader()/addHeader()/getHeader() the same way the JDK's Headers
- * class does; getResponseSender().send(ByteBuffer) both writes the body
- * and finalizes the exchange in one call, confirmed against a real
- * response over the wire.
+ * getRequestPath() returns the decoded path with no query string;
+ * getQueryString() returns "" (not null) when absent; HeaderMap's
+ * put()/add()/getFirst() map onto setHeader()/addHeader()/getHeader();
+ * getResponseSender().send(ByteBuffer) both writes the body and finalizes
+ * the exchange in one call, confirmed against a real response over the
+ * wire.
  */
 class {
 
@@ -56,8 +58,7 @@ class {
 	}
 
 	/**
-	 * The raw request body as a java.io.InputStream — same contract as
-	 * JdkExchangeAdapter's getRequestBodyStream(). Undertow's exchange
+	 * The raw request body as a java.io.InputStream. Undertow's exchange
 	 * needs startBlocking() called first (confirmed directly — without it,
 	 * getInputStream() throws "Cannot get stream as startBlocking has not
 	 * been invoked"); safe to call here since UndertowHttpServerAdapter
