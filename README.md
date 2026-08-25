@@ -87,8 +87,10 @@ ln -s /path/to/boxlang-express boxlang_modules/boxexpress
 
 ## Hacking on BoxExpress itself
 
-Requires BoxLang (tested against 1.15.0) on the JVM. No external dependencies
-beyond TestBox for the test suite (`box install`).
+Requires BoxLang (tested against 1.15.0) on the JVM. Undertow and its
+transitive runtime dependencies (XNIO, JBoss Logging, etc.) are vendored in
+`libs/` — nothing to install for those. TestBox is the only thing that
+needs pulling in, and only for the test suite (`box install`).
 
 ```bash
 boxlang examples/server.bxs
@@ -282,7 +284,7 @@ Works the same on a standalone `Router` — `router.route(path)`.
 `req.headers`, `req.get(name)`, `req.cookies`, `req.ip`, `req.protocol`,
 `req.secure`, `req.hostname`, `req.body` (populated by body-parsing
 middleware, empty struct otherwise), `req.rawExchange()` (an escape hatch to
-the underlying `com.sun.net.httpserver.HttpExchange`, for anything not
+the underlying `io.undertow.server.HttpServerExchange`, for anything not
 covered by the rest of the API).
 
 `req.ip` is always the direct TCP peer by default — safe, since a client
@@ -929,16 +931,27 @@ or a `pretest` script). Structure:
 
 - `tests/specs/RouterSpec.bx` — unit tests for path matching and the
   middleware/`next()` chain, using lightweight fake `req`/`res` structs
-  instead of a real `HttpExchange` (Router never touches anything else).
+  instead of a real exchange (Router never touches anything else).
 - `tests/specs/BoxExpressIntegrationSpec.bx` — spins up a real app on
   `localhost:4321` in `beforeAll()` and hits it with real HTTP requests
-  (`tests/helpers/HttpClient.bx`, a thin `HttpURLConnection` wrapper),
-  exercising `Request`/`Response`/`BodyParsers`/`StaticFiles`/`render()`
-  together, plus a concurrency check using `bx:thread`.
+  (`tests/helpers/HttpClient.bx`, a thin `java.net.http.HttpClient`
+  wrapper), exercising `Request`/`Response`/`BodyParsers`/`StaticFiles`/
+  `render()` together, plus a concurrency check using `bx:thread`.
 - `tests/specs/BifsSpec.bx` — the same idea, but built entirely through the
   global BIFs (`boxExpress()`, `boxExpressJSON()`, etc.) on `localhost:4322`,
   to make sure the friendly entry points actually work, not just the
   underlying classes.
+- `tests/specs/UndertowAdapterSpec.bx` — dedicated regression coverage for
+  BoxExpress's Undertow wiring specifically (`models/adapters/`), including
+  the real bugs found while building it: reading a request body from
+  Undertow's own I/O thread, and confirming each request actually runs on
+  its own virtual thread rather than Undertow's default worker pool.
+- `tests/specs/ProcessLifecycleSpec.bx` — the handful of behaviors that need
+  a real OS process boundary rather than an in-process `block: false`
+  server: a clean exit (not a raw stack trace) on a port conflict, a real
+  `SIGTERM` releasing the socket, and `reloadOnChange` actually replacing
+  the running process. Spawns `boxlang` as a real subprocess against a
+  generated script and asserts on its stdout/exit code.
 - `tests/fixtures/` — a static file and a `.bxm` view the integration specs
   serve/render.
 
@@ -1329,7 +1342,7 @@ default 404/500 handling.
 `static` are reserved BoxLang scope names — assigning a variable one of those
 names silently shadows the built-in scope instead of erroring at parse time,
 which produces confusing runtime errors. This codebase avoids all of them
-(e.g. `httpServer` instead of `server`, `formData` instead of `form`, the
+(e.g. `undertowServer` instead of `server`, `formData` instead of `form`, the
 static-file middleware class is named `StaticFiles` rather than `Static`).
 
 `JSONSerialize()` (and therefore `res.json()`) only serializes literal
