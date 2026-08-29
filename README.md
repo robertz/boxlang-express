@@ -1,5 +1,7 @@
 # BoxExpress
 
+[![Tests](https://github.com/robertz/boxlang-express/actions/workflows/test.yml/badge.svg)](https://github.com/robertz/boxlang-express/actions/workflows/test.yml)
+
 An Express.js-style web framework for BoxLang. Runs as a standalone HTTP server
 (backed by [Undertow](https://undertow.io/), with a virtual thread per
 request) — no servlet container required.
