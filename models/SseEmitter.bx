@@ -28,6 +28,14 @@ class {
 	/**
 	 * Sends one SSE event. Complex data is JSON-serialized; every line of a
 	 * multi-line payload gets its own "data: " prefix, per the SSE spec.
+	 *
+	 * event/id are single-line SSE fields — unlike data, which is safely
+	 * split per-line above, an embedded newline in event/id would let a
+	 * caller that pipes request-derived input into either one (a channel
+	 * name, a correlation ID) inject a fabricated data:/event:/id: line, or
+	 * a blank line starting an entirely new, attacker-defined event, into
+	 * every client reading this stream. Stripped here rather than trusted
+	 * to every caller, same reasoning as CRLF-stripping a header value.
 	 */
 	function send( data, event = "", id = "" ) {
 		if ( variables.closed ) {
@@ -37,10 +45,10 @@ class {
 		var payload = isSimpleValue( data ) ? toString( data ) : JSONSerialize( data )
 		var frame = ""
 		if ( len( id ) ) {
-			frame &= "id: #id#" & char( 10 )
+			frame &= "id: #_stripNewlines( id )#" & char( 10 )
 		}
 		if ( len( event ) ) {
-			frame &= "event: #event#" & char( 10 )
+			frame &= "event: #_stripNewlines( event )#" & char( 10 )
 		}
 		for ( var line in payload.listToArray( char( 10 ) ) ) {
 			frame &= "data: #line#" & char( 10 )
@@ -54,11 +62,12 @@ class {
 	/**
 	 * An SSE comment line (":..." — invisible to the client's event
 	 * listeners) — used for keep-alives to hold a connection open through
-	 * proxies/load balancers that time out idle sockets.
+	 * proxies/load balancers that time out idle sockets. Same newline-
+	 * stripping as send()'s event/id — text is a single comment line here.
 	 */
 	function comment( text ) {
 		if ( !variables.closed ) {
-			_write( ": #text#" & char( 10 ) & char( 10 ) )
+			_write( ": #_stripNewlines( text )#" & char( 10 ) & char( 10 ) )
 		}
 		return this
 	}
@@ -85,6 +94,10 @@ class {
 	 */
 	function isClosed() {
 		return variables.closed
+	}
+
+	private function _stripNewlines( str ) {
+		return toString( str ).replace( char( 13 ), "", "all" ).replace( char( 10 ), "", "all" )
 	}
 
 	private function _write( str ) {
