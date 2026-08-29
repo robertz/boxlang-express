@@ -11,7 +11,30 @@ on:
   pull_request:
 
 jobs:
+  # TestBox (and its own transitive deps — cbstreams, cbproxies, cbMockData,
+  # globber) is a `box install` devDependency (box.json), gitignored rather
+  # than committed — regenerate it once here via real CommandBox and hand it
+  # to every matrix job below as an artifact, instead of each job trying to
+  # fetch it itself. install-bx-module can't resolve all of TestBox's own
+  # dependencies (confirmed: 404s on cbMockData/globber), so this has to be
+  # actual CommandBox, not the plain BoxLang CLI image used for the test run.
+  install-deps:
+    runs-on: ubuntu-latest
+    container:
+      image: ortussolutions/commandbox:boxlang
+    steps:
+      - uses: actions/checkout@v4
+      - run: box install
+      - uses: actions/upload-artifact@v4
+        with:
+          name: box-dependencies
+          path: |
+            testbox/
+            boxlang_modules/
+          retention-days: 1
+
   test:
+    needs: install-deps
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -34,6 +57,10 @@ jobs:
       image: ortussolutions/boxlang:${{ matrix.tag }}
     steps:
       - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: box-dependencies
 
       - name: Register this checkout as a BoxLang module
         run: boxlang setup-tests.bxs
