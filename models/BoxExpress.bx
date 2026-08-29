@@ -61,6 +61,18 @@ class {
 
 	function set( name, value ) {
 		this.settings[ name ] = value
+		// Response.render() does a plain `include` on an absolute path it has already
+		// canonicalized and verified is inside this directory (its own path-traversal
+		// check). BoxLang core no longer resolves an absolute include path unless it's
+		// backed by a registered mapping — that check is intentional (BoxLang won't
+		// implicitly trust a bare absolute path), so this registers one instead of
+		// asking BoxLang to bypass it. Registered once here at app-configuration time
+		// (not per-request from render()) since Configuration.mappings is a sorted,
+		// non-concurrent structure — safe for the single-threaded startup sequence,
+		// not for concurrent virtual-thread request handlers.
+		if ( lCase( name ) == "views" ) {
+			getBoxRuntime().getConfiguration().registerMapping( value, value )
+		}
 		return this
 	}
 
