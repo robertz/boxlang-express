@@ -438,9 +438,15 @@ app.get( "/events", ( req, res ) => {
 
 `emitter.send(data, event, id)` writes one SSE event — `data` is
 JSON-serialized unless it's already a simple value, `event`/`id` are
-optional. `emitter.comment(text)` sends an SSE comment line (invisible to
-the client, useful as a keep-alive through a proxy that times out idle
-connections). `emitter.close()` ends the stream; `res.sse()` also closes
+optional. `data` is split per-line so a multi-line payload can't break out
+of its own field; `event`/`id` are single-line fields, so any `char(13)`/
+`char(10)` in them is stripped before writing, since either one is
+commonly a candidate for request-derived input (a channel name, a
+correlation ID) — without stripping, an embedded newline there would let
+a client inject a fabricated event into the stream every other client
+reading it sees. `emitter.comment(text)` sends an SSE comment line
+(invisible to the client, useful as a keep-alive through a proxy that
+times out idle connections; same newline-stripping applies). `emitter.close()` ends the stream; `res.sse()` also closes
 it in a `finally`, so a callback that throws or returns without calling
 `close()` itself still ends the stream cleanly rather than leaking an open
 connection. `emitter.isClosed()` goes `true` the moment a write fails
@@ -1074,6 +1080,21 @@ Two more BoxLang-specific things that shaped how these are written:
   rather than `../fixtures/...`.
 
 ## Changelog
+
+**0.2.4**
+- **Security fix:** `SseEmitter.send()`'s `event`/`id` arguments and
+  `comment()`'s `text` argument were concatenated directly into their SSE
+  field lines with no newline stripping — unlike `data`, which is safely
+  split per-line. An embedded `char(10)` in either let a caller that pipes
+  request-derived input into `event`/`id` (a channel name, a correlation
+  ID) have a client inject a fabricated `data:`/`event:`/`id:` line, or a
+  blank line starting an entirely new, attacker-defined event, into the
+  stream every other client reading it sees — a cross-client message-
+  spoofing primitive, the same class of issue as CRLF injection in a
+  response header value. Found in a security review, not by a report.
+  `event`/`id`/`comment()`'s `text` are now stripped of `char(13)`/
+  `char(10)` before being written. See
+  [SseEmitter.bx](models/SseEmitter.bx).
 
 **0.2.3**
 - **Fix:** `res.render()` on BoxLang 1.17.0 was still broken after 0.1.8's
