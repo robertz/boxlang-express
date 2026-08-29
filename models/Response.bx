@@ -385,6 +385,53 @@ class {
 		return _end( dumpHtml.getBytes( "UTF-8" ) )
 	}
 
+	/**
+	 * Server-Sent Events. Bypasses the normal buffered send entirely — every
+	 * other terminal method builds one byte array and funnels through _end()
+	 * for a single write, but an SSE response stays open and writes
+	 * incrementally as callback calls emitter.send(). callback receives an
+	 * SseEmitter (send/comment/close/isClosed()) and is expected to close()
+	 * it when done; sse() also closes it in a finally, so a callback that
+	 * throws or just returns without calling close() itself still ends the
+	 * stream cleanly rather than leaking an open connection.
+	 *
+	 * Sets Content-Type/Cache-Control/Connection plus X-Accel-Buffering: no,
+	 * the header that stops a reverse proxy (nginx, Cloudflare) from
+	 * buffering the stream and defeating the whole point of it — same
+	 * header BoxLang's own SSE() BIF sets, though that BIF itself isn't
+	 * usable here: it lives in the boxlang-web-support runtime module
+	 * (MiniServer/CommandBox/servlet deployments), which BoxExpress doesn't
+	 * load — confirmed directly that calling SSE() from a route handler
+	 * throws "Function [SSE] not found".
+	 */
+	function sse( callback ) {
+		if ( variables.sent ) {
+			throw( message = "Response already sent for this request", type = "BoxExpress.ResponseAlreadySent" )
+		}
+		variables.sent = true
+
+		for ( var beforeSendCallback in variables.beforeSendCallbacks ) {
+			beforeSendCallback()
+		}
+
+		variables.exchangeAdapter.setStatusCode( variables.statusCode )
+		set( "Content-Type", "text/event-stream" )
+		set( "Cache-Control", "no-cache" )
+		set( "Connection", "keep-alive" )
+		set( "X-Accel-Buffering", "no" )
+
+		var outStream = variables.exchangeAdapter.getResponseOutputStream()
+		var emitter = new SseEmitter( outStream )
+
+		try {
+			callback( emitter )
+		} finally {
+			emitter.close()
+		}
+
+		return this
+	}
+
 	private function _end( bodyBytes ) {
 		if ( variables.sent ) {
 			throw( message = "Response already sent for this request", type = "BoxExpress.ResponseAlreadySent" )

@@ -1,0 +1,145 @@
+/**
+ * Regression coverage for Response.sse() / SseEmitter.bx — Server-Sent
+ * Events. Confirmed directly before building this that BoxLang's own
+ * SSE() BIF isn't reachable from a BoxExpress route handler (it lives in
+ * the boxlang-web-support runtime module BoxExpress doesn't load, and
+ * throws "Function [SSE] not found" when called), so this is a from-
+ * scratch implementation against Undertow's raw exchange, not a wrapper
+ * around that BIF.
+ */
+class extends="testbox.system.BaseSpec" {
+
+	function beforeAll() {
+		variables.testPort = 4790
+		variables.baseUrl = "http://localhost:#variables.testPort#"
+		variables.client = new "../helpers/HttpClient"()
+
+		variables.app = new "../../models/BoxExpress"()
+
+		variables.app.get( "/events", ( req, res ) => {
+			res.sse( ( emitter ) => {
+				emitter.send( "hello" )
+				emitter.send( { status: "processing", progress: 50 }, "update" )
+				emitter.send( { complete: true }, "done", "123" )
+				emitter.close()
+			} )
+		} )
+
+		variables.app.get( "/events-no-explicit-close", ( req, res ) => {
+			res.sse( ( emitter ) => {
+				emitter.send( "one event, no emitter.close() call" )
+				// sse() itself closes the stream in a finally — this route
+				// exists to prove that happens even when the callback
+				// doesn't call close() itself.
+			} )
+		} )
+
+		variables.app.get( "/events-throws", ( req, res ) => {
+			res.sse( ( emitter ) => {
+				emitter.send( "before the throw" )
+				throw( message = "boom mid-stream", type = "TestError" )
+			} )
+		} )
+
+		variables.app.listen( port = variables.testPort, options = { block: false } )
+		sleep( 300 )
+	}
+
+	function afterAll() {
+		variables.app.close()
+	}
+
+	function run() {
+		describe( "Response.sse()", function() {
+
+			it( "sets the standard SSE response headers", function() {
+				var result = variables.client.get( variables.baseUrl & "/events" )
+				expect( result.statusCode ).toBe( 200 )
+				expect( result.contentType ).toInclude( "text/event-stream" )
+				expect( result.getHeader( "Cache-Control" ) ).toBe( "no-cache" )
+				expect( result.getHeader( "X-Accel-Buffering" ) ).toBe( "no" )
+			} )
+
+			it( "writes correctly framed SSE events — plain text, JSON payload with an event name, and an id", function() {
+				var result = variables.client.get( variables.baseUrl & "/events" )
+				var body = result.body
+
+				expect( body ).toInclude( "data: hello" & char( 10 ) & char( 10 ) )
+				expect( body ).toInclude( "event: update" & char( 10 ) & 'data: {"progress":50,"status":"processing"}' )
+				expect( body ).toInclude( "id: 123" & char( 10 ) & "event: done" & char( 10 ) & 'data: {"complete":true}' )
+			} )
+
+			it( "closes the stream even when the callback never calls emitter.close() itself", function() {
+				var result = variables.client.get( variables.baseUrl & "/events-no-explicit-close" )
+				expect( result.statusCode ).toBe( 200 )
+				expect( result.body ).toInclude( "data: one event, no emitter.close() call" )
+			} )
+
+			it( "closes the stream cleanly when the callback throws partway through", function() {
+				var result = variables.client.get( variables.baseUrl & "/events-throws" )
+				expect( result.statusCode ).toBe( 200 )
+				expect( result.body ).toInclude( "data: before the throw" )
+			} )
+
+			it( "throws BoxExpress.ResponseAlreadySent if a normal terminal method already sent this response", function() {
+				var throwawayPort = 4791
+				var throwawayApp = new "../../models/BoxExpress"()
+				throwawayApp.get( "/", ( req, res ) => {
+					res.send( "already sent" )
+					expect( function() {
+						res.sse( ( emitter ) => {} )
+					} ).toThrow( "BoxExpress.ResponseAlreadySent" )
+				} )
+				throwawayApp.listen( port = throwawayPort, options = { block: false } )
+				sleep( 300 )
+
+				try {
+					variables.client.get( "http://localhost:#throwawayPort#/" )
+				} finally {
+					throwawayApp.close()
+				}
+			} )
+
+			it( "detects a client disconnect mid-stream via emitter.isClosed(), without polling", function() {
+				var socket = createObject( "java", "java.net.Socket" ).init( "localhost", variables.testPort )
+				var out = socket.getOutputStream()
+				var crlf = char( 13 ) & char( 10 )
+
+				// A dedicated route, registered here so its closure can see
+				// this test's own variables — sends a burst of events, then
+				// checks isClosed() after the socket below is closed on it.
+				variables.disconnectDetected = false
+				variables.app.get( "/events-disconnect-test", ( req, res ) => {
+					res.sse( ( emitter ) => {
+						var attempts = 0
+						while ( !emitter.isClosed() && attempts < 20 ) {
+							emitter.send( "tick" )
+							attempts++
+							sleep( 50 )
+						}
+						variables.disconnectDetected = emitter.isClosed()
+					} )
+				} )
+
+				out.write( ( "GET /events-disconnect-test HTTP/1.1" & crlf & "Host: localhost" & crlf & "Connection: close" & crlf & crlf ).getBytes( "UTF-8" ) )
+				out.flush()
+
+				// Read just enough to know the response started, then yank
+				// the connection out from under the still-running handler.
+				var reader = createObject( "java", "java.io.BufferedReader" ).init( createObject( "java", "java.io.InputStreamReader" ).init( socket.getInputStream() ) )
+				reader.readLine()
+				socket.close()
+
+				var waited = 0
+				while ( !variables.disconnectDetected && waited < 2000 ) {
+					sleep( 100 )
+					waited += 100
+				}
+
+				expect( variables.disconnectDetected ).toBeTrue( "emitter.isClosed() should have gone true once the client disconnected, instead of the loop running to its attempts cap" )
+			} )
+
+		} )
+	}
+
+}

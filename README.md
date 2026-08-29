@@ -327,11 +327,12 @@ otherwise observe a request's outcome), `res.onBeforeSend(callback)`
 headers are actually flushed — the one point guaranteed to run after every
 downstream middleware/handler but still early enough to add a header; the
 session middleware's cookie-vs-`saveUninitialized` decision is what this
-was built for).
+was built for), `res.sse(callback)` (Server-Sent Events — see
+[below](#server-sent-events-ressse) for the full shape).
 
 Calling a second terminal method (`send`/`json`/`redirect`/`end`/`sendBytes`/
-`sendFile`/`download`/`render`/`dump`) on the same response throws — mirrors
-Express's "headers already sent".
+`sendFile`/`download`/`render`/`dump`/`sse`) on the same response throws —
+mirrors Express's "headers already sent".
 
 `res.dump(data)` only forwards `data` to BoxLang's `dump()` BIF — none of
 its other options (`label`, `expand`, `top`, etc.). It round-trips the HTML
@@ -417,6 +418,58 @@ minimal static-file servers make: a request naming more than one range
 `multipart/byteranges` reply, and `If-Range` (a conditional range against a
 validator) isn't supported — a `Range` request is always attempted
 regardless of freshness. See [RangeParser.bx](models/RangeParser.bx).
+
+#### Server-Sent Events (`res.sse`)
+
+`res.sse(callback)` opens a long-lived, one-way event stream to the
+client — the callback receives an `emitter` and writes to it as events
+happen, instead of building one response body up front:
+
+```js
+app.get( "/events", ( req, res ) => {
+	res.sse( ( emitter ) => {
+		emitter.send( "hello" )
+		emitter.send( { status: "processing", progress: 50 }, "update" )
+		emitter.send( { complete: true }, "done" )
+		emitter.close()
+	} )
+} )
+```
+
+`emitter.send(data, event, id)` writes one SSE event — `data` is
+JSON-serialized unless it's already a simple value, `event`/`id` are
+optional. `emitter.comment(text)` sends an SSE comment line (invisible to
+the client, useful as a keep-alive through a proxy that times out idle
+connections). `emitter.close()` ends the stream; `res.sse()` also closes
+it in a `finally`, so a callback that throws or returns without calling
+`close()` itself still ends the stream cleanly rather than leaking an open
+connection. `emitter.isClosed()` goes `true` the moment a write fails
+(the client disconnected) — check it in a loop to stop work early rather
+than continuing to compute updates nobody's listening for:
+
+```js
+app.get( "/dashboard/stream", ( req, res ) => {
+	res.sse( ( emitter ) => {
+		while ( !emitter.isClosed() ) {
+			emitter.send( { activeUsers: getActiveUserCount() }, "metrics" )
+			sleep( 1000 )
+		}
+	} )
+} )
+```
+
+Sets `Content-Type: text/event-stream`, `Cache-Control: no-cache`,
+`Connection: keep-alive`, and `X-Accel-Buffering: no` — that last one
+stops a reverse proxy (nginx, Cloudflare) from buffering the stream and
+defeating the whole point of it.
+
+This isn't a wrapper around BoxLang's own `SSE()` BIF — confirmed directly
+that it isn't reachable here at all (`Function [SSE] not found`), since it
+lives in the `boxlang-web-support` runtime module that MiniServer/
+CommandBox/servlet deployments load and BoxExpress doesn't. `res.sse()`'s
+`emitter` API deliberately mirrors that BIF's shape anyway, since it's a
+proven design — just implemented from scratch against Undertow's own raw
+exchange (`req.rawExchange()`). See [SseEmitter.bx](models/SseEmitter.bx).
 
 ### Views (`res.render`)
 
@@ -984,6 +1037,23 @@ Two more BoxLang-specific things that shaped how these are written:
   rather than `../fixtures/...`.
 
 ## Changelog
+
+**0.2.2**
+- Added `res.sse(callback)` — Server-Sent Events, a long-lived one-way
+  event stream to the client. Not a wrapper around BoxLang's own `SSE()`
+  BIF — confirmed directly that it isn't callable from a BoxExpress route
+  handler at all (`Function [SSE] not found`), since it lives in the
+  `boxlang-web-support` runtime module that BoxExpress doesn't load
+  (BoxExpress implements its own HTTP layer directly against Undertow
+  instead). `res.sse()`'s `emitter.send()`/`comment()`/`close()`/
+  `isClosed()` API deliberately mirrors that BIF's shape anyway, since
+  it's a proven design — just built from scratch against Undertow's raw
+  exchange. Bypasses the normal buffered `_end()` path entirely (every
+  other terminal method builds one byte array and sends it once; this
+  writes incrementally as `emitter.send()` is called), and detects a
+  client disconnect from a failed write rather than polling connection
+  state. See [SseEmitter.bx](models/SseEmitter.bx) and the
+  [Server-Sent Events](#server-sent-events-ressse) docs above.
 
 **0.2.1**
 - Added `app.getConnectorStatistics()` — live HTTP-layer metrics straight
