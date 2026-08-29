@@ -139,6 +139,65 @@ class extends="testbox.system.BaseSpec" {
 				expect( variables.disconnectDetected ).toBeTrue( "emitter.isClosed() should have gone true once the client disconnected, instead of the loop running to its attempts cap" )
 			} )
 
+			it( "serializes concurrent send() calls from separate threads without interleaving/corrupting the SSE framing", function() {
+				// Same emitter, 5 threads writing 25 events each at once —
+				// a real regression test for the send()/close() lock, not
+				// just a design claim. bx:thread bodies don't close over an
+				// enclosing closure's local variables (confirmed directly —
+				// referencing `emitter` without passing it as an attribute
+				// throws "key [emitter] was not located in any scope"), so
+				// it has to be passed explicitly, unquoted so the object
+				// reference survives rather than getting stringified.
+				variables.app.get( "/broadcast-test", ( req, res ) => {
+					res.sse( ( emitter ) => {
+						bx:thread name="sseWriter1" emitterRef=emitter writerIndex="1" {
+							for ( var i = 1; i <= 25; i++ ) {
+								attributes.emitterRef.send( "writer-#attributes.writerIndex#-msg-#i#", "test" )
+							}
+						}
+						bx:thread name="sseWriter2" emitterRef=emitter writerIndex="2" {
+							for ( var i = 1; i <= 25; i++ ) {
+								attributes.emitterRef.send( "writer-#attributes.writerIndex#-msg-#i#", "test" )
+							}
+						}
+						bx:thread name="sseWriter3" emitterRef=emitter writerIndex="3" {
+							for ( var i = 1; i <= 25; i++ ) {
+								attributes.emitterRef.send( "writer-#attributes.writerIndex#-msg-#i#", "test" )
+							}
+						}
+						bx:thread name="sseWriter4" emitterRef=emitter writerIndex="4" {
+							for ( var i = 1; i <= 25; i++ ) {
+								attributes.emitterRef.send( "writer-#attributes.writerIndex#-msg-#i#", "test" )
+							}
+						}
+						bx:thread name="sseWriter5" emitterRef=emitter writerIndex="5" {
+							for ( var i = 1; i <= 25; i++ ) {
+								attributes.emitterRef.send( "writer-#attributes.writerIndex#-msg-#i#", "test" )
+							}
+						}
+						bx:thread action="join" name="sseWriter1,sseWriter2,sseWriter3,sseWriter4,sseWriter5";
+						emitter.close()
+					} )
+				} )
+
+				var result = variables.client.get( variables.baseUrl & "/broadcast-test" )
+				var dataLines = []
+				for ( var bodyLine in result.body.listToArray( char( 10 ) ) ) {
+					if ( bodyLine.left( 6 ) == "data: " ) {
+						dataLines.append( bodyLine.mid( 7, bodyLine.len() - 6 ) )
+					}
+				}
+
+				expect( dataLines.len() ).toBe( 125 )
+
+				var seen = {}
+				for ( var dataLine in dataLines ) {
+					expect( reFind( "^writer-\d+-msg-\d+$", dataLine ) ).toBeTrue( "malformed/interleaved line: #dataLine#" )
+					expect( structKeyExists( seen, dataLine ) ).toBeFalse( "duplicate line (a torn write got double-counted): #dataLine#" )
+					seen[ dataLine ] = true
+				}
+			} )
+
 		} )
 	}
 

@@ -8,12 +8,20 @@
  * servlet deployments), which BoxExpress doesn't load; confirmed directly
  * that calling SSE() from a BoxExpress route handler throws "Function
  * [SSE] not found".
+ *
+ * send()/comment()/close() are safe to call from more than one thread —
+ * e.g. a route handler holding onto an emitter to broadcast to it, while
+ * the connection's own res.sse() callback is still running concurrently
+ * on its own virtual thread. Both funnel through the same named lock, so
+ * two writes can't interleave their bytes on the shared OutputStream and
+ * corrupt the SSE framing.
  */
 class {
 
 	function init( outStream ) {
 		variables.outStream = outStream
 		variables.closed = false
+		variables.lockName = "SseEmitter-" & createUUID()
 		return this
 	}
 
@@ -57,10 +65,14 @@ class {
 
 	function close() {
 		if ( !variables.closed ) {
-			variables.closed = true
-			try {
-				variables.outStream.close()
-			} catch ( any e ) {
+			lock name="#variables.lockName#" type="exclusive" timeout="5" {
+				if ( !variables.closed ) {
+					variables.closed = true
+					try {
+						variables.outStream.close()
+					} catch ( any e ) {
+					}
+				}
 			}
 		}
 		return this
@@ -76,11 +88,16 @@ class {
 	}
 
 	private function _write( str ) {
-		try {
-			variables.outStream.write( str.getBytes( "UTF-8" ) )
-			variables.outStream.flush()
-		} catch ( any e ) {
-			variables.closed = true
+		lock name="#variables.lockName#" type="exclusive" timeout="5" {
+			if ( variables.closed ) {
+				return
+			}
+			try {
+				variables.outStream.write( str.getBytes( "UTF-8" ) )
+				variables.outStream.flush()
+			} catch ( any e ) {
+				variables.closed = true
+			}
 		}
 	}
 
