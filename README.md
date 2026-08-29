@@ -1075,6 +1075,21 @@ Two more BoxLang-specific things that shaped how these are written:
 
 ## Changelog
 
+**0.2.3**
+- **Fix:** `res.render()` on BoxLang 1.17.0 was still broken after 0.1.8's
+  fix — `app.set("views", dir)` registered the required mapping, but
+  `RequestBoxContext.getConfig()` memoizes its merged config struct on
+  first read and never invalidates it. The context that runs `app.bxs`
+  (captured by `listen()` when it builds `HttpBridge`, then reused for
+  every request afterward) may have already read+cached its config via
+  an earlier `app.use()`/route call before the mapping was registered —
+  so the mapping was live on the runtime's `Configuration` but invisible
+  to every request's `include`, and `render()` kept failing exactly as
+  before. `app.set("views", dir)` now also calls `getBoxContext().clearConfigCache()`
+  right after registering the mapping, forcing that context to pick it
+  up. Verified end-to-end against a real running server on BoxLang
+  1.17.0+58 — every route serving a view now returns 200 instead of 500.
+
 **0.2.2**
 - Added `res.sse(callback)` — Server-Sent Events, a long-lived one-way
   event stream to the client. Not a wrapper around BoxLang's own `SSE()`

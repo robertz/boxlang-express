@@ -93,8 +93,18 @@ class {
 		// (not per-request from render()) since Configuration.mappings is a sorted,
 		// non-concurrent structure — safe for the single-threaded startup sequence,
 		// not for concurrent virtual-thread request handlers.
+		//
+		// clearConfigCache() is required, not optional: RequestBoxContext.getConfig()
+		// memoizes its merged config struct on first read and never invalidates it.
+		// The context executing this app.bxs script (captured by listen() when it
+		// builds HttpBridge, and reused for every request handled afterward) may
+		// already have read+cached its config via an earlier app.use()/route call
+		// before this line runs — without clearing that cache, the mapping above is
+		// live on the runtime's Configuration but invisible to every request's
+		// include, and every render() keeps failing exactly as before this fix.
 		if ( lCase( name ) == "views" ) {
 			getBoxRuntime().getConfiguration().registerMapping( value, value )
+			getBoxContext().clearConfigCache()
 		}
 		return this
 	}
