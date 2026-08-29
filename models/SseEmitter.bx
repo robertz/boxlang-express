@@ -1,0 +1,104 @@
+/**
+ * Passed to the callback given to res.sse() — writes Server-Sent Events
+ * frames directly to the response's OutputStream as they're sent, rather
+ * than buffering a body the way every other Response terminal method does.
+ * API shape mirrors BoxLang's own SSE() BIF (send/comment/close/isClosed())
+ * deliberately, even though the implementation can't reuse it — that BIF
+ * lives in the boxlang-web-support runtime module (MiniServer/CommandBox/
+ * servlet deployments), which BoxExpress doesn't load; confirmed directly
+ * that calling SSE() from a BoxExpress route handler throws "Function
+ * [SSE] not found".
+ *
+ * send()/comment()/close() are safe to call from more than one thread —
+ * e.g. a route handler holding onto an emitter to broadcast to it, while
+ * the connection's own res.sse() callback is still running concurrently
+ * on its own virtual thread. Both funnel through the same named lock, so
+ * two writes can't interleave their bytes on the shared OutputStream and
+ * corrupt the SSE framing.
+ */
+class {
+
+	function init( outStream ) {
+		variables.outStream = outStream
+		variables.closed = false
+		variables.lockName = "SseEmitter-" & createUUID()
+		return this
+	}
+
+	/**
+	 * Sends one SSE event. Complex data is JSON-serialized; every line of a
+	 * multi-line payload gets its own "data: " prefix, per the SSE spec.
+	 */
+	function send( data, event = "", id = "" ) {
+		if ( variables.closed ) {
+			return this
+		}
+
+		var payload = isSimpleValue( data ) ? toString( data ) : JSONSerialize( data )
+		var frame = ""
+		if ( len( id ) ) {
+			frame &= "id: #id#" & char( 10 )
+		}
+		if ( len( event ) ) {
+			frame &= "event: #event#" & char( 10 )
+		}
+		for ( var line in payload.listToArray( char( 10 ) ) ) {
+			frame &= "data: #line#" & char( 10 )
+		}
+		frame &= char( 10 )
+
+		_write( frame )
+		return this
+	}
+
+	/**
+	 * An SSE comment line (":..." — invisible to the client's event
+	 * listeners) — used for keep-alives to hold a connection open through
+	 * proxies/load balancers that time out idle sockets.
+	 */
+	function comment( text ) {
+		if ( !variables.closed ) {
+			_write( ": #text#" & char( 10 ) & char( 10 ) )
+		}
+		return this
+	}
+
+	function close() {
+		if ( !variables.closed ) {
+			lock name="#variables.lockName#" type="exclusive" timeout="5" {
+				if ( !variables.closed ) {
+					variables.closed = true
+					try {
+						variables.outStream.close()
+					} catch ( any e ) {
+					}
+				}
+			}
+		}
+		return this
+	}
+
+	/**
+	 * True once close() has been called, or once a write has failed —
+	 * a failed write means the client disconnected (broken pipe), the real
+	 * signal this is built on rather than a poll of connection state.
+	 */
+	function isClosed() {
+		return variables.closed
+	}
+
+	private function _write( str ) {
+		lock name="#variables.lockName#" type="exclusive" timeout="5" {
+			if ( variables.closed ) {
+				return
+			}
+			try {
+				variables.outStream.write( str.getBytes( "UTF-8" ) )
+				variables.outStream.flush()
+			} catch ( any e ) {
+				variables.closed = true
+			}
+		}
+	}
+
+}

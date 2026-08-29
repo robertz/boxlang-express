@@ -4,7 +4,9 @@
  * getRawExchange(), getMethod(), getPath(), getQueryString(),
  * getRequestHeaders(), getRequestHeader(), getRemoteAddress(),
  * getRequestBodyStream(), setHeader()/addHeader()/getHeader(),
- * sendBody()/sendHeadersOnly().
+ * sendBody()/sendHeadersOnly(), setStatusCode()/getResponseOutputStream()
+ * (for a streaming response — res.sse() — that writes incrementally
+ * instead of through sendBody()'s single buffered call).
  * getRawExchange() is a deliberate, documented escape hatch — see
  * Request.bx's rawExchange() docblock — everything else here is
  * engine-neutral by construction.
@@ -103,6 +105,21 @@ class {
 	function sendHeadersOnly( statusCode ) {
 		variables.exchange.setStatusCode( statusCode )
 		variables.exchange.endExchange()
+	}
+
+	function setStatusCode( statusCode ) {
+		variables.exchange.setStatusCode( statusCode )
+	}
+
+	/**
+	 * The response body as a java.io.OutputStream, for a caller that writes
+	 * incrementally over an open connection (res.sse()) instead of building
+	 * one byte array for a single sendBody() call. Same startBlocking()
+	 * requirement as getRequestBodyStream() — see that method's docblock.
+	 */
+	function getResponseOutputStream() {
+		variables.exchange.startBlocking()
+		return variables.exchange.getOutputStream()
 	}
 
 	private function _httpString( name ) {

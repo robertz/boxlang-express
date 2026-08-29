@@ -1,0 +1,204 @@
+/**
+ * Regression coverage for Response.sse() / SseEmitter.bx — Server-Sent
+ * Events. Confirmed directly before building this that BoxLang's own
+ * SSE() BIF isn't reachable from a BoxExpress route handler (it lives in
+ * the boxlang-web-support runtime module BoxExpress doesn't load, and
+ * throws "Function [SSE] not found" when called), so this is a from-
+ * scratch implementation against Undertow's raw exchange, not a wrapper
+ * around that BIF.
+ */
+class extends="testbox.system.BaseSpec" {
+
+	function beforeAll() {
+		variables.testPort = 4790
+		variables.baseUrl = "http://localhost:#variables.testPort#"
+		variables.client = new "../helpers/HttpClient"()
+
+		variables.app = new "../../models/BoxExpress"()
+
+		variables.app.get( "/events", ( req, res ) => {
+			res.sse( ( emitter ) => {
+				emitter.send( "hello" )
+				emitter.send( { status: "processing", progress: 50 }, "update" )
+				emitter.send( { complete: true }, "done", "123" )
+				emitter.close()
+			} )
+		} )
+
+		variables.app.get( "/events-no-explicit-close", ( req, res ) => {
+			res.sse( ( emitter ) => {
+				emitter.send( "one event, no emitter.close() call" )
+				// sse() itself closes the stream in a finally — this route
+				// exists to prove that happens even when the callback
+				// doesn't call close() itself.
+			} )
+		} )
+
+		variables.app.get( "/events-throws", ( req, res ) => {
+			res.sse( ( emitter ) => {
+				emitter.send( "before the throw" )
+				throw( message = "boom mid-stream", type = "TestError" )
+			} )
+		} )
+
+		variables.app.listen( port = variables.testPort, options = { block: false } )
+		sleep( 300 )
+	}
+
+	function afterAll() {
+		variables.app.close()
+	}
+
+	function run() {
+		describe( "Response.sse()", function() {
+
+			it( "sets the standard SSE response headers", function() {
+				var result = variables.client.get( variables.baseUrl & "/events" )
+				expect( result.statusCode ).toBe( 200 )
+				expect( result.contentType ).toInclude( "text/event-stream" )
+				expect( result.getHeader( "Cache-Control" ) ).toBe( "no-cache" )
+				expect( result.getHeader( "X-Accel-Buffering" ) ).toBe( "no" )
+			} )
+
+			it( "writes correctly framed SSE events — plain text, JSON payload with an event name, and an id", function() {
+				var result = variables.client.get( variables.baseUrl & "/events" )
+				var body = result.body
+
+				expect( body ).toInclude( "data: hello" & char( 10 ) & char( 10 ) )
+				expect( body ).toInclude( "event: update" & char( 10 ) & 'data: {"progress":50,"status":"processing"}' )
+				expect( body ).toInclude( "id: 123" & char( 10 ) & "event: done" & char( 10 ) & 'data: {"complete":true}' )
+			} )
+
+			it( "closes the stream even when the callback never calls emitter.close() itself", function() {
+				var result = variables.client.get( variables.baseUrl & "/events-no-explicit-close" )
+				expect( result.statusCode ).toBe( 200 )
+				expect( result.body ).toInclude( "data: one event, no emitter.close() call" )
+			} )
+
+			it( "closes the stream cleanly when the callback throws partway through", function() {
+				var result = variables.client.get( variables.baseUrl & "/events-throws" )
+				expect( result.statusCode ).toBe( 200 )
+				expect( result.body ).toInclude( "data: before the throw" )
+			} )
+
+			it( "throws BoxExpress.ResponseAlreadySent if a normal terminal method already sent this response", function() {
+				var throwawayPort = 4791
+				var throwawayApp = new "../../models/BoxExpress"()
+				throwawayApp.get( "/", ( req, res ) => {
+					res.send( "already sent" )
+					expect( function() {
+						res.sse( ( emitter ) => {} )
+					} ).toThrow( "BoxExpress.ResponseAlreadySent" )
+				} )
+				throwawayApp.listen( port = throwawayPort, options = { block: false } )
+				sleep( 300 )
+
+				try {
+					variables.client.get( "http://localhost:#throwawayPort#/" )
+				} finally {
+					throwawayApp.close()
+				}
+			} )
+
+			it( "detects a client disconnect mid-stream via emitter.isClosed(), without polling", function() {
+				var socket = createObject( "java", "java.net.Socket" ).init( "localhost", variables.testPort )
+				var out = socket.getOutputStream()
+				var crlf = char( 13 ) & char( 10 )
+
+				// A dedicated route, registered here so its closure can see
+				// this test's own variables — sends a burst of events, then
+				// checks isClosed() after the socket below is closed on it.
+				variables.disconnectDetected = false
+				variables.app.get( "/events-disconnect-test", ( req, res ) => {
+					res.sse( ( emitter ) => {
+						var attempts = 0
+						while ( !emitter.isClosed() && attempts < 20 ) {
+							emitter.send( "tick" )
+							attempts++
+							sleep( 50 )
+						}
+						variables.disconnectDetected = emitter.isClosed()
+					} )
+				} )
+
+				out.write( ( "GET /events-disconnect-test HTTP/1.1" & crlf & "Host: localhost" & crlf & "Connection: close" & crlf & crlf ).getBytes( "UTF-8" ) )
+				out.flush()
+
+				// Read just enough to know the response started, then yank
+				// the connection out from under the still-running handler.
+				var reader = createObject( "java", "java.io.BufferedReader" ).init( createObject( "java", "java.io.InputStreamReader" ).init( socket.getInputStream() ) )
+				reader.readLine()
+				socket.close()
+
+				var waited = 0
+				while ( !variables.disconnectDetected && waited < 2000 ) {
+					sleep( 100 )
+					waited += 100
+				}
+
+				expect( variables.disconnectDetected ).toBeTrue( "emitter.isClosed() should have gone true once the client disconnected, instead of the loop running to its attempts cap" )
+			} )
+
+			it( "serializes concurrent send() calls from separate threads without interleaving/corrupting the SSE framing", function() {
+				// Same emitter, 5 threads writing 25 events each at once —
+				// a real regression test for the send()/close() lock, not
+				// just a design claim. bx:thread bodies don't close over an
+				// enclosing closure's local variables (confirmed directly —
+				// referencing `emitter` without passing it as an attribute
+				// throws "key [emitter] was not located in any scope"), so
+				// it has to be passed explicitly, unquoted so the object
+				// reference survives rather than getting stringified.
+				variables.app.get( "/broadcast-test", ( req, res ) => {
+					res.sse( ( emitter ) => {
+						bx:thread name="sseWriter1" emitterRef=emitter writerIndex="1" {
+							for ( var i = 1; i <= 25; i++ ) {
+								attributes.emitterRef.send( "writer-#attributes.writerIndex#-msg-#i#", "test" )
+							}
+						}
+						bx:thread name="sseWriter2" emitterRef=emitter writerIndex="2" {
+							for ( var i = 1; i <= 25; i++ ) {
+								attributes.emitterRef.send( "writer-#attributes.writerIndex#-msg-#i#", "test" )
+							}
+						}
+						bx:thread name="sseWriter3" emitterRef=emitter writerIndex="3" {
+							for ( var i = 1; i <= 25; i++ ) {
+								attributes.emitterRef.send( "writer-#attributes.writerIndex#-msg-#i#", "test" )
+							}
+						}
+						bx:thread name="sseWriter4" emitterRef=emitter writerIndex="4" {
+							for ( var i = 1; i <= 25; i++ ) {
+								attributes.emitterRef.send( "writer-#attributes.writerIndex#-msg-#i#", "test" )
+							}
+						}
+						bx:thread name="sseWriter5" emitterRef=emitter writerIndex="5" {
+							for ( var i = 1; i <= 25; i++ ) {
+								attributes.emitterRef.send( "writer-#attributes.writerIndex#-msg-#i#", "test" )
+							}
+						}
+						bx:thread action="join" name="sseWriter1,sseWriter2,sseWriter3,sseWriter4,sseWriter5";
+						emitter.close()
+					} )
+				} )
+
+				var result = variables.client.get( variables.baseUrl & "/broadcast-test" )
+				var dataLines = []
+				for ( var bodyLine in result.body.listToArray( char( 10 ) ) ) {
+					if ( bodyLine.left( 6 ) == "data: " ) {
+						dataLines.append( bodyLine.mid( 7, bodyLine.len() - 6 ) )
+					}
+				}
+
+				expect( dataLines.len() ).toBe( 125 )
+
+				var seen = {}
+				for ( var dataLine in dataLines ) {
+					expect( reFind( "^writer-\d+-msg-\d+$", dataLine ) ).toBeTrue( "malformed/interleaved line: #dataLine#" )
+					expect( structKeyExists( seen, dataLine ) ).toBeFalse( "duplicate line (a torn write got double-counted): #dataLine#" )
+					seen[ dataLine ] = true
+				}
+			} )
+
+		} )
+	}
+
+}
