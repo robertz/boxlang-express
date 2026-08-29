@@ -1,0 +1,42 @@
+name: Tests
+
+# Runs the TestBox suite against pinned BoxLang releases, not just "whatever
+# :cli currently floats to" — a BoxLang 1.17.0 release changed template-path
+# resolution behavior in a way that broke every res.render() call downstream
+# (see the 0.2.3 changelog entry in README.md), and nothing caught it until
+# it reached production. This matrix would have failed on that PR.
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Last two released minors — kept in sync manually; bump the older
+          # one forward as BoxLang releases new minors, so this always covers
+          # "previous stable" + "current stable".
+          - tag: cli-1.16.0
+            allow-failure: false
+          - tag: cli-1.17.0
+            allow-failure: false
+          # Floating tag: an early-warning canary for whatever BoxLang ships
+          # next. Allowed to fail — it flags a coming break without blocking
+          # merges on something outside this repo's control.
+          - tag: cli
+            allow-failure: true
+    continue-on-error: ${{ matrix.allow-failure }}
+    container:
+      image: ortussolutions/boxlang:${{ matrix.tag }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Register this checkout as a BoxLang module
+        run: boxlang setup-tests.bxs
+
+      - name: Run test suite
+        run: boxlang run-tests.bxs
