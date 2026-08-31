@@ -176,6 +176,59 @@ Two things worth knowing if you touch `SseEmitter.bx`:
   safe by construction, not safe-if-used-correctly — assume it'll
   eventually be fed request-derived data, because it will be.
 
+## The one piece of compiled Java (`java-src/boxexpress/ws/`)
+
+Everything in this codebase is pure BoxLang plus off-the-shelf vendored
+jars — except this one small shim, and it exists for a specific,
+confirmed reason, not out of convenience.
+
+Undertow's intended extension point for receiving WebSocket messages,
+`io.undertow.websockets.core.AbstractReceiveListener`, is an **abstract
+Java class** with protected hook methods (`onFullTextMessage`, etc.), not
+an interface. Everywhere else in this codebase that needs to satisfy a
+Java type from BoxLang, it's `createDynamicProxy` against an *interface*
+(`HttpHandler`, `WebSocketConnectionCallback`, `ChannelListener`, all of
+`models/adapters/`) — that mechanism only works for interfaces. Two ways
+around that were tried and confirmed not to work, not just assumed:
+
+1. BoxLang's own documented `extends="java:X"` feature for subclassing a
+   Java class. Failed even on BoxLang's own docs example
+   (`java.io.FilterInputStream`) with a constructor-argument-forwarding
+   bug (`method 'void <init>()' not found` despite calling
+   `super.init(arg)`), and failed earlier still — at class resolution —
+   for `AbstractReceiveListener` specifically.
+2. Implementing the lower-level `org.xnio.ChannelListener` interface
+   directly (which *is* proxyable) and reading frames manually.
+   `handleEvent(channel)` fires correctly, but the only way to actually
+   consume the pending frame, `channel.receiveFrame()`, is a `protected`
+   method — BoxLang's Java interop can't invoke it. Nothing ever gets
+   consumed; `handleEvent` just re-fires in a busy loop.
+
+`BoxWebSocketListener.java` does the real Java-side subclassing once, and
+re-exposes every event through a plain interface,
+`WebSocketMessageHandler`, that BoxLang code implements the normal way.
+Rebuild it with `java-src/build.sh` if you ever touch the `.java` files;
+the compiled output is what actually ships, vendored in `libs/` like
+every other dependency.
+
+**One thing that had to be fixed on the first pass, not designed in
+correctly from the start:** the first version called straight into the
+BoxLang handler from inside Undertow's receive-listener callback, which
+runs on Undertow's I/O thread by default — same mistake already made and
+fixed once for the plain HTTP request path (see "Virtual-thread-per-
+request" above). A handler doing any blocking work there (a blocking send
+back to the client, in the shim's own test) intermittently reset the
+connection instead of throwing a clean, loud error — worse than the HTTP
+case, because it was flaky rather than deterministic, and took timing
+instrumentation to actually pin down. `BoxWebSocketListener` now dispatches
+every callback onto its own virtual thread before it ever reaches BoxLang
+code, matching the one-thread-per-unit-of-work model the rest of this
+project already uses.
+
+If you're extending this shim, treat any new callback the same way: never
+call into BoxLang code directly from inside an Undertow-owned callback
+without dispatching off whatever thread Undertow handed you first.
+
 ## `onBeforeSend()` — a narrow, deliberate hook
 
 `res.onBeforeSend(callback)` runs a callback once, synchronously, the

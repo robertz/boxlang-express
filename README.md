@@ -1084,6 +1084,30 @@ Two more BoxLang-specific things that shaped how these are written:
 ## Changelog
 
 **0.2.4**
+- Added `java-src/boxexpress/ws/` — this project's first compiled Java,
+  vendored as `libs/boxexpress-ws-shim-1.0.0.jar` (rebuild with
+  `java-src/build.sh`). Foundational only; there's no `app.ws()` or public
+  WebSocket API yet. Exists because Undertow's own WebSocket receive
+  extension point, `io.undertow.websockets.core.AbstractReceiveListener`,
+  is an abstract Java class with protected hook methods, not an
+  interface — confirmed directly, not assumed, that BoxLang can't work
+  around that: its documented `extends="java:X"` feature for subclassing a
+  Java class fails on the installed runtime (a constructor-argument-
+  forwarding bug reproduced even with BoxLang's own docs example), and
+  implementing the lower-level `org.xnio.ChannelListener` interface
+  directly instead hits a wall too — its `handleEvent` fires fine, but the
+  only way to actually consume a pending frame,
+  `channel.receiveFrame()`, is `protected` and BoxLang's Java interop
+  can't invoke it. `BoxWebSocketListener.java` does the real Java-side
+  subclassing once and re-exposes every event through a plain interface,
+  `WebSocketMessageHandler`, that BoxLang code implements via
+  `createDynamicProxy` like everything else in this codebase already does.
+  Every callback runs on its own virtual thread, not Undertow's I/O
+  thread — confirmed necessary, not assumed, after a version without that
+  intermittently reset the connection under a blocking call from inside
+  the receive handler, same class of bug already fixed once for the HTTP
+  request path. See
+  [tests/specs/WebSocketShimSpec.bx](tests/specs/WebSocketShimSpec.bx).
 - **Security fix:** `SseEmitter.send()`'s `event`/`id` arguments and
   `comment()`'s `text` argument were concatenated directly into their SSE
   field lines with no newline stripping — unlike `data`, which is safely

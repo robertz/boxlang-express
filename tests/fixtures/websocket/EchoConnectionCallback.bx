@@ -1,0 +1,23 @@
+/**
+ * Implements io.undertow.websockets.WebSocketConnectionCallback (via
+ * createDynamicProxy) for WebSocketShimSpec. Wires an EchoMessageHandler
+ * to the connection through boxexpress.ws.BoxWebSocketListener — the
+ * compiled Java shim being tested — the same way a real app.ws() handler
+ * eventually will.
+ */
+class {
+
+	function init( recorder ) {
+		variables.recorder = recorder
+		return this
+	}
+
+	function onConnect( exchange, channel ) {
+		var handlerImpl = new "EchoMessageHandler"( variables.recorder )
+		var handlerProxy = createDynamicProxy( handlerImpl, [ "boxexpress.ws.WebSocketMessageHandler" ] )
+		var listener = createObject( "java", "boxexpress.ws.BoxWebSocketListener" ).init( handlerProxy )
+		channel.getReceiveSetter().set( listener )
+		channel.resumeReceives()
+	}
+
+}
