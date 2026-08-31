@@ -229,6 +229,19 @@ If you're extending this shim, treat any new callback the same way: never
 call into BoxLang code directly from inside an Undertow-owned callback
 without dispatching off whatever thread Undertow handed you first.
 
+**A second thing worth knowing if you're debugging something that seems
+to hang instead of error:** `ExecutorService.submit(Runnable)` returns a
+`Future` that silently swallows any exception the task throws unless
+something calls `.get()` on it — nothing here does. The first version of
+`BoxWebSocketListener` didn't guard against this, and a real bug in the
+STOMP middleware built on top of it (below) hung with zero output
+anywhere — no exception, no log line, just a connection that stopped
+responding — until a `try`/`catch` wrapper around every dispatched
+callback was added specifically to surface this. If a WebSocket handler
+seems to silently do nothing, check stderr for
+`[boxexpress-ws-shim] Unhandled exception` before assuming the bug is
+somewhere else.
+
 `app.ws(path, callback)` and `WebSocketConnection.bx` are built on top of
 this — `models/adapters/WsConnectionCallback.bx` is the one place that
 constructs a `BoxWebSocketListener`, looks up which registered handler
@@ -241,6 +254,16 @@ Undertow's dispatch that decides, per request, whether to route to the
 WebSocket handshake handler or straight through to the unchanged HTTP
 chain — see the `app.ws()` section of the README for the request-flow
 details; this is the architectural "why," not a repeat of the "what."
+
+`models/middleware/Stomp.bx` is STOMP 1.2 pub/sub built entirely as a
+consumer of `app.ws()` — no changes to the shim or the router needed.
+`StompFrameCodec.bx` handles the wire format, including escaping header
+values (backslash/newline/colon) rather than just stripping them, the
+actual spec-correct fix for the same class of injection risk
+`SseEmitter.bx` was fixed for — a caller putting request-derived data
+into a STOMP header value can't use it to forge extra frame content,
+because the value round-trips through escaping instead of being trusted
+verbatim.
 
 ## `onBeforeSend()` — a narrow, deliberate hook
 
@@ -357,6 +380,23 @@ you real debugging time:
   BoxLang class instances — even though `isStruct()` returns `true` for
   one. `res.json(req)` silently returns `{}`. Build a plain struct of the
   fields you actually want.
+- **A `private` method isn't reachable from a closure once that closure
+  runs outside the class that defined it.** Confirmed directly with a
+  minimal repro: a class method returns a closure that calls one of that
+  same class's `private` methods (even via a captured `var self = this`);
+  works fine if the closure is invoked from inside the class, throws
+  `"Method not found"` if something else invokes it later — exactly what
+  happens with `app.ws()`/`res.sse()`-style handlers, since the shim/
+  runtime calls them, not the class itself. `Stomp.bx`'s helper methods
+  are all plain (non-`private`) because of this — see its own docblock
+  for the full story of chasing this down.
+- **`duplicate()` doesn't know how to deep-copy a struct holding a raw
+  Java object reference** (a `WebSocketConnection`, its underlying
+  channel) — throws `"Duplication was requested on the class [...] but
+  we don't know how to proceed"`. If you need a snapshot of a struct
+  that holds live object references (not copies of the objects
+  themselves), `structCopy()` (shallow) is the one that works — see
+  `Stomp.bx`'s `_deliver()`.
 
 ## Testing philosophy
 

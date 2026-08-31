@@ -33,7 +33,8 @@ other model gets the same treatment, each its own thin BIF wrapper: the
 built-in middleware factories — `boxExpressJSON()`, `boxExpressUrlencoded()`,
 `boxExpressStatic()`, `boxExpressUpload()`, `boxExpressSession()`,
 `boxExpressHelmet()`, `boxExpressCors()`, `boxExpressRateLimit()`,
-`boxExpressCsrf()` (see [Middleware](#middleware) below) — and
+`boxExpressCsrf()`, `boxExpressStomp()` (see [Middleware](#middleware)
+below) — and
 `boxExpressRouter()`, wrapping `new
 bxModules.boxexpress.models.Router()` and mirroring Express's own
 `express.Router()`.
@@ -262,6 +263,72 @@ Built on one small piece of compiled Java
 the only compiled Java in this project. See
 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md#the-one-piece-of-compiled-java-java-srcboxexpressws)
 for why.
+
+#### STOMP (`boxExpressStomp()` / `Stomp`)
+
+A [STOMP](https://stomp.github.io/) 1.2 pub/sub broker built entirely on
+top of `app.ws()` — destination-based messaging (`SUBSCRIBE`/`SEND`) over
+a WebSocket connection, the shape most chat/notification/live-update use
+cases actually need:
+
+```js
+stomp = boxExpressStomp()
+app.ws( "/stomp", stomp.handler() )
+
+app.post( "/orders", ( req, res ) => {
+	// ... create the order ...
+	stomp.send( "/topic/orders", { orderId: newOrder.id } )
+	res.json( { created: true } )
+} )
+```
+
+Or via the underlying class directly:
+
+```js
+stomp = new bxModules.boxexpress.models.middleware.Stomp( {
+	authenticate: ( login, passcode, host, connection ) => login == "demo" && passcode == "demo",
+	authorize: ( login, destination, access, connection ) => true,   // access is "subscribe" or "publish"
+	heartbeatMs: 10000
+} )
+app.ws( "/stomp", stomp.handler() )
+```
+
+`authenticate(login, passcode, host, connection)` gates `CONNECT` —
+return `false` and the client gets an `ERROR` frame and the connection
+closes. `authorize(login, destination, access, connection)` gates each
+`SUBSCRIBE`/`SEND` (`access` is `"subscribe"` or `"publish"`) — return
+`false` and that one frame gets an `ERROR` instead of taking effect; the
+connection stays open. Both are optional — omit either to allow
+everything. `heartbeatMs`, if set, advertises that interval to the client
+in `CONNECTED` and sends an empty keep-alive frame on that cadence (only
+server-initiated for now — see the note below).
+
+`stomp.send(destination, data, headers)` is the server-side publish path
+for app code outside any connection's own message handling — a route
+handler pushing an update, the same broadcast pattern
+`WebSocketConnection`/`SseEmitter` already support. `data` is
+JSON-serialized unless it's already a simple value.
+
+This is a real, if intentionally smaller, first version — not the whole
+STOMP ecosystem some brokers support. Deliberately not built yet:
+**exchanges/bindings** (AMQP-style destination remapping — not part of
+core STOMP itself, an addition some brokers layer on top), **transactions**
+(`BEGIN`/`COMMIT`/`ABORT`), **client `ACK`/`NACK`** (messages are
+delivered without requiring acknowledgment), **binary bodies** (text/JSON
+only, matching `res.sse()`'s own scope), and **full bidirectional
+heartbeat negotiation** (the server advertises and sends heartbeats on
+its own configured interval regardless of what the client requested, and
+doesn't yet expect or check for heartbeats coming back). Each is a real,
+separable feature to add if something actually needs it. Destination
+matching is exact-string only — `/topic/a` and `/topic/a/` are different
+destinations.
+
+Header values are escaped per the STOMP spec (backslash, newline, colon),
+not just stripped — a destination or login value built from
+request-derived input can't break a frame's structure, the actual
+protocol-correct version of the same fix `SseEmitter.bx` needed. See
+[StompFrameCodec.bx](models/StompFrameCodec.bx) and
+[Stomp.bx](models/middleware/Stomp.bx).
 
 ### Router (mountable sub-app)
 
@@ -1175,6 +1242,28 @@ Two more BoxLang-specific things that shaped how these are written:
   lock `SseEmitter` already uses, for the same reason. See
   [WebSocketConnection.bx](models/WebSocketConnection.bx) and
   [tests/specs/WebSocketRouteSpec.bx](tests/specs/WebSocketRouteSpec.bx).
+- Added `boxExpressStomp()` / `Stomp` — a STOMP 1.2 pub/sub broker built
+  entirely on top of `app.ws()`, no changes needed to the shim or the
+  WebSocket routing layer above. `StompFrameCodec.bx` escapes header
+  values (backslash/newline/colon) per spec rather than just stripping
+  them — the protocol-correct version of the same injection fix
+  `SseEmitter.bx` needed, applied here before it could ever become a bug
+  instead of after. Deliberately smaller than some STOMP brokers' full
+  feature set for a first version — no exchanges/bindings, transactions,
+  client `ACK`/`NACK`, binary bodies, or full bidirectional heartbeat
+  negotiation; see the [STOMP](#stomp-boxexpressstomp--stomp) docs above
+  for what's actually built and why the rest was deliberately deferred.
+  Two real BoxLang bugs found and fixed while building this, both now
+  documented in
+  [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md#boxlang-landmines-this-codebase-has-already-found-so-you-dont-have-to):
+  a `private` method isn't reachable from a closure once that closure is
+  invoked from outside the class that defined it (every helper
+  `Stomp.bx`'s handler closures call had to become a plain method
+  because of this), and `duplicate()` can't deep-copy a struct holding a
+  raw Java object reference — `structCopy()` (shallow) is what
+  `_deliver()` actually needs. See
+  [Stomp.bx](models/middleware/Stomp.bx) and
+  [tests/specs/StompSpec.bx](tests/specs/StompSpec.bx).
 - **Security fix:** `SseEmitter.send()`'s `event`/`id` arguments and
   `comment()`'s `text` argument were concatenated directly into their SSE
   field lines with no newline stripping — unlike `data`, which is safely

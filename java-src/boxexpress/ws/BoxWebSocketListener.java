@@ -49,19 +49,41 @@ public class BoxWebSocketListener extends AbstractReceiveListener {
 	@Override
 	protected void onFullTextMessage( WebSocketChannel channel, BufferedTextMessage message ) {
 		String data = message.getData();
-		executor.submit( () -> handler.onMessage( channel, data ) );
+		executor.submit( _guard( () -> handler.onMessage( channel, data ) ) );
 	}
 
 	@Override
 	protected void onCloseMessage( CloseMessage cm, WebSocketChannel channel ) {
 		int code = cm.getCode();
 		String reason = cm.getReason();
-		executor.submit( () -> handler.onClose( channel, code, reason ) );
+		executor.submit( _guard( () -> handler.onClose( channel, code, reason ) ) );
 	}
 
 	@Override
 	protected void onError( WebSocketChannel channel, Throwable error ) {
-		executor.submit( () -> handler.onError( channel, error ) );
+		executor.submit( _guard( () -> handler.onError( channel, error ) ) );
+	}
+
+	/**
+	 * ExecutorService.submit(Runnable) returns a Future that silently
+	 * swallows any exception the task throws unless something calls
+	 * get() on it — nothing here ever does, so an exception thrown inside
+	 * BoxLang code (a bug in an app's own onMessage callback, say) would
+	 * otherwise vanish with no trace at all: no stack trace, no log line,
+	 * just a connection that stops responding for no visible reason.
+	 * Confirmed this the hard way, not assumed: a real bug in this
+	 * project's own STOMP middleware during development hung silently
+	 * until this wrapper was added and the real exception finally printed.
+	 */
+	private static Runnable _guard( Runnable task ) {
+		return () -> {
+			try {
+				task.run();
+			} catch ( Throwable t ) {
+				System.err.println( "[boxexpress-ws-shim] Unhandled exception in WebSocket callback:" );
+				t.printStackTrace();
+			}
+		};
 	}
 
 }

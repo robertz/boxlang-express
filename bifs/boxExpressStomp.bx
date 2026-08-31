@@ -1,0 +1,21 @@
+/**
+ * Global BIF wrapping new middleware.Stomp() — mirrors the shape of a
+ * proven STOMP broker design (see docs/ARCHITECTURE.md). Returns the
+ * Stomp instance itself, not just its handler, since app code needs both
+ * app.ws(path, stomp.handler()) and stomp.send(destination, data) later:
+ *
+ *   stomp = boxExpressStomp()
+ *   app.ws( "/stomp", stomp.handler() )
+ *   app.post( "/broadcast", ( req, res ) => {
+ *       stomp.send( "/topic/news", req.body )
+ *       res.json( { ok: true } )
+ *   } )
+ */
+@BoxBIF
+class {
+
+	function invoke( options = {} ) {
+		return new bxModules.boxexpress.models.middleware.Stomp( options )
+	}
+
+}

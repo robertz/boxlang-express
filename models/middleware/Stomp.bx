@@ -1,0 +1,298 @@
+/**
+ * STOMP 1.2 broker on top of app.ws() — basic destination-based pub/sub:
+ * SUBSCRIBE a destination, SEND to it, every current subscriber gets a
+ * MESSAGE. Mirrors SocketBox's WebSocketSTOMP feature set (the design
+ * this was modeled on — see plans/websocket-stomp.md), adapted to this
+ * project's factory-function-plus-options-struct convention instead of
+ * SocketBox's class-you-extend-and-override one, matching how every other
+ * middleware here (Helmet, Cors, RateLimit) mirrors a proven design's
+ * behavior without copying its exact API mechanics.
+ *
+ * Deliberately smaller than SocketBox's own STOMP layer for a first
+ * version: no exchanges/bindings (AMQP-style destination remapping — real
+ * STOMP itself has no such concept; that's an addition SocketBox layers
+ * on top, not core protocol), no transactions, no client ACK/NACK, no
+ * binary bodies. Destination matching is exact-string only. Each of these
+ * is a real, separable feature to add later if something actually needs
+ * it — not cut for lack of design, cut because nothing here calls for
+ * them yet.
+ */
+class {
+
+	function init( options = {} ) {
+		variables.authenticateFn = options.authenticate ?: javacast( "null", "" )
+		variables.authorizeFn = options.authorize ?: javacast( "null", "" )
+		variables.heartbeatMs = options.heartbeatMs ?: 0
+		variables.codec = new "../StompFrameCodec"()
+
+		// destination -> { subscriptionId -> WebSocketConnection }
+		variables.subscribersByDestination = {}
+		variables.lockName = "Stomp-" & createUUID()
+
+		return this
+	}
+
+	/**
+	 * Returns the (connection) => {...} closure app.ws() expects. Per-
+	 * connection STOMP state (connected/login/this connection's own
+	 * subscription ids) lives in local vars here, shared across the nested
+	 * onMessage/onClose closures below — confirmed directly that BoxLang
+	 * closures correctly share and mutate an enclosing function's local
+	 * variables across separate invocations, not just assumed.
+	 *
+	 * The _handle..., _deliver, _sendError, and _startHeartbeat helpers
+	 * below are deliberately NOT private, even though they're only ever
+	 * meant to be
+	 * called from within this class — confirmed directly (the hard way,
+	 * this middleware's first draft used private and every one of these
+	 * calls failed with "Method not found") that a private method isn't
+	 * reachable from a closure once that closure is invoked from outside
+	 * the class that defined it, which is exactly what happens here: these
+	 * closures are handed to app.ws()/WebSocketConnection and get called
+	 * later by boxexpress-ws-shim's own dispatch, not by this class itself.
+	 */
+	function handler() {
+		var stomp = this
+		return ( connection ) => {
+			var connected = false
+			var login = ""
+			var mySubscriptions = {}   // subscriptionId -> destination, for this connection only
+
+			connection.onMessage( ( raw ) => {
+				var frame = ""
+				try {
+					frame = variables.codec.parse( raw )
+				} catch ( any e ) {
+					stomp._sendError( connection, "Malformed frame" )
+					return
+				}
+
+				switch ( frame.getCommand() ) {
+					case "CONNECT":
+					case "STOMP": {
+						var authResult = stomp._handleConnect( connection, frame )
+						connected = authResult.ok
+						login = authResult.login
+						break
+					}
+					case "SUBSCRIBE": {
+						if ( !connected ) {
+							stomp._sendError( connection, "Not connected" )
+							break
+						}
+						stomp._handleSubscribe( connection, frame, login, mySubscriptions )
+						break
+					}
+					case "UNSUBSCRIBE": {
+						if ( connected ) {
+							stomp._handleUnsubscribe( frame, mySubscriptions )
+						}
+						break
+					}
+					case "SEND": {
+						if ( !connected ) {
+							stomp._sendError( connection, "Not connected" )
+							break
+						}
+						stomp._handleSend( frame, login )
+						break
+					}
+					case "DISCONNECT": {
+						var receiptId = frame.getHeader( "receipt", "" )
+						if ( len( receiptId ) ) {
+							connection.send( variables.codec.serialize( new "../StompFrame"( "RECEIPT", { "receipt-id": receiptId } ) ) )
+						}
+						connection.close()
+						break
+					}
+					default: {
+						stomp._sendError( connection, "Unknown command: " & frame.getCommand() )
+					}
+				}
+			} )
+
+			connection.onClose( ( code, reason ) => {
+				stomp._removeAllSubscriptions( mySubscriptions )
+			} )
+		}
+	}
+
+	/**
+	 * Server-side send — the broadcast/publish path for app code outside
+	 * any single connection's own message handler (a route handler pushing
+	 * an update, the obvious real use case, same as it was for
+	 * SseEmitter's/WebSocketConnection's own broadcast patterns).
+	 */
+	function send( destination, data, headers = {} ) {
+		var payload = isSimpleValue( data ) ? toString( data ) : JSONSerialize( data )
+		_deliver( destination, payload, headers )
+	}
+
+	function _handleConnect( connection, frame ) {
+		var acceptedVersions = frame.getHeader( "accept-version", "1.2" )
+		if ( !acceptedVersions.listFind( "1.2" ) ) {
+			_sendError( connection, "Supported versions: 1.2" )
+			connection.close()
+			return { ok: false, login: "" }
+		}
+
+		var login = frame.getHeader( "login", "" )
+		var passcode = frame.getHeader( "passcode", "" )
+		var host = frame.getHeader( "host", "" )
+
+		if ( !isNull( variables.authenticateFn ) ) {
+			var authenticated = variables.authenticateFn( login, passcode, host, connection )
+			if ( !authenticated ) {
+				_sendError( connection, "Authentication failed" )
+				connection.close()
+				return { ok: false, login: "" }
+			}
+		}
+
+		var connectedHeaders = { version: "1.2" }
+		if ( variables.heartbeatMs > 0 ) {
+			connectedHeaders[ "heart-beat" ] = variables.heartbeatMs & ",0"
+			_startHeartbeat( connection )
+		}
+		connection.send( variables.codec.serialize( new "../StompFrame"( "CONNECTED", connectedHeaders ) ) )
+		return { ok: true, login: login }
+	}
+
+	function _handleSubscribe( connection, frame, login, mySubscriptions ) {
+		var destination = frame.getHeader( "destination", "" )
+		var subId = frame.getHeader( "id", "" )
+		if ( !len( destination ) || !len( subId ) ) {
+			_sendError( connection, "SUBSCRIBE requires destination and id headers" )
+			return
+		}
+
+		if ( !isNull( variables.authorizeFn ) ) {
+			var allowed = variables.authorizeFn( login, destination, "subscribe", connection )
+			if ( !allowed ) {
+				_sendError( connection, "Not authorized to subscribe to " & destination )
+				return
+			}
+		}
+
+		lock name="#variables.lockName#" type="exclusive" timeout="5" {
+			if ( !structKeyExists( variables.subscribersByDestination, destination ) ) {
+				variables.subscribersByDestination[ destination ] = {}
+			}
+			variables.subscribersByDestination[ destination ][ subId ] = connection
+		}
+		mySubscriptions[ subId ] = destination
+	}
+
+	function _handleUnsubscribe( frame, mySubscriptions ) {
+		var subId = frame.getHeader( "id", "" )
+		if ( !structKeyExists( mySubscriptions, subId ) ) {
+			return
+		}
+		var destination = mySubscriptions[ subId ]
+		lock name="#variables.lockName#" type="exclusive" timeout="5" {
+			if ( structKeyExists( variables.subscribersByDestination, destination ) ) {
+				structDelete( variables.subscribersByDestination[ destination ], subId )
+			}
+		}
+		structDelete( mySubscriptions, subId )
+	}
+
+	function _handleSend( frame, login ) {
+		var destination = frame.getHeader( "destination", "" )
+		if ( !len( destination ) ) {
+			return
+		}
+		if ( !isNull( variables.authorizeFn ) ) {
+			var allowed = variables.authorizeFn( login, destination, "publish", javacast( "null", "" ) )
+			if ( !allowed ) {
+				return
+			}
+		}
+		var extraHeaders = {}
+		var contentType = frame.getHeader( "content-type", "" )
+		if ( len( contentType ) ) {
+			extraHeaders[ "content-type" ] = contentType
+		}
+		_deliver( destination, frame.getBody(), extraHeaders )
+	}
+
+	/**
+	 * Delivers one MESSAGE frame per current subscriber of destination —
+	 * each with that subscriber's own subscription id (Undertow/STOMP
+	 * clients match incoming MESSAGE frames back to the subscribe() call
+	 * that requested them via this header, and different subscribers to
+	 * the same destination don't necessarily share a subscription id).
+	 * Snapshots the subscriber list under lock, then sends outside it —
+	 * WebSocketConnection.send() already has its own per-connection lock
+	 * (see WebSocketConnection.bx), so holding this registry's lock for
+	 * the actual network writes too would only add contention, not safety.
+	 */
+	function _deliver( destination, body, extraHeaders ) {
+		var recipients = {}
+		lock name="#variables.lockName#" type="exclusive" timeout="5" {
+			if ( structKeyExists( variables.subscribersByDestination, destination ) ) {
+				// structCopy(), not duplicate() — confirmed directly that
+				// duplicate() tries to deep-copy every value, including the
+				// WebSocketConnection objects themselves, and doesn't know
+				// how to duplicate their underlying Java channel. A shallow
+				// copy is all this needs: new struct, same connection
+				// references, so the actual sends below can happen outside
+				// the registry lock without touching a struct the registry
+				// might mutate concurrently.
+				recipients = structCopy( variables.subscribersByDestination[ destination ] )
+			}
+		}
+
+		for ( var subId in recipients ) {
+			var headers = duplicate( extraHeaders )
+			headers[ "destination" ] = destination
+			headers[ "message-id" ] = createUUID()
+			headers[ "subscription" ] = subId
+			recipients[ subId ].send( variables.codec.serialize( new "../StompFrame"( "MESSAGE", headers, body ) ) )
+		}
+	}
+
+	function _removeAllSubscriptions( mySubscriptions ) {
+		lock name="#variables.lockName#" type="exclusive" timeout="5" {
+			for ( var subId in mySubscriptions ) {
+				var destination = mySubscriptions[ subId ]
+				if ( structKeyExists( variables.subscribersByDestination, destination ) ) {
+					structDelete( variables.subscribersByDestination[ destination ], subId )
+				}
+			}
+		}
+	}
+
+	function _sendError( connection, message ) {
+		connection.send( variables.codec.serialize( new "../StompFrame"( "ERROR", { message: message } ) ) )
+	}
+
+	/**
+	 * Server-initiated keep-alive only for v1 — sends an empty STOMP
+	 * heartbeat (a bare newline) every heartbeatMs on its own virtual
+	 * thread, regardless of what heart-beat cadence the client itself
+	 * requested. Full bidirectional negotiation (respecting the client's
+	 * own requested interval, expecting client heartbeats back and timing
+	 * out a connection that stops sending them) is real STOMP behavior
+	 * this doesn't implement yet — a real gap, not an oversight, cut for
+	 * the same "nothing calls for it yet" reason as exchanges/transactions
+	 * above.
+	 */
+	function _startHeartbeat( connection ) {
+		var intervalMs = variables.heartbeatMs
+		var thread = createObject( "java", "java.lang.Thread" ).init( createDynamicProxy(
+			new "../ThreadRunnable"( function() {
+				while ( !connection.isClosed() ) {
+					sleep( intervalMs )
+					if ( !connection.isClosed() ) {
+						connection.send( char( 10 ) )
+					}
+				}
+			} ),
+			[ "java.lang.Runnable" ]
+		) )
+		thread.setDaemon( true )
+		thread.start()
+	}
+
+}

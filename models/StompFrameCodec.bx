@@ -1,0 +1,121 @@
+/**
+ * Parses/serializes STOMP 1.2 frames: "COMMAND\nheader:value\n\n<body>\0".
+ *
+ * Header names/values are escaped per spec — backslash, newline, and colon
+ * (STOMP reserves ":" as the header name/value separator, so a literal
+ * colon in a value has to be escaped or it'd be misread as the start of a
+ * new header). This is the actual protocol-correct fix for the same class
+ * of injection SseEmitter.bx had to be fixed for: without escaping, a
+ * caller putting request-derived data into a header value (a destination
+ * name, say) could let a client's embedded newline break out of that
+ * header line and forge extra frame content. Escaping here means it's
+ * spec-compliant by construction, not just "stripped" — the value round-
+ * trips correctly instead of being silently mangled.
+ */
+class {
+
+	function parse( rawText ) {
+		// mid(), not left()/right(), throughout this method — confirmed
+		// directly (the hard way, in this method's first draft) that
+		// left()/right() throw "Count cannot be zero" on a legitimately
+		// zero-length slice (an empty command, an empty body), the same
+		// bug class already fixed everywhere else in this codebase
+		// (RangeParser.bx, BodyParsers.bx, Multipart.bx, Request.bx —
+		// see docs/ARCHITECTURE.md's BoxLang landmines section).
+		var separatorPos = rawText.find( char( 10 ) & char( 10 ) )
+		var headerBlock = separatorPos ? rawText.mid( 1, separatorPos - 1 ) : rawText
+		var body = separatorPos ? rawText.mid( separatorPos + 2, rawText.len() - separatorPos - 1 ) : ""
+
+		// Strip the trailing NUL terminator (and a single trailing newline
+		// before it, some clients send "...\n\0") without assuming binary
+		// bodies — this project's STOMP support is text/JSON only, matching
+		// SseEmitter's own scope.
+		var nulPos = body.find( char( 0 ) )
+		if ( nulPos ) {
+			body = body.mid( 1, nulPos - 1 )
+		}
+		if ( body.len() && body.right( 1 ) == char( 10 ) ) {
+			body = body.mid( 1, body.len() - 1 )
+		}
+
+		var headerLines = headerBlock.listToArray( char( 10 ) )
+		var command = headerLines[ 1 ]
+		var headers = {}
+
+		var i = 2
+		while ( i <= headerLines.len() ) {
+			var line = headerLines[ i ]
+			var colonPos = line.find( ":" )
+			if ( colonPos ) {
+				var key = _unescape( line.mid( 1, colonPos - 1 ) )
+				// STOMP spec: when a header repeats, the FIRST occurrence
+				// wins — a client can't override an earlier value by
+				// repeating the header name later in the same frame.
+				if ( !structKeyExists( headers, key ) ) {
+					headers[ key ] = _unescape( line.mid( colonPos + 1, line.len() - colonPos ) )
+				}
+			}
+			i++
+		}
+
+		return new "StompFrame"( command, headers, body )
+	}
+
+	function serialize( frame ) {
+		var out = frame.getCommand() & char( 10 )
+		for ( var key in frame.getHeaders() ) {
+			out &= _escape( key ) & ":" & _escape( frame.getHeaders()[ key ] ) & char( 10 )
+		}
+		out &= char( 10 ) & frame.getBody() & char( 0 )
+		return out
+	}
+
+	private function _escape( str ) {
+		// Order matters: backslash first, so the backslashes introduced by
+		// the newline/colon/CR escaping below don't themselves get escaped
+		// a second time.
+		var result = toString( str ).replace( "\", "\\", "all" )
+		result = result.replace( char( 10 ), "\n", "all" )
+		result = result.replace( char( 13 ), "\r", "all" )
+		result = result.replace( ":", "\c", "all" )
+		return result
+	}
+
+	private function _unescape( str ) {
+		var result = ""
+		var i = 1
+		var len = str.len()
+		while ( i <= len ) {
+			var ch = str.mid( i, 1 )
+			if ( ch == "\" && i < len ) {
+				var next = str.mid( i + 1, 1 )
+				if ( next == "n" ) {
+					result &= char( 10 )
+					i += 2
+				} else if ( next == "c" ) {
+					result &= ":"
+					i += 2
+				} else if ( next == "r" ) {
+					result &= char( 13 )
+					i += 2
+				} else if ( next == "\" ) {
+					result &= "\"
+					i += 2
+				} else {
+					// An unrecognized escape — leave the backslash literal
+					// rather than throwing, matching this project's
+					// generally-lenient parsing posture elsewhere
+					// (RangeParser falls back to "full" on anything it
+					// can't parse rather than erroring the request).
+					result &= ch
+					i++
+				}
+			} else {
+				result &= ch
+				i++
+			}
+		}
+		return result
+	}
+
+}
