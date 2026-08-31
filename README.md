@@ -1261,7 +1261,19 @@ Two more BoxLang-specific things that shaped how these are written:
   `Stomp.bx`'s handler closures call had to become a plain method
   because of this), and `duplicate()` can't deep-copy a struct holding a
   raw Java object reference — `structCopy()` (shallow) is what
-  `_deliver()` actually needs. See
+  `_deliver()` actually needs.
+  **Security fix (found in review before this shipped):** the shared
+  subscriber registry was keyed on the client-supplied `SUBSCRIBE` `id`
+  header alone, with no per-connection scoping — since STOMP subscription
+  ids aren't secret (many client libraries assign them sequentially,
+  e.g. `sub-0`), a second connection subscribing to the same destination
+  with the same id silently overwrote the first connection's entry,
+  redirecting the first connection's messages to the second with no
+  error to either side, and let the second connection's `UNSUBSCRIBE`
+  delete the first connection's subscription. Fixed by keying the
+  registry on a server-generated per-connection id combined with the
+  client's own subscription id, so no cross-connection collision is
+  possible even when two clients choose identical ids. See
   [Stomp.bx](models/middleware/Stomp.bx) and
   [tests/specs/StompSpec.bx](tests/specs/StompSpec.bx).
 - **Security fix:** `SseEmitter.send()`'s `event`/`id` arguments and

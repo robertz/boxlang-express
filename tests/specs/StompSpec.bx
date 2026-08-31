@@ -102,6 +102,43 @@ class extends="testbox.system.BaseSpec" {
 				sender.client.close()
 			} )
 
+			it( "keeps two different connections' subscriptions independent even when they choose the identical subscription id", function() {
+				// Regression test for a real HIGH-severity finding from a
+				// security review: the subscriber registry used to be keyed
+				// on the client-supplied SUBSCRIBE id alone, shared across
+				// every connection — a second connection subscribing with
+				// the same id (not secret, and commonly sequential per
+				// client library, e.g. "sub-0") silently overwrote the
+				// first connection's entry, redirecting their messages and
+				// letting the second connection's UNSUBSCRIBE delete the
+				// first connection's subscription.
+				var connA = _connectedClient( variables.testPort )
+				connA.client.sendText( variables.codec.serialize( new "../../models/StompFrame"( "SUBSCRIBE", { destination: "/topic/collision-test", id: "sub-0" } ) ) )
+				sleep( 100 )
+
+				var connB = _connectedClient( variables.testPort )
+				connB.client.sendText( variables.codec.serialize( new "../../models/StompFrame"( "SUBSCRIBE", { destination: "/topic/collision-test", id: "sub-0" } ) ) )
+				sleep( 100 )
+
+				variables.stomp.send( "/topic/collision-test", "broadcast" )
+
+				var msgA = variables.codec.parse( connA.client.readTextFrame() )
+				var msgB = variables.codec.parse( connB.client.readTextFrame() )
+				expect( msgA.getBody() ).toBe( "broadcast" )
+				expect( msgB.getBody() ).toBe( "broadcast" )
+
+				// B's UNSUBSCRIBE with the colliding id must not touch A's
+				// subscription.
+				connB.client.sendText( variables.codec.serialize( new "../../models/StompFrame"( "UNSUBSCRIBE", { id: "sub-0" } ) ) )
+				sleep( 100 )
+				variables.stomp.send( "/topic/collision-test", "after-b-unsubscribed" )
+				var msgAAfter = variables.codec.parse( connA.client.readTextFrame() )
+				expect( msgAAfter.getBody() ).toBe( "after-b-unsubscribed" )
+
+				connA.client.close()
+				connB.client.close()
+			} )
+
 			it( "stops delivering to a connection after UNSUBSCRIBE", function() {
 				var conn = _connectedClient( variables.testPort )
 				conn.client.sendText( variables.codec.serialize( new "../../models/StompFrame"( "SUBSCRIBE", { destination: "/topic/unsub-test", id: "sub-2" } ) ) )

@@ -25,7 +25,9 @@ class {
 		variables.heartbeatMs = options.heartbeatMs ?: 0
 		variables.codec = new "../StompFrameCodec"()
 
-		// destination -> { subscriptionId -> WebSocketConnection }
+		// destination -> { "connectionId:subId" -> { connection: ..., subId: ... } }
+		// Keyed on a server-generated connectionId + the client's own subId,
+		// not the client's subId alone — see handler()'s docblock for why.
 		variables.subscribersByDestination = {}
 		variables.lockName = "Stomp-" & createUUID()
 
@@ -50,10 +52,28 @@ class {
 	 * the class that defined it, which is exactly what happens here: these
 	 * closures are handed to app.ws()/WebSocketConnection and get called
 	 * later by boxexpress-ws-shim's own dispatch, not by this class itself.
+	 *
+	 * connectionId is generated here, once per connection, and threaded
+	 * through to every place that touches the shared
+	 * variables.subscribersByDestination registry — a real vulnerability
+	 * found in a security review, not a defensive-programming guess: that
+	 * registry used to be keyed on the client-supplied SUBSCRIBE `id`
+	 * header alone, shared across every connection on this broker
+	 * instance. STOMP subscription ids aren't secret — many client
+	 * libraries assign them sequentially (sub-0, sub-1, ...) — so a second
+	 * client subscribing to the same destination with the same id silently
+	 * overwrote the first client's entry, redirecting their messages to
+	 * the second client with no error to either side, and let the second
+	 * client's UNSUBSCRIBE delete the first client's subscription. Confirmed
+	 * exploitable by any client already authorized to subscribe to a shared
+	 * destination — no additional privilege needed. Fixed by scoping the
+	 * registry key to connectionId & subId, so no cross-connection
+	 * collision is possible even when subIds match exactly.
 	 */
 	function handler() {
 		var stomp = this
 		return ( connection ) => {
+			var connectionId = createUUID()
 			var connected = false
 			var login = ""
 			var mySubscriptions = {}   // subscriptionId -> destination, for this connection only
@@ -80,12 +100,12 @@ class {
 							stomp._sendError( connection, "Not connected" )
 							break
 						}
-						stomp._handleSubscribe( connection, frame, login, mySubscriptions )
+						stomp._handleSubscribe( connection, connectionId, frame, login, mySubscriptions )
 						break
 					}
 					case "UNSUBSCRIBE": {
 						if ( connected ) {
-							stomp._handleUnsubscribe( frame, mySubscriptions )
+							stomp._handleUnsubscribe( connectionId, frame, mySubscriptions )
 						}
 						break
 					}
@@ -94,7 +114,7 @@ class {
 							stomp._sendError( connection, "Not connected" )
 							break
 						}
-						stomp._handleSend( frame, login )
+						stomp._handleSend( connection, frame, login )
 						break
 					}
 					case "DISCONNECT": {
@@ -112,7 +132,7 @@ class {
 			} )
 
 			connection.onClose( ( code, reason ) => {
-				stomp._removeAllSubscriptions( mySubscriptions )
+				stomp._removeAllSubscriptions( connectionId, mySubscriptions )
 			} )
 		}
 	}
@@ -158,7 +178,7 @@ class {
 		return { ok: true, login: login }
 	}
 
-	function _handleSubscribe( connection, frame, login, mySubscriptions ) {
+	function _handleSubscribe( connection, connectionId, frame, login, mySubscriptions ) {
 		var destination = frame.getHeader( "destination", "" )
 		var subId = frame.getHeader( "id", "" )
 		if ( !len( destination ) || !len( subId ) ) {
@@ -178,12 +198,12 @@ class {
 			if ( !structKeyExists( variables.subscribersByDestination, destination ) ) {
 				variables.subscribersByDestination[ destination ] = {}
 			}
-			variables.subscribersByDestination[ destination ][ subId ] = connection
+			variables.subscribersByDestination[ destination ][ connectionId & ":" & subId ] = { connection: connection, subId: subId }
 		}
 		mySubscriptions[ subId ] = destination
 	}
 
-	function _handleUnsubscribe( frame, mySubscriptions ) {
+	function _handleUnsubscribe( connectionId, frame, mySubscriptions ) {
 		var subId = frame.getHeader( "id", "" )
 		if ( !structKeyExists( mySubscriptions, subId ) ) {
 			return
@@ -191,19 +211,25 @@ class {
 		var destination = mySubscriptions[ subId ]
 		lock name="#variables.lockName#" type="exclusive" timeout="5" {
 			if ( structKeyExists( variables.subscribersByDestination, destination ) ) {
-				structDelete( variables.subscribersByDestination[ destination ], subId )
+				structDelete( variables.subscribersByDestination[ destination ], connectionId & ":" & subId )
 			}
 		}
 		structDelete( mySubscriptions, subId )
 	}
 
-	function _handleSend( frame, login ) {
+	function _handleSend( connection, frame, login ) {
 		var destination = frame.getHeader( "destination", "" )
 		if ( !len( destination ) ) {
 			return
 		}
 		if ( !isNull( variables.authorizeFn ) ) {
-			var allowed = variables.authorizeFn( login, destination, "publish", javacast( "null", "" ) )
+			// Passes the real connection, not a null placeholder — a
+			// second, smaller bug found alongside the subscription-id one:
+			// this call used to hardcode javacast("null",""), silently
+			// breaking the documented authorize(login, destination, access,
+			// connection) contract for publish checks specifically (only
+			// SUBSCRIBE's own authorize() call passed the real connection).
+			var allowed = variables.authorizeFn( login, destination, "publish", connection )
 			if ( !allowed ) {
 				return
 			}
@@ -221,7 +247,11 @@ class {
 	 * each with that subscriber's own subscription id (Undertow/STOMP
 	 * clients match incoming MESSAGE frames back to the subscribe() call
 	 * that requested them via this header, and different subscribers to
-	 * the same destination don't necessarily share a subscription id).
+	 * the same destination don't necessarily share a subscription id —
+	 * each entry stores the subscriber's own connection + their own
+	 * client-chosen subId, keyed in the registry by connectionId & subId
+	 * so two different connections can never collide on the same key even
+	 * if their client-chosen subIds happen to match).
 	 * Snapshots the subscriber list under lock, then sends outside it —
 	 * WebSocketConnection.send() already has its own per-connection lock
 	 * (see WebSocketConnection.bx), so holding this registry's lock for
@@ -243,21 +273,22 @@ class {
 			}
 		}
 
-		for ( var subId in recipients ) {
+		for ( var key in recipients ) {
+			var subscriber = recipients[ key ]
 			var headers = duplicate( extraHeaders )
 			headers[ "destination" ] = destination
 			headers[ "message-id" ] = createUUID()
-			headers[ "subscription" ] = subId
-			recipients[ subId ].send( variables.codec.serialize( new "../StompFrame"( "MESSAGE", headers, body ) ) )
+			headers[ "subscription" ] = subscriber.subId
+			subscriber.connection.send( variables.codec.serialize( new "../StompFrame"( "MESSAGE", headers, body ) ) )
 		}
 	}
 
-	function _removeAllSubscriptions( mySubscriptions ) {
+	function _removeAllSubscriptions( connectionId, mySubscriptions ) {
 		lock name="#variables.lockName#" type="exclusive" timeout="5" {
 			for ( var subId in mySubscriptions ) {
 				var destination = mySubscriptions[ subId ]
 				if ( structKeyExists( variables.subscribersByDestination, destination ) ) {
-					structDelete( variables.subscribersByDestination[ destination ], subId )
+					structDelete( variables.subscribersByDestination[ destination ], connectionId & ":" & subId )
 				}
 			}
 		}
