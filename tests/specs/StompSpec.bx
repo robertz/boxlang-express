@@ -1,0 +1,253 @@
+/**
+ * Regression coverage for models/middleware/Stomp.bx — STOMP 1.2 pub/sub on
+ * top of app.ws(). Each behavior here was first verified live against a
+ * real running server before being written up as a permanent test, the
+ * same discipline as the rest of this project's WebSocket/SSE work.
+ *
+ * Two real bugs were found and fixed while building this, both worth
+ * knowing about if you touch this file or Stomp.bx itself:
+ *
+ * - A `private` method defined in a class is not reachable from a closure
+ *   that class hands to something else (app.ws()'s connection handler,
+ *   here) once that closure is invoked from outside the class — confirmed
+ *   directly with a minimal repro. Every helper Stomp.bx's handler()
+ *   closures call is a plain (non-private) method because of this.
+ * - duplicate() doesn't know how to deep-copy a struct holding
+ *   WebSocketConnection objects (it tries to duplicate the underlying
+ *   Java channel too and fails) — structCopy() (shallow) is what
+ *   _deliver() actually needs, a new struct with the same connection
+ *   references, not new connections.
+ */
+class extends="testbox.system.BaseSpec" {
+
+	function beforeAll() {
+		variables.testPort = 4940
+		variables.codec = new "../../models/StompFrameCodec"()
+
+		variables.app = new "../../models/BoxExpress"()
+		variables.stomp = new "../../models/middleware/Stomp"( { heartbeatMs: 0 } )
+		variables.app.ws( "/stomp", variables.stomp.handler() )
+
+		variables.authApp = new "../../models/BoxExpress"()
+		variables.authPort = 4941
+		variables.authStomp = new "../../models/middleware/Stomp"( {
+			authenticate: ( login, passcode, host, connection ) => login == "demo" && passcode == "secret",
+			authorize: ( login, destination, access, connection ) => destination != "/topic/forbidden"
+		} )
+		variables.authApp.ws( "/stomp", variables.authStomp.handler() )
+
+		variables.hbApp = new "../../models/BoxExpress"()
+		variables.hbPort = 4942
+		variables.hbStomp = new "../../models/middleware/Stomp"( { heartbeatMs: 200 } )
+		variables.hbApp.ws( "/stomp", variables.hbStomp.handler() )
+
+		variables.app.listen( port = variables.testPort, options = { block: false } )
+		variables.authApp.listen( port = variables.authPort, options = { block: false } )
+		variables.hbApp.listen( port = variables.hbPort, options = { block: false } )
+		sleep( 300 )
+	}
+
+	function afterAll() {
+		variables.app.close()
+		variables.authApp.close()
+		variables.hbApp.close()
+	}
+
+	private function _connectedClient( port ) {
+		var client = new "../helpers/WebSocketTestClient"()
+		client.connect( "localhost", port, "/stomp" )
+		client.sendText( variables.codec.serialize( new "../../models/StompFrame"( "CONNECT", { "accept-version": "1.2" } ) ) )
+		var connectedFrame = variables.codec.parse( client.readTextFrame() )
+		return { client: client, connectedFrame: connectedFrame }
+	}
+
+	function run() {
+		describe( "Stomp middleware", function() {
+
+			it( "sends CONNECTED in response to CONNECT", function() {
+				var conn = _connectedClient( variables.testPort )
+				expect( conn.connectedFrame.getCommand() ).toBe( "CONNECTED" )
+				expect( conn.connectedFrame.getHeader( "version" ) ).toBe( "1.2" )
+				conn.client.close()
+			} )
+
+			it( "delivers a SEND to a SUBSCRIBEd destination as a MESSAGE with the subscriber's own subscription id", function() {
+				var conn = _connectedClient( variables.testPort )
+				conn.client.sendText( variables.codec.serialize( new "../../models/StompFrame"( "SUBSCRIBE", { destination: "/topic/a", id: "sub-1" } ) ) )
+				sleep( 100 )
+
+				conn.client.sendText( variables.codec.serialize( new "../../models/StompFrame"( "SEND", { destination: "/topic/a" }, "hello" ) ) )
+				var msg = variables.codec.parse( conn.client.readTextFrame() )
+
+				expect( msg.getCommand() ).toBe( "MESSAGE" )
+				expect( msg.getHeader( "destination" ) ).toBe( "/topic/a" )
+				expect( msg.getHeader( "subscription" ) ).toBe( "sub-1" )
+				expect( msg.getBody() ).toBe( "hello" )
+
+				conn.client.close()
+			} )
+
+			it( "delivers to every current subscriber of a destination, not just the sender", function() {
+				var subscriber = _connectedClient( variables.testPort )
+				subscriber.client.sendText( variables.codec.serialize( new "../../models/StompFrame"( "SUBSCRIBE", { destination: "/topic/broadcast-test", id: "sub-only" } ) ) )
+				sleep( 100 )
+
+				var sender = _connectedClient( variables.testPort )
+				sender.client.sendText( variables.codec.serialize( new "../../models/StompFrame"( "SEND", { destination: "/topic/broadcast-test" }, "from another connection" ) ) )
+
+				var msg = variables.codec.parse( subscriber.client.readTextFrame() )
+				expect( msg.getBody() ).toBe( "from another connection" )
+
+				subscriber.client.close()
+				sender.client.close()
+			} )
+
+			it( "keeps two different connections' subscriptions independent even when they choose the identical subscription id", function() {
+				// Regression test for a real HIGH-severity finding from a
+				// security review: the subscriber registry used to be keyed
+				// on the client-supplied SUBSCRIBE id alone, shared across
+				// every connection — a second connection subscribing with
+				// the same id (not secret, and commonly sequential per
+				// client library, e.g. "sub-0") silently overwrote the
+				// first connection's entry, redirecting their messages and
+				// letting the second connection's UNSUBSCRIBE delete the
+				// first connection's subscription.
+				var connA = _connectedClient( variables.testPort )
+				connA.client.sendText( variables.codec.serialize( new "../../models/StompFrame"( "SUBSCRIBE", { destination: "/topic/collision-test", id: "sub-0" } ) ) )
+				sleep( 100 )
+
+				var connB = _connectedClient( variables.testPort )
+				connB.client.sendText( variables.codec.serialize( new "../../models/StompFrame"( "SUBSCRIBE", { destination: "/topic/collision-test", id: "sub-0" } ) ) )
+				sleep( 100 )
+
+				variables.stomp.send( "/topic/collision-test", "broadcast" )
+
+				var msgA = variables.codec.parse( connA.client.readTextFrame() )
+				var msgB = variables.codec.parse( connB.client.readTextFrame() )
+				expect( msgA.getBody() ).toBe( "broadcast" )
+				expect( msgB.getBody() ).toBe( "broadcast" )
+
+				// B's UNSUBSCRIBE with the colliding id must not touch A's
+				// subscription.
+				connB.client.sendText( variables.codec.serialize( new "../../models/StompFrame"( "UNSUBSCRIBE", { id: "sub-0" } ) ) )
+				sleep( 100 )
+				variables.stomp.send( "/topic/collision-test", "after-b-unsubscribed" )
+				var msgAAfter = variables.codec.parse( connA.client.readTextFrame() )
+				expect( msgAAfter.getBody() ).toBe( "after-b-unsubscribed" )
+
+				connA.client.close()
+				connB.client.close()
+			} )
+
+			it( "stops delivering to a connection after UNSUBSCRIBE", function() {
+				var conn = _connectedClient( variables.testPort )
+				conn.client.sendText( variables.codec.serialize( new "../../models/StompFrame"( "SUBSCRIBE", { destination: "/topic/unsub-test", id: "sub-2" } ) ) )
+				sleep( 100 )
+				conn.client.sendText( variables.codec.serialize( new "../../models/StompFrame"( "UNSUBSCRIBE", { id: "sub-2" } ) ) )
+				sleep( 100 )
+
+				conn.client.sendText( variables.codec.serialize( new "../../models/StompFrame"( "SEND", { destination: "/topic/unsub-test" }, "should not arrive" ) ) )
+
+				// Prove nothing arrives by sending a second, real, subscribed
+				// message and confirming THAT'S what shows up first — not a
+				// sleep-and-hope, an actual observable ordering check.
+				conn.client.sendText( variables.codec.serialize( new "../../models/StompFrame"( "SUBSCRIBE", { destination: "/topic/unsub-test-confirm", id: "sub-3" } ) ) )
+				sleep( 100 )
+				conn.client.sendText( variables.codec.serialize( new "../../models/StompFrame"( "SEND", { destination: "/topic/unsub-test-confirm" }, "this one should arrive" ) ) )
+
+				var msg = variables.codec.parse( conn.client.readTextFrame() )
+				expect( msg.getBody() ).toBe( "this one should arrive" )
+
+				conn.client.close()
+			} )
+
+			it( "app code can broadcast via stomp.send() from outside any connection's own handler", function() {
+				var conn = _connectedClient( variables.testPort )
+				conn.client.sendText( variables.codec.serialize( new "../../models/StompFrame"( "SUBSCRIBE", { destination: "/topic/server-push", id: "sub-4" } ) ) )
+				sleep( 100 )
+
+				variables.stomp.send( "/topic/server-push", { pushed: true } )
+
+				var msg = variables.codec.parse( conn.client.readTextFrame() )
+				expect( msg.getBody() ).toBe( '{"pushed":true}' )
+
+				conn.client.close()
+			} )
+
+			it( "sends a RECEIPT and closes on DISCONNECT when a receipt header is present", function() {
+				var conn = _connectedClient( variables.testPort )
+				conn.client.sendText( variables.codec.serialize( new "../../models/StompFrame"( "DISCONNECT", { receipt: "bye-1" } ) ) )
+
+				var receipt = variables.codec.parse( conn.client.readTextFrame() )
+				expect( receipt.getCommand() ).toBe( "RECEIPT" )
+				expect( receipt.getHeader( "receipt-id" ) ).toBe( "bye-1" )
+
+				conn.client.close()
+			} )
+
+			it( "rejects SUBSCRIBE/SEND before CONNECT with an ERROR", function() {
+				var client = new "../helpers/WebSocketTestClient"()
+				client.connect( "localhost", variables.testPort, "/stomp" )
+				client.sendText( variables.codec.serialize( new "../../models/StompFrame"( "SUBSCRIBE", { destination: "/topic/a", id: "s1" } ) ) )
+
+				var errorFrame = variables.codec.parse( client.readTextFrame() )
+				expect( errorFrame.getCommand() ).toBe( "ERROR" )
+
+				client.close()
+			} )
+
+			it( "rejects CONNECT when authenticate() returns false, and never sends CONNECTED", function() {
+				var client = new "../helpers/WebSocketTestClient"()
+				client.connect( "localhost", variables.authPort, "/stomp" )
+				client.sendText( variables.codec.serialize( new "../../models/StompFrame"( "CONNECT", { "accept-version": "1.2", login: "wrong", passcode: "bad" } ) ) )
+
+				var response = variables.codec.parse( client.readTextFrame() )
+				expect( response.getCommand() ).toBe( "ERROR" )
+
+				client.close()
+			} )
+
+			it( "accepts CONNECT when authenticate() returns true, and rejects SUBSCRIBE when authorize() returns false", function() {
+				var client = new "../helpers/WebSocketTestClient"()
+				client.connect( "localhost", variables.authPort, "/stomp" )
+				client.sendText( variables.codec.serialize( new "../../models/StompFrame"( "CONNECT", { "accept-version": "1.2", login: "demo", passcode: "secret" } ) ) )
+				var connectedFrame = variables.codec.parse( client.readTextFrame() )
+				expect( connectedFrame.getCommand() ).toBe( "CONNECTED" )
+
+				client.sendText( variables.codec.serialize( new "../../models/StompFrame"( "SUBSCRIBE", { destination: "/topic/forbidden", id: "s1" } ) ) )
+				var errorFrame = variables.codec.parse( client.readTextFrame() )
+				expect( errorFrame.getCommand() ).toBe( "ERROR" )
+
+				client.close()
+			} )
+
+			it( "advertises heart-beat in CONNECTED and sends periodic keep-alives when heartbeatMs is configured", function() {
+				var client = new "../helpers/WebSocketTestClient"()
+				client.connect( "localhost", variables.hbPort, "/stomp" )
+				client.sendText( variables.codec.serialize( new "../../models/StompFrame"( "CONNECT", { "accept-version": "1.2" } ) ) )
+				var connectedFrame = variables.codec.parse( client.readTextFrame() )
+				expect( connectedFrame.getHeader( "heart-beat" ) ).toBe( "200,0" )
+
+				var heartbeat = client.readTextFrame()
+				expect( heartbeat ).toBe( char( 10 ) )
+
+				client.close()
+			} )
+
+			it( "escapes a colon and embedded newline in a header value instead of corrupting the frame", function() {
+				var conn = _connectedClient( variables.testPort )
+				var trickyDestination = "/topic/inject:test"
+				conn.client.sendText( variables.codec.serialize( new "../../models/StompFrame"( "SUBSCRIBE", { destination: trickyDestination, id: "sub-tricky" } ) ) )
+				sleep( 100 )
+
+				conn.client.sendText( variables.codec.serialize( new "../../models/StompFrame"( "SEND", { destination: trickyDestination }, "x" ) ) )
+				var msg = variables.codec.parse( conn.client.readTextFrame() )
+				expect( msg.getHeader( "destination" ) ).toBe( trickyDestination )
+
+				conn.client.close()
+			} )
+
+		} )
+	}
+
+}

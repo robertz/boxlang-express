@@ -1,6 +1,6 @@
 {
     "name":"BoxExpress",
-    "version":"0.2.1",
+    "version":"0.2.3",
     "author":"Robert Zehnder",
     "slug":"boxlang-express",
     "shortDescription":"An Express.js-style web framework for BoxLang",
@@ -38,6 +38,7 @@
         "tests/**",
         "examples/**",
         "run-tests.bxs",
-        "testbox/**"
+        "testbox/**",
+        "java-src/**"
     ]
 }

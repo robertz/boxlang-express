@@ -1,0 +1,32 @@
+/**
+ * Undertow's top-level io.undertow.server.HttpHandler when any app.ws()
+ * routes are registered. Checks whether a request is a WebSocket upgrade
+ * for a registered path and, if so, delegates to the WebSocket handshake
+ * handler; every other request — which is almost every request, even in
+ * an app using WebSockets — falls through to the existing HTTP dispatch
+ * chain completely unchanged. When no app.ws() routes exist at all,
+ * BoxExpress.bx skips this class entirely and sets the HTTP dispatch
+ * handler directly, so an app using none of this pays nothing for it.
+ */
+class {
+
+	function init( wsHandshakeHandler, wsRoutePaths, httpHandler ) {
+		variables.wsHandshakeHandler = wsHandshakeHandler
+		variables.wsRoutePaths = wsRoutePaths
+		variables.httpHandler = httpHandler
+		variables.upgradeHeaderName = createObject( "java", "io.undertow.util.HttpString" ).init( "Upgrade" )
+		return this
+	}
+
+	function handleRequest( exchange ) {
+		var upgradeHeader = exchange.getRequestHeaders().getFirst( variables.upgradeHeaderName )
+		var isWsUpgrade = !isNull( upgradeHeader ) && upgradeHeader.equalsIgnoreCase( "websocket" )
+
+		if ( isWsUpgrade && structKeyExists( variables.wsRoutePaths, exchange.getRequestPath() ) ) {
+			variables.wsHandshakeHandler.handleRequest( exchange )
+		} else {
+			variables.httpHandler.handleRequest( exchange )
+		}
+	}
+
+}

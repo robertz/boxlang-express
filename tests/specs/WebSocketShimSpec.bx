@@ -1,0 +1,88 @@
+/**
+ * Regression coverage for the boxexpress-ws-shim jar (java-src/boxexpress/ws/) —
+ * the one piece of compiled Java in this project.
+ *
+ * Undertow's intended WebSocket receive extension point,
+ * io.undertow.websockets.core.AbstractReceiveListener, is an abstract Java
+ * class with protected hook methods, not an interface. Confirmed directly,
+ * before this shim existed, that BoxLang can't work around that two ways:
+ * its documented extends="java:X" feature for subclassing a Java class
+ * fails on the installed runtime (1.16.0+57) — a constructor-argument-
+ * forwarding bug reproduced even with BoxLang's own FilterInputStream
+ * example, and class resolution fails outright for AbstractReceiveListener
+ * specifically — and implementing the lower-level org.xnio.ChannelListener
+ * interface directly hits a wall too: its handleEvent(channel) fires fine,
+ * but the only way to actually consume the pending frame,
+ * channel.receiveFrame(), is a protected method BoxLang's Java interop
+ * can't invoke, so nothing ever gets consumed and handleEvent just re-fires
+ * in a busy loop. BoxWebSocketListener.java does the real Java-side
+ * subclassing once, and re-exposes every event through a plain interface
+ * (WebSocketMessageHandler) that BoxLang code CAN implement via
+ * createDynamicProxy — this spec is what proves that actually works, not
+ * just that it compiles.
+ *
+ * This bypasses BoxExpress's normal request pipeline entirely (no Router,
+ * no app.ws() — that doesn't exist yet) — it talks to a bare Undertow
+ * WebSocketProtocolHandshakeHandler directly, on purpose, to isolate the
+ * shim itself from anything not yet built on top of it.
+ */
+class extends="testbox.system.BaseSpec" {
+
+	function beforeAll() {
+		variables.testPort = 4910
+		variables.recorder = { messages: [], errors: [], closed: false, closeCode: 0 }
+
+		var connCallback = new "../fixtures/websocket/EchoConnectionCallback"( variables.recorder )
+		var callbackProxy = createDynamicProxy( connCallback, [ "io.undertow.websockets.WebSocketConnectionCallback" ] )
+		var handshakeHandler = createObject( "java", "io.undertow.websockets.WebSocketProtocolHandshakeHandler" ).init( callbackProxy )
+
+		var builder = createObject( "java", "io.undertow.Undertow" ).builder()
+		builder.addHttpListener( variables.testPort, "localhost" )
+		builder.setHandler( handshakeHandler )
+		variables.undertowServer = builder.build()
+		variables.undertowServer.start()
+		sleep( 300 )
+	}
+
+	function afterAll() {
+		variables.undertowServer.stop()
+	}
+
+	function run() {
+		describe( "boxexpress-ws-shim (BoxWebSocketListener + WebSocketMessageHandler)", function() {
+
+			it( "completes the WebSocket handshake", function() {
+				var client = new "../helpers/WebSocketTestClient"()
+				var statusLine = client.connect( "localhost", variables.testPort, "/ws" )
+				expect( statusLine ).toInclude( "101" )
+				client.close()
+			} )
+
+			it( "delivers a real text message to onMessage(), not just fires the event with no data", function() {
+				var client = new "../helpers/WebSocketTestClient"()
+				client.connect( "localhost", variables.testPort, "/ws" )
+				client.sendText( "ping" )
+
+				var reply = client.readTextFrame()
+				expect( reply ).toBe( "echo:ping" )
+
+				client.close()
+			} )
+
+			it( "delivers multiple sequential messages on the same connection", function() {
+				var client = new "../helpers/WebSocketTestClient"()
+				client.connect( "localhost", variables.testPort, "/ws" )
+
+				client.sendText( "first" )
+				expect( client.readTextFrame() ).toBe( "echo:first" )
+
+				client.sendText( "second" )
+				expect( client.readTextFrame() ).toBe( "echo:second" )
+
+				client.close()
+			} )
+
+		} )
+	}
+
+}

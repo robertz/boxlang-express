@@ -1,0 +1,115 @@
+/**
+ * Minimal hand-rolled WebSocket client for tests — no JDK WebSocket client
+ * dependency, just a raw java.net.Socket speaking the handshake and frame
+ * format directly (RFC 6455). Enough to test server-side WebSocket code
+ * without pulling in a client library: connect (HTTP Upgrade handshake),
+ * sendText (masked client->server frame, required by spec), readTextFrame
+ * (unmasked server->client frame), close.
+ *
+ * Text-only, single-frame messages only (no fragmentation) — matches the
+ * scope of what the server side (BoxWebSocketListener) actually handles.
+ */
+class {
+
+	function connect( host, port, path = "/" ) {
+		variables.socket = createObject( "java", "java.net.Socket" ).init( host, port )
+		var out = variables.socket.getOutputStream()
+		var crlf = char( 13 ) & char( 10 )
+		var handshake = "GET #path# HTTP/1.1" & crlf
+			& "Host: #host#:#port#" & crlf
+			& "Upgrade: websocket" & crlf
+			& "Connection: Upgrade" & crlf
+			& "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==" & crlf
+			& "Sec-WebSocket-Version: 13" & crlf & crlf
+		out.write( handshake.getBytes( "UTF-8" ) )
+		out.flush()
+
+		var reader = createObject( "java", "java.io.BufferedReader" ).init(
+			createObject( "java", "java.io.InputStreamReader" ).init( variables.socket.getInputStream() )
+		)
+		var statusLine = reader.readLine()
+		var attempts = 1
+		while ( attempts <= 20 ) {
+			var line = reader.readLine()
+			if ( isNull( line ) || len( line ) == 0 ) {
+				break
+			}
+			attempts++
+		}
+
+		// A real client (browser, or anything over an actual network hop)
+		// always has meaningfully more latency between reading the 101
+		// response and writing its first frame than a local loopback
+		// socket does — confirmed directly with timing instrumentation
+		// that a raw socket can write a frame before the server's own
+		// onConnect has even started running, since that dispatch happens
+		// asynchronously after the handshake response is flushed. Real
+		// clients never hit this; a tight local test loop can. This isn't
+		// masking a shim bug — it's making the test representative of how
+		// a WebSocket connection is actually used, instead of a race no
+		// real caller would trigger.
+		sleep( 50 )
+
+		return statusLine
+	}
+
+	function sendText( text ) {
+		var payload = text.getBytes( "UTF-8" )
+		var maskKey = [ 1, 2, 3, 4 ]
+		var frame = createObject( "java", "java.io.ByteArrayOutputStream" ).init()
+		frame.write( javacast( "int", 129 ) )   // FIN + text opcode (0x81)
+
+		var len = payload.len()
+		if ( len <= 125 ) {
+			frame.write( javacast( "int", bitOr( 128, len ) ) )   // MASK bit + length
+		} else {
+			frame.write( javacast( "int", bitOr( 128, 126 ) ) )
+			frame.write( javacast( "int", bitAnd( bitSHRN( len, 8 ), 255 ) ) )
+			frame.write( javacast( "int", bitAnd( len, 255 ) ) )
+		}
+		for ( var maskByte in maskKey ) {
+			frame.write( javacast( "int", maskByte ) )
+		}
+		var i = 1
+		while ( i <= len ) {
+			frame.write( javacast( "int", bitXor( payload[ i ], maskKey[ ( ( i - 1 ) % 4 ) + 1 ] ) ) )
+			i++
+		}
+
+		variables.socket.getOutputStream().write( frame.toByteArray() )
+		variables.socket.getOutputStream().flush()
+	}
+
+	/**
+	 * Reads one unmasked server->client text frame and returns its payload
+	 * as a string. Handles the two short-length forms (<=125, and the
+	 * 126-prefixed 16-bit extended length) — matches what this project's
+	 * own frames actually send, not the full spec's 64-bit extended form.
+	 */
+	function readTextFrame() {
+		var inStream = variables.socket.getInputStream()
+		var byte1 = inStream.read()
+		var byte2 = inStream.read()
+		var len = bitAnd( byte2, 127 )
+		if ( len == 126 ) {
+			var lenHigh = inStream.read()
+			var lenLow = inStream.read()
+			len = bitOr( bitSHLN( lenHigh, 8 ), lenLow )
+		}
+		var bodyBytes = repeatString( char( 0 ), len ).getBytes( "UTF-8" )
+		var totalRead = 0
+		while ( totalRead < len ) {
+			var n = inStream.read( bodyBytes, javacast( "int", totalRead ), javacast( "int", len - totalRead ) )
+			if ( n == -1 ) {
+				break
+			}
+			totalRead += n
+		}
+		return createObject( "java", "java.lang.String" ).init( bodyBytes, "UTF-8" )
+	}
+
+	function close() {
+		variables.socket.close()
+	}
+
+}

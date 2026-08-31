@@ -41,6 +41,16 @@ class extends="testbox.system.BaseSpec" {
 			} )
 		} )
 
+		variables.app.get( "/events-injection-test", ( req, res ) => {
+			res.sse( ( emitter ) => {
+				var maliciousEvent = "chat" & char( 10 ) & char( 10 ) & 'data: {"admin":true}' & char( 10 ) & char( 10 ) & "event: chat"
+				var maliciousId = "1" & char( 10 ) & "data: injected-via-id"
+				emitter.send( "legit-payload", maliciousEvent, maliciousId )
+				emitter.comment( "keepalive" & char( 10 ) & char( 10 ) & "data: injected-via-comment" )
+				emitter.close()
+			} )
+		} )
+
 		variables.app.listen( port = variables.testPort, options = { block: false } )
 		sleep( 300 )
 	}
@@ -67,6 +77,35 @@ class extends="testbox.system.BaseSpec" {
 				expect( body ).toInclude( "data: hello" & char( 10 ) & char( 10 ) )
 				expect( body ).toInclude( "event: update" & char( 10 ) & 'data: {"progress":50,"status":"processing"}' )
 				expect( body ).toInclude( "id: 123" & char( 10 ) & "event: done" & char( 10 ) & 'data: {"complete":true}' )
+			} )
+
+			it( "strips embedded newlines from event/id/comment so they can't inject fabricated SSE lines into the stream", function() {
+				// Regression test for a real finding from a security review:
+				// event/id weren't newline-safe the way data already was —
+				// an embedded LF in either let a caller (unknowingly, e.g.
+				// piping a request-derived channel name into event) inject a
+				// fabricated data:/event:/id: line, or a blank line starting
+				// an attacker-defined event, into the stream every client
+				// reading it sees.
+				var result = variables.client.get( variables.baseUrl & "/events-injection-test" )
+				var body = result.body
+
+				// The malicious substrings are still present (nothing is
+				// silently dropped) but glued onto their own single field
+				// line — never split into fabricated data:/event: fields of
+				// their own.
+				expect( body ).notToInclude( char( 10 ) & 'data: {"admin":true}' )
+				expect( body ).notToInclude( char( 10 ) & "data: injected-via-id" )
+				expect( body ).notToInclude( char( 10 ) & "data: injected-via-comment" )
+
+				// The only real "data: " line in the stream is the one
+				// legitimate payload this route sends — nothing forged made
+				// it through as its own real data field.
+				for ( var bodyLine in body.listToArray( char( 10 ) ) ) {
+					if ( bodyLine.left( 6 ) == "data: " ) {
+						expect( bodyLine ).toBe( "data: legit-payload" )
+					}
+				}
 			} )
 
 			it( "closes the stream even when the callback never calls emitter.close() itself", function() {

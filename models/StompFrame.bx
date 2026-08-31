@@ -1,0 +1,30 @@
+/**
+ * A parsed (or about-to-be-serialized) STOMP frame: COMMAND, headers, body.
+ * Plain data holder — StompFrameCodec.bx does the actual wire-format work.
+ */
+class {
+
+	function init( command, headers = {}, body = "" ) {
+		variables.command = command
+		variables.headers = headers
+		variables.body = body
+		return this
+	}
+
+	function getCommand() {
+		return variables.command
+	}
+
+	function getHeader( name, defaultValue = "" ) {
+		return variables.headers[ name ] ?: defaultValue
+	}
+
+	function getHeaders() {
+		return variables.headers
+	}
+
+	function getBody() {
+		return variables.body
+	}
+
+}

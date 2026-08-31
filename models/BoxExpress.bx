@@ -11,6 +11,7 @@ class {
 		this.settings = {}
 		this.locals = {}
 		variables.router = new Router( this.settings )
+		variables.wsRoutes = {}
 		variables.undertowServer = javacast( "null", "" )
 		variables.running = false
 		variables.reloadWatcher = javacast( "null", "" )
@@ -63,6 +64,27 @@ class {
 	}
 
 	/**
+	 * Registers a WebSocket route — a separate table from the HTTP route
+	 * table above, not another verb on Router, since a WebSocket connection
+	 * has no req/res/next() chain to run through. Exact-path matching only
+	 * for now (no :params, no mount paths) — the simplest version that
+	 * covers a real route table, extended later if a real need for
+	 * pattern-matched WebSocket paths shows up.
+	 *
+	 * handler receives a WebSocketConnection when a client connects —
+	 * register onMessage()/onClose() on it synchronously, before returning,
+	 * since messages can start arriving as soon as the handshake completes:
+	 *
+	 *   app.ws( "/chat", ( connection ) => {
+	 *       connection.onMessage( ( text ) => connection.send( "echo:" & text ) )
+	 *   } )
+	 */
+	function ws( path, handler ) {
+		variables.wsRoutes[ path ] = handler
+		return this
+	}
+
+	/**
 	 * use( handler ) / use( handler1, handler2, ... )
 	 * use( mountPath, handler ) / use( mountPath, handler1, handler2, ..., router )
 	 * See Router.use() for the full signature — this just forwards every
@@ -93,8 +115,18 @@ class {
 		// (not per-request from render()) since Configuration.mappings is a sorted,
 		// non-concurrent structure — safe for the single-threaded startup sequence,
 		// not for concurrent virtual-thread request handlers.
+		//
+		// clearConfigCache() is required, not optional: RequestBoxContext.getConfig()
+		// memoizes its merged config struct on first read and never invalidates it.
+		// The context executing this app.bxs script (captured by listen() when it
+		// builds HttpBridge, and reused for every request handled afterward) may
+		// already have read+cached its config via an earlier app.use()/route call
+		// before this line runs — without clearing that cache, the mapping above is
+		// live on the runtime's Configuration but invisible to every request's
+		// include, and every render() keeps failing exactly as before this fix.
 		if ( lCase( name ) == "views" ) {
 			getBoxRuntime().getConfiguration().registerMapping( value, value )
+			getBoxContext().clearConfigCache()
 		}
 		return this
 	}
@@ -149,9 +181,26 @@ class {
 		var dispatchHandler = new adapters.UndertowVirtualThreadHandler( innerProxy )
 		var proxy = createDynamicProxy( dispatchHandler, [ "io.undertow.server.HttpHandler" ] )
 
+		// An app that never called app.ws() pays nothing for this — proxy
+		// (the plain HTTP dispatch chain) is set directly as Undertow's
+		// handler, no extra indirection. Only when at least one WebSocket
+		// route exists does a request first pass through WsUpgradeRouter,
+		// which delegates to the WebSocket handshake handler for a
+		// matching upgrade request and to the exact same HTTP chain,
+		// completely unchanged, for everything else.
+		var rootProxy = proxy
+		if ( !structIsEmpty( variables.wsRoutes ) ) {
+			var wsConnectionCallback = new adapters.WsConnectionCallback( variables.wsRoutes )
+			var wsCallbackProxy = createDynamicProxy( wsConnectionCallback, [ "io.undertow.websockets.WebSocketConnectionCallback" ] )
+			var wsHandshakeHandler = createObject( "java", "io.undertow.websockets.WebSocketProtocolHandshakeHandler" ).init( wsCallbackProxy )
+
+			var upgradeRouter = new adapters.WsUpgradeRouter( wsHandshakeHandler, variables.wsRoutes, proxy )
+			rootProxy = createDynamicProxy( upgradeRouter, [ "io.undertow.server.HttpHandler" ] )
+		}
+
 		var builder = createObject( "java", "io.undertow.Undertow" ).builder()
 		builder.addHttpListener( port, "0.0.0.0" )
-		builder.setHandler( proxy )
+		builder.setHandler( rootProxy )
 		builder.setSocketOption( createObject( "java", "org.xnio.Options" ).BACKLOG, javacast( "int", backlog ) )
 		builder.setServerOption( createObject( "java", "io.undertow.UndertowOptions" ).ENABLE_STATISTICS, javacast( "boolean", true ) )
 

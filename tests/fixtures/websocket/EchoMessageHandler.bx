@@ -1,0 +1,28 @@
+/**
+ * Implements boxexpress.ws.WebSocketMessageHandler (via createDynamicProxy)
+ * for WebSocketShimSpec — echoes every text message back prefixed with
+ * "echo:", and records close/error events on a shared struct the test can
+ * inspect afterward.
+ */
+class {
+
+	function init( recorder ) {
+		variables.recorder = recorder
+		return this
+	}
+
+	function onMessage( channel, text ) {
+		variables.recorder.messages.append( text )
+		createObject( "java", "io.undertow.websockets.core.WebSockets" ).sendTextBlocking( "echo:" & text, channel )
+	}
+
+	function onClose( channel, code, reason ) {
+		variables.recorder.closed = true
+		variables.recorder.closeCode = code
+	}
+
+	function onError( channel, error ) {
+		variables.recorder.errors.append( error.getMessage() )
+	}
+
+}
