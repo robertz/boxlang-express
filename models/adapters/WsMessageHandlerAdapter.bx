@@ -1,0 +1,29 @@
+/**
+ * Implements boxexpress.ws.WebSocketMessageHandler (via createDynamicProxy)
+ * for BoxWebSocketListener.java — the compiled shim — to call into.
+ * Forwards every event to the WebSocketConnection wrapping the same
+ * channel, which is where an app's own onMessage()/onClose() callbacks
+ * actually live.
+ */
+class {
+
+	function init( connection ) {
+		variables.connection = connection
+		return this
+	}
+
+	function onMessage( channel, text ) {
+		variables.connection._dispatchMessage( text )
+	}
+
+	function onClose( channel, code, reason ) {
+		variables.connection._dispatchClose( code, reason )
+	}
+
+	function onError( channel, error ) {
+		// No app-facing error hook yet (see WebSocketConnection) — matches
+		// SseEmitter's own posture, where a failed write just flips
+		// isClosed() rather than surfacing the exception itself.
+	}
+
+}

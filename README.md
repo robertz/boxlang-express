@@ -140,6 +140,8 @@ which matters for a repo whose own scripts live in subdirectories
   `listen()` has run or after `close()`. Useful for a server-monitoring
   dashboard alongside JVM/OS-level metrics (memory, CPU, GC), which don't
   see anything at the HTTP layer.
+- `app.ws(path, callback)` — WebSocket routes; see
+  [WebSockets](#websockets-appws) below.
 
 Node keeps a CLI process alive via its event loop; BoxLang's CLI runtime has
 no equivalent, so unlike Express, `listen()` blocks the calling thread by
@@ -210,6 +212,56 @@ resource limit), that's caught, logged, and the current server is left
 running rather than dying with nothing to replace it.
 
 Separate from `app.set("env", "development")` — use either independently.
+
+### WebSockets (`app.ws`)
+
+`app.ws(path, callback)` registers a WebSocket route — separate from
+`app.get/post/...` and `Router`, since a WebSocket connection has no
+`req`/`res`/`next()` chain to run through. `callback` receives a
+`WebSocketConnection` the moment a client connects; register what you need
+on it before returning, since messages can start arriving as soon as the
+handshake completes:
+
+```js
+app.ws( "/chat", ( connection ) => {
+	connection.onMessage( ( text ) => {
+		connection.send( "echo:" & text )
+	} )
+	connection.onClose( ( code, reason ) => {
+		println( "client disconnected: #code#" )
+	} )
+} )
+```
+
+`connection.send(data)` — one text message; JSON-serialized unless
+already a simple value, same convention as `res.sse()`'s `emitter.send()`.
+`connection.onMessage(callback)` — `callback(text)` runs for every message
+this connection receives. `connection.onClose(callback)` —
+`callback(code, reason)` runs once, whether the client disconnected or
+`connection.close()` was called locally. `connection.isClosed()`.
+
+Like `res.sse()`'s `emitter`, a `connection` is a plain object — stash it
+somewhere shared to push to it from a completely different route later
+(a chat broadcast, a live update triggered by an unrelated `POST`).
+`send()`/`close()` are safe to call from another thread than the one that
+opened the connection, funneled through a per-connection lock so
+concurrent writers can't interleave and corrupt a frame — same fix, same
+reasoning as `SseEmitter`'s.
+
+Path matching is exact only for now — no `:params`, no mounting under a
+`Router`. An upgrade request to a path with no registered `app.ws()`
+route falls through to the normal HTTP dispatch chain untouched, so it
+gets whatever that path would otherwise return (a `404` if nothing
+matches there either) rather than being silently accepted as a
+WebSocket connection. An app that registers no `app.ws()` routes at all
+pays nothing for this — the plain HTTP dispatch chain is wired directly
+into Undertow with no extra indirection in front of it.
+
+Built on one small piece of compiled Java
+(`java-src/boxexpress/ws/`, vendored as `libs/boxexpress-ws-shim-*.jar`) —
+the only compiled Java in this project. See
+[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md#the-one-piece-of-compiled-java-java-srcboxexpressws)
+for why.
 
 ### Router (mountable sub-app)
 
@@ -1086,8 +1138,7 @@ Two more BoxLang-specific things that shaped how these are written:
 **0.2.4**
 - Added `java-src/boxexpress/ws/` — this project's first compiled Java,
   vendored as `libs/boxexpress-ws-shim-1.0.0.jar` (rebuild with
-  `java-src/build.sh`). Foundational only; there's no `app.ws()` or public
-  WebSocket API yet. Exists because Undertow's own WebSocket receive
+  `java-src/build.sh`). Exists because Undertow's own WebSocket receive
   extension point, `io.undertow.websockets.core.AbstractReceiveListener`,
   is an abstract Java class with protected hook methods, not an
   interface — confirmed directly, not assumed, that BoxLang can't work
@@ -1108,6 +1159,22 @@ Two more BoxLang-specific things that shaped how these are written:
   the receive handler, same class of bug already fixed once for the HTTP
   request path. See
   [tests/specs/WebSocketShimSpec.bx](tests/specs/WebSocketShimSpec.bx).
+- Added `app.ws(path, callback)` and `WebSocketConnection` — WebSocket
+  routes, built on the shim above. A dedicated `WsUpgradeRouter` sits in
+  front of Undertow's normal dispatch only when at least one `app.ws()`
+  route is registered (an app that never calls it pays nothing extra);
+  it delegates a matching `Upgrade: websocket` request to the WebSocket
+  handshake handler and everything else — which is almost every request,
+  even in an app that does use `app.ws()` — through the exact same HTTP
+  dispatch chain, completely unchanged. An upgrade request to a path with
+  no registered route falls through to that same chain and gets whatever
+  it would otherwise return (a `404` if nothing else matches), rather
+  than being silently accepted. `WebSocketConnection`'s `send()`/`close()`
+  are safe to call from another thread than the one that opened the
+  connection — the same broadcast pattern and the same per-connection
+  lock `SseEmitter` already uses, for the same reason. See
+  [WebSocketConnection.bx](models/WebSocketConnection.bx) and
+  [tests/specs/WebSocketRouteSpec.bx](tests/specs/WebSocketRouteSpec.bx).
 - **Security fix:** `SseEmitter.send()`'s `event`/`id` arguments and
   `comment()`'s `text` argument were concatenated directly into their SSE
   field lines with no newline stripping — unlike `data`, which is safely

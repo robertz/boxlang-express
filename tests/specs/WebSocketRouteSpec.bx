@@ -1,0 +1,111 @@
+/**
+ * Regression coverage for app.ws() — the public WebSocket route API built
+ * on top of the boxexpress-ws-shim (see WebSocketShimSpec.bx for the shim
+ * itself). This spec goes through the real BoxExpress.bx/WsUpgradeRouter
+ * path, the way an actual app would use it, rather than talking to
+ * Undertow's handshake handler directly.
+ */
+class extends="testbox.system.BaseSpec" {
+
+	function beforeAll() {
+		variables.testPort = 4921
+		variables.baseUrl = "http://localhost:#variables.testPort#"
+		variables.httpClient = new "../helpers/HttpClient"()
+
+		variables.app = new "../../models/BoxExpress"()
+
+		variables.app.get( "/", ( req, res ) => res.send( "plain http route" ) )
+
+		variables.app.ws( "/chat", ( connection ) => {
+			connection.onMessage( ( text ) => {
+				connection.send( "echo:" & text )
+			} )
+		} )
+
+		variables.closeEvents = []
+		variables.app.ws( "/close-test", ( connection ) => {
+			connection.onClose( ( code, reason ) => {
+				variables.closeEvents.append( code )
+			} )
+		} )
+
+		variables.app.listen( port = variables.testPort, options = { block: false } )
+		sleep( 300 )
+	}
+
+	function afterAll() {
+		variables.app.close()
+	}
+
+	function run() {
+		describe( "app.ws()", function() {
+
+			it( "leaves plain HTTP routes completely unaffected", function() {
+				var result = variables.httpClient.get( variables.baseUrl & "/" )
+				expect( result.statusCode ).toBe( 200 )
+				expect( result.body ).toBe( "plain http route" )
+			} )
+
+			it( "completes the WebSocket handshake for a registered route", function() {
+				var client = new "../helpers/WebSocketTestClient"()
+				var statusLine = client.connect( "localhost", variables.testPort, "/chat" )
+				expect( statusLine ).toInclude( "101" )
+				client.close()
+			} )
+
+			it( "delivers messages to the connection's onMessage() callback and can send back", function() {
+				var client = new "../helpers/WebSocketTestClient"()
+				client.connect( "localhost", variables.testPort, "/chat" )
+
+				client.sendText( "hello" )
+				expect( client.readTextFrame() ).toBe( "echo:hello" )
+
+				client.sendText( "world" )
+				expect( client.readTextFrame() ).toBe( "echo:world" )
+
+				client.close()
+			} )
+
+			it( "fires the connection's onClose() callback when the client disconnects", function() {
+				var client = new "../helpers/WebSocketTestClient"()
+				client.connect( "localhost", variables.testPort, "/close-test" )
+				var countBefore = variables.closeEvents.len()
+
+				client.close()
+
+				var waited = 0
+				while ( variables.closeEvents.len() == countBefore && waited < 2000 ) {
+					sleep( 100 )
+					waited += 100
+				}
+
+				expect( variables.closeEvents.len() ).toBe( countBefore + 1 )
+			} )
+
+			it( "falls through to the normal HTTP dispatch chain — a real 404, not silently accepted — for an upgrade request to an unregistered path", function() {
+				var socket = createObject( "java", "java.net.Socket" ).init( "localhost", variables.testPort )
+				var out = socket.getOutputStream()
+				var crlf = char( 13 ) & char( 10 )
+				out.write( (
+					"GET /not-a-ws-route HTTP/1.1" & crlf
+					& "Host: localhost:#variables.testPort#" & crlf
+					& "Upgrade: websocket" & crlf
+					& "Connection: Upgrade" & crlf
+					& "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==" & crlf
+					& "Sec-WebSocket-Version: 13" & crlf & crlf
+				).getBytes( "UTF-8" ) )
+				out.flush()
+
+				var reader = createObject( "java", "java.io.BufferedReader" ).init(
+					createObject( "java", "java.io.InputStreamReader" ).init( socket.getInputStream() )
+				)
+				var statusLine = reader.readLine()
+				expect( statusLine ).toInclude( "404" )
+
+				socket.close()
+			} )
+
+		} )
+	}
+
+}

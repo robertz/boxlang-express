@@ -229,6 +229,19 @@ If you're extending this shim, treat any new callback the same way: never
 call into BoxLang code directly from inside an Undertow-owned callback
 without dispatching off whatever thread Undertow handed you first.
 
+`app.ws(path, callback)` and `WebSocketConnection.bx` are built on top of
+this — `models/adapters/WsConnectionCallback.bx` is the one place that
+constructs a `BoxWebSocketListener`, looks up which registered handler
+owns a connection's path (stripped of its query string —
+`WebSocketHttpExchange.getRequestURI()` includes it, confirmed directly,
+unlike `HttpServerExchange.getRequestPath()` used for the plain HTTP
+path), and hands the connection to that handler before resuming receives.
+`models/adapters/WsUpgradeRouter.bx` is the pre-filter in front of
+Undertow's dispatch that decides, per request, whether to route to the
+WebSocket handshake handler or straight through to the unchanged HTTP
+chain — see the `app.ws()` section of the README for the request-flow
+details; this is the architectural "why," not a repeat of the "what."
+
 ## `onBeforeSend()` — a narrow, deliberate hook
 
 `res.onBeforeSend(callback)` runs a callback once, synchronously, the
