@@ -38,6 +38,7 @@
         "tests/**",
         "examples/**",
         "run-tests.bxs",
-        "testbox/**"
+        "testbox/**",
+        "java-src/**"
     ]
 }

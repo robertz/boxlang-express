@@ -176,6 +176,95 @@ Two things worth knowing if you touch `SseEmitter.bx`:
   safe by construction, not safe-if-used-correctly — assume it'll
   eventually be fed request-derived data, because it will be.
 
+## The one piece of compiled Java (`java-src/boxexpress/ws/`)
+
+Everything in this codebase is pure BoxLang plus off-the-shelf vendored
+jars — except this one small shim, and it exists for a specific,
+confirmed reason, not out of convenience.
+
+Undertow's intended extension point for receiving WebSocket messages,
+`io.undertow.websockets.core.AbstractReceiveListener`, is an **abstract
+Java class** with protected hook methods (`onFullTextMessage`, etc.), not
+an interface. Everywhere else in this codebase that needs to satisfy a
+Java type from BoxLang, it's `createDynamicProxy` against an *interface*
+(`HttpHandler`, `WebSocketConnectionCallback`, `ChannelListener`, all of
+`models/adapters/`) — that mechanism only works for interfaces. Two ways
+around that were tried and confirmed not to work, not just assumed:
+
+1. BoxLang's own documented `extends="java:X"` feature for subclassing a
+   Java class. Failed even on BoxLang's own docs example
+   (`java.io.FilterInputStream`) with a constructor-argument-forwarding
+   bug (`method 'void <init>()' not found` despite calling
+   `super.init(arg)`), and failed earlier still — at class resolution —
+   for `AbstractReceiveListener` specifically.
+2. Implementing the lower-level `org.xnio.ChannelListener` interface
+   directly (which *is* proxyable) and reading frames manually.
+   `handleEvent(channel)` fires correctly, but the only way to actually
+   consume the pending frame, `channel.receiveFrame()`, is a `protected`
+   method — BoxLang's Java interop can't invoke it. Nothing ever gets
+   consumed; `handleEvent` just re-fires in a busy loop.
+
+`BoxWebSocketListener.java` does the real Java-side subclassing once, and
+re-exposes every event through a plain interface,
+`WebSocketMessageHandler`, that BoxLang code implements the normal way.
+Rebuild it with `java-src/build.sh` if you ever touch the `.java` files;
+the compiled output is what actually ships, vendored in `libs/` like
+every other dependency.
+
+**One thing that had to be fixed on the first pass, not designed in
+correctly from the start:** the first version called straight into the
+BoxLang handler from inside Undertow's receive-listener callback, which
+runs on Undertow's I/O thread by default — same mistake already made and
+fixed once for the plain HTTP request path (see "Virtual-thread-per-
+request" above). A handler doing any blocking work there (a blocking send
+back to the client, in the shim's own test) intermittently reset the
+connection instead of throwing a clean, loud error — worse than the HTTP
+case, because it was flaky rather than deterministic, and took timing
+instrumentation to actually pin down. `BoxWebSocketListener` now dispatches
+every callback onto its own virtual thread before it ever reaches BoxLang
+code, matching the one-thread-per-unit-of-work model the rest of this
+project already uses.
+
+If you're extending this shim, treat any new callback the same way: never
+call into BoxLang code directly from inside an Undertow-owned callback
+without dispatching off whatever thread Undertow handed you first.
+
+**A second thing worth knowing if you're debugging something that seems
+to hang instead of error:** `ExecutorService.submit(Runnable)` returns a
+`Future` that silently swallows any exception the task throws unless
+something calls `.get()` on it — nothing here does. The first version of
+`BoxWebSocketListener` didn't guard against this, and a real bug in the
+STOMP middleware built on top of it (below) hung with zero output
+anywhere — no exception, no log line, just a connection that stopped
+responding — until a `try`/`catch` wrapper around every dispatched
+callback was added specifically to surface this. If a WebSocket handler
+seems to silently do nothing, check stderr for
+`[boxexpress-ws-shim] Unhandled exception` before assuming the bug is
+somewhere else.
+
+`app.ws(path, callback)` and `WebSocketConnection.bx` are built on top of
+this — `models/adapters/WsConnectionCallback.bx` is the one place that
+constructs a `BoxWebSocketListener`, looks up which registered handler
+owns a connection's path (stripped of its query string —
+`WebSocketHttpExchange.getRequestURI()` includes it, confirmed directly,
+unlike `HttpServerExchange.getRequestPath()` used for the plain HTTP
+path), and hands the connection to that handler before resuming receives.
+`models/adapters/WsUpgradeRouter.bx` is the pre-filter in front of
+Undertow's dispatch that decides, per request, whether to route to the
+WebSocket handshake handler or straight through to the unchanged HTTP
+chain — see the `app.ws()` section of the README for the request-flow
+details; this is the architectural "why," not a repeat of the "what."
+
+`models/middleware/Stomp.bx` is STOMP 1.2 pub/sub built entirely as a
+consumer of `app.ws()` — no changes to the shim or the router needed.
+`StompFrameCodec.bx` handles the wire format, including escaping header
+values (backslash/newline/colon) rather than just stripping them, the
+actual spec-correct fix for the same class of injection risk
+`SseEmitter.bx` was fixed for — a caller putting request-derived data
+into a STOMP header value can't use it to forge extra frame content,
+because the value round-trips through escaping instead of being trusted
+verbatim.
+
 ## `onBeforeSend()` — a narrow, deliberate hook
 
 `res.onBeforeSend(callback)` runs a callback once, synchronously, the
@@ -291,6 +380,23 @@ you real debugging time:
   BoxLang class instances — even though `isStruct()` returns `true` for
   one. `res.json(req)` silently returns `{}`. Build a plain struct of the
   fields you actually want.
+- **A `private` method isn't reachable from a closure once that closure
+  runs outside the class that defined it.** Confirmed directly with a
+  minimal repro: a class method returns a closure that calls one of that
+  same class's `private` methods (even via a captured `var self = this`);
+  works fine if the closure is invoked from inside the class, throws
+  `"Method not found"` if something else invokes it later — exactly what
+  happens with `app.ws()`/`res.sse()`-style handlers, since the shim/
+  runtime calls them, not the class itself. `Stomp.bx`'s helper methods
+  are all plain (non-`private`) because of this — see its own docblock
+  for the full story of chasing this down.
+- **`duplicate()` doesn't know how to deep-copy a struct holding a raw
+  Java object reference** (a `WebSocketConnection`, its underlying
+  channel) — throws `"Duplication was requested on the class [...] but
+  we don't know how to proceed"`. If you need a snapshot of a struct
+  that holds live object references (not copies of the objects
+  themselves), `structCopy()` (shallow) is the one that works — see
+  `Stomp.bx`'s `_deliver()`.
 
 ## Testing philosophy
 

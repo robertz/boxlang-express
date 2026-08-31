@@ -33,7 +33,8 @@ other model gets the same treatment, each its own thin BIF wrapper: the
 built-in middleware factories — `boxExpressJSON()`, `boxExpressUrlencoded()`,
 `boxExpressStatic()`, `boxExpressUpload()`, `boxExpressSession()`,
 `boxExpressHelmet()`, `boxExpressCors()`, `boxExpressRateLimit()`,
-`boxExpressCsrf()` (see [Middleware](#middleware) below) — and
+`boxExpressCsrf()`, `boxExpressStomp()` (see [Middleware](#middleware)
+below) — and
 `boxExpressRouter()`, wrapping `new
 bxModules.boxexpress.models.Router()` and mirroring Express's own
 `express.Router()`.
@@ -140,6 +141,8 @@ which matters for a repo whose own scripts live in subdirectories
   `listen()` has run or after `close()`. Useful for a server-monitoring
   dashboard alongside JVM/OS-level metrics (memory, CPU, GC), which don't
   see anything at the HTTP layer.
+- `app.ws(path, callback)` — WebSocket routes; see
+  [WebSockets](#websockets-appws) below.
 
 Node keeps a CLI process alive via its event loop; BoxLang's CLI runtime has
 no equivalent, so unlike Express, `listen()` blocks the calling thread by
@@ -210,6 +213,132 @@ resource limit), that's caught, logged, and the current server is left
 running rather than dying with nothing to replace it.
 
 Separate from `app.set("env", "development")` — use either independently.
+
+### WebSockets (`app.ws`)
+
+`app.ws(path, callback)` registers a WebSocket route — separate from
+`app.get/post/...` and `Router`, since a WebSocket connection has no
+`req`/`res`/`next()` chain to run through. `callback` receives a
+`WebSocketConnection` the moment a client connects; register what you need
+on it before returning, since messages can start arriving as soon as the
+handshake completes:
+
+```js
+app.ws( "/chat", ( connection ) => {
+	connection.onMessage( ( text ) => {
+		connection.send( "echo:" & text )
+	} )
+	connection.onClose( ( code, reason ) => {
+		println( "client disconnected: #code#" )
+	} )
+} )
+```
+
+`connection.send(data)` — one text message; JSON-serialized unless
+already a simple value, same convention as `res.sse()`'s `emitter.send()`.
+`connection.onMessage(callback)` — `callback(text)` runs for every message
+this connection receives. `connection.onClose(callback)` —
+`callback(code, reason)` runs once, whether the client disconnected or
+`connection.close()` was called locally. `connection.isClosed()`.
+`connection.headers`/`connection.cookies` carry the handshake request's
+headers/cookies (mirroring `req.headers`/`req.cookies`) — read a session
+cookie here to authenticate a connection, since `app.ws()` routes sit
+outside the `use()` middleware chain entirely (no `Session`/`Cors`/`Csrf`
+middleware runs for a WebSocket upgrade). `connection.get(name)` reads a
+single header.
+
+Like `res.sse()`'s `emitter`, a `connection` is a plain object — stash it
+somewhere shared to push to it from a completely different route later
+(a chat broadcast, a live update triggered by an unrelated `POST`).
+`send()`/`close()` are safe to call from another thread than the one that
+opened the connection, funneled through a per-connection lock so
+concurrent writers can't interleave and corrupt a frame — same fix, same
+reasoning as `SseEmitter`'s.
+
+Path matching is exact only for now — no `:params`, no mounting under a
+`Router`. An upgrade request to a path with no registered `app.ws()`
+route falls through to the normal HTTP dispatch chain untouched, so it
+gets whatever that path would otherwise return (a `404` if nothing
+matches there either) rather than being silently accepted as a
+WebSocket connection. An app that registers no `app.ws()` routes at all
+pays nothing for this — the plain HTTP dispatch chain is wired directly
+into Undertow with no extra indirection in front of it.
+
+Built on one small piece of compiled Java
+(`java-src/boxexpress/ws/`, vendored as `libs/boxexpress-ws-shim-*.jar`) —
+the only compiled Java in this project. See
+[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md#the-one-piece-of-compiled-java-java-srcboxexpressws)
+for why.
+
+#### STOMP (`boxExpressStomp()` / `Stomp`)
+
+A [STOMP](https://stomp.github.io/) 1.2 pub/sub broker built entirely on
+top of `app.ws()` — destination-based messaging (`SUBSCRIBE`/`SEND`) over
+a WebSocket connection, the shape most chat/notification/live-update use
+cases actually need:
+
+```js
+stomp = boxExpressStomp()
+app.ws( "/stomp", stomp.handler() )
+
+app.post( "/orders", ( req, res ) => {
+	// ... create the order ...
+	stomp.send( "/topic/orders", { orderId: newOrder.id } )
+	res.json( { created: true } )
+} )
+```
+
+Or via the underlying class directly:
+
+```js
+stomp = new bxModules.boxexpress.models.middleware.Stomp( {
+	authenticate: ( login, passcode, host, connection ) => login == "demo" && passcode == "demo",
+	authorize: ( login, destination, access, connection ) => true,   // access is "subscribe" or "publish"
+	heartbeatMs: 10000
+} )
+app.ws( "/stomp", stomp.handler() )
+```
+
+`authenticate(login, passcode, host, connection)` gates `CONNECT` —
+return `false` and the client gets an `ERROR` frame and the connection
+closes. `authorize(login, destination, access, connection)` gates each
+`SUBSCRIBE`/`SEND` (`access` is `"subscribe"` or `"publish"`) — return
+`false` and that one frame gets an `ERROR` instead of taking effect; the
+connection stays open. Both are optional — omit either to allow
+everything. `connection.cookies`/`connection.headers` (from the WebSocket
+handshake, before any STOMP frame arrives) are available on the
+`connection` passed to both, alongside STOMP's own `login`/`passcode`
+frame headers — read a session cookie here for cookie-based auth instead
+of requiring clients to send credentials in the `CONNECT` frame. `heartbeatMs`, if set, advertises that interval to the client
+in `CONNECTED` and sends an empty keep-alive frame on that cadence (only
+server-initiated for now — see the note below).
+
+`stomp.send(destination, data, headers)` is the server-side publish path
+for app code outside any connection's own message handling — a route
+handler pushing an update, the same broadcast pattern
+`WebSocketConnection`/`SseEmitter` already support. `data` is
+JSON-serialized unless it's already a simple value.
+
+This is a real, if intentionally smaller, first version — not the whole
+STOMP ecosystem some brokers support. Deliberately not built yet:
+**exchanges/bindings** (AMQP-style destination remapping — not part of
+core STOMP itself, an addition some brokers layer on top), **transactions**
+(`BEGIN`/`COMMIT`/`ABORT`), **client `ACK`/`NACK`** (messages are
+delivered without requiring acknowledgment), **binary bodies** (text/JSON
+only, matching `res.sse()`'s own scope), and **full bidirectional
+heartbeat negotiation** (the server advertises and sends heartbeats on
+its own configured interval regardless of what the client requested, and
+doesn't yet expect or check for heartbeats coming back). Each is a real,
+separable feature to add if something actually needs it. Destination
+matching is exact-string only — `/topic/a` and `/topic/a/` are different
+destinations.
+
+Header values are escaped per the STOMP spec (backslash, newline, colon),
+not just stripped — a destination or login value built from
+request-derived input can't break a frame's structure, the actual
+protocol-correct version of the same fix `SseEmitter.bx` needed. See
+[StompFrameCodec.bx](models/StompFrameCodec.bx) and
+[Stomp.bx](models/middleware/Stomp.bx).
 
 ### Router (mountable sub-app)
 
@@ -1084,6 +1213,83 @@ Two more BoxLang-specific things that shaped how these are written:
 ## Changelog
 
 **0.2.4**
+- Added `java-src/boxexpress/ws/` — this project's first compiled Java,
+  vendored as `libs/boxexpress-ws-shim-1.0.0.jar` (rebuild with
+  `java-src/build.sh`). Exists because Undertow's own WebSocket receive
+  extension point, `io.undertow.websockets.core.AbstractReceiveListener`,
+  is an abstract Java class with protected hook methods, not an
+  interface — confirmed directly, not assumed, that BoxLang can't work
+  around that: its documented `extends="java:X"` feature for subclassing a
+  Java class fails on the installed runtime (a constructor-argument-
+  forwarding bug reproduced even with BoxLang's own docs example), and
+  implementing the lower-level `org.xnio.ChannelListener` interface
+  directly instead hits a wall too — its `handleEvent` fires fine, but the
+  only way to actually consume a pending frame,
+  `channel.receiveFrame()`, is `protected` and BoxLang's Java interop
+  can't invoke it. `BoxWebSocketListener.java` does the real Java-side
+  subclassing once and re-exposes every event through a plain interface,
+  `WebSocketMessageHandler`, that BoxLang code implements via
+  `createDynamicProxy` like everything else in this codebase already does.
+  Every callback runs on its own virtual thread, not Undertow's I/O
+  thread — confirmed necessary, not assumed, after a version without that
+  intermittently reset the connection under a blocking call from inside
+  the receive handler, same class of bug already fixed once for the HTTP
+  request path. See
+  [tests/specs/WebSocketShimSpec.bx](tests/specs/WebSocketShimSpec.bx).
+- Added `app.ws(path, callback)` and `WebSocketConnection` — WebSocket
+  routes, built on the shim above. A dedicated `WsUpgradeRouter` sits in
+  front of Undertow's normal dispatch only when at least one `app.ws()`
+  route is registered (an app that never calls it pays nothing extra);
+  it delegates a matching `Upgrade: websocket` request to the WebSocket
+  handshake handler and everything else — which is almost every request,
+  even in an app that does use `app.ws()` — through the exact same HTTP
+  dispatch chain, completely unchanged. An upgrade request to a path with
+  no registered route falls through to that same chain and gets whatever
+  it would otherwise return (a `404` if nothing else matches), rather
+  than being silently accepted. `WebSocketConnection`'s `send()`/`close()`
+  are safe to call from another thread than the one that opened the
+  connection — the same broadcast pattern and the same per-connection
+  lock `SseEmitter` already uses, for the same reason.
+  `connection.headers`/`connection.cookies` expose the handshake
+  request's headers/cookies (mirroring `req.headers`/`req.cookies`), since
+  `app.ws()` routes bypass the `use()` middleware chain entirely — a
+  session cookie is otherwise unreachable from a WebSocket handler. See
+  [WebSocketConnection.bx](models/WebSocketConnection.bx) and
+  [tests/specs/WebSocketRouteSpec.bx](tests/specs/WebSocketRouteSpec.bx).
+- Added `boxExpressStomp()` / `Stomp` — a STOMP 1.2 pub/sub broker built
+  entirely on top of `app.ws()`, no changes needed to the shim or the
+  WebSocket routing layer above. `StompFrameCodec.bx` escapes header
+  values (backslash/newline/colon) per spec rather than just stripping
+  them — the protocol-correct version of the same injection fix
+  `SseEmitter.bx` needed, applied here before it could ever become a bug
+  instead of after. Deliberately smaller than some STOMP brokers' full
+  feature set for a first version — no exchanges/bindings, transactions,
+  client `ACK`/`NACK`, binary bodies, or full bidirectional heartbeat
+  negotiation; see the [STOMP](#stomp-boxexpressstomp--stomp) docs above
+  for what's actually built and why the rest was deliberately deferred.
+  Two real BoxLang bugs found and fixed while building this, both now
+  documented in
+  [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md#boxlang-landmines-this-codebase-has-already-found-so-you-dont-have-to):
+  a `private` method isn't reachable from a closure once that closure is
+  invoked from outside the class that defined it (every helper
+  `Stomp.bx`'s handler closures call had to become a plain method
+  because of this), and `duplicate()` can't deep-copy a struct holding a
+  raw Java object reference — `structCopy()` (shallow) is what
+  `_deliver()` actually needs.
+  **Security fix (found in review before this shipped):** the shared
+  subscriber registry was keyed on the client-supplied `SUBSCRIBE` `id`
+  header alone, with no per-connection scoping — since STOMP subscription
+  ids aren't secret (many client libraries assign them sequentially,
+  e.g. `sub-0`), a second connection subscribing to the same destination
+  with the same id silently overwrote the first connection's entry,
+  redirecting the first connection's messages to the second with no
+  error to either side, and let the second connection's `UNSUBSCRIBE`
+  delete the first connection's subscription. Fixed by keying the
+  registry on a server-generated per-connection id combined with the
+  client's own subscription id, so no cross-connection collision is
+  possible even when two clients choose identical ids. See
+  [Stomp.bx](models/middleware/Stomp.bx) and
+  [tests/specs/StompSpec.bx](tests/specs/StompSpec.bx).
 - **Security fix:** `SseEmitter.send()`'s `event`/`id` arguments and
   `comment()`'s `text` argument were concatenated directly into their SSE
   field lines with no newline stripping — unlike `data`, which is safely

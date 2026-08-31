@@ -1,0 +1,59 @@
+/**
+ * Implements io.undertow.websockets.WebSocketConnectionCallback (via
+ * createDynamicProxy) — the single callback wired to Undertow's
+ * WebSocketProtocolHandshakeHandler for every app.ws() route this app
+ * registered. Looks up which registered handler owns this connection's
+ * path, builds the WebSocketConnection + shim wiring, and hands the
+ * connection to that handler before resuming receives — registering the
+ * app's own onMessage()/onClose() has to happen before that, or a fast
+ * client's first message could arrive with nothing listening for it yet.
+ */
+class {
+
+	function init( wsRoutes ) {
+		variables.wsRoutes = wsRoutes
+		return this
+	}
+
+	function onConnect( exchange, channel ) {
+		// getRequestURI() includes the query string (confirmed directly —
+		// unlike HttpServerExchange.getRequestPath() used for the plain
+		// HTTP path, which doesn't), so it has to be stripped here to match
+		// how app.ws(path, ...) paths are registered.
+		var uri = exchange.getRequestURI()
+		var path = uri.find( "?" ) ? uri.left( uri.find( "?" ) - 1 ) : uri
+
+		var handlerFn = variables.wsRoutes[ path ] ?: javacast( "null", "" )
+		if ( isNull( handlerFn ) ) {
+			channel.sendClose()
+			return
+		}
+
+		var connection = new "../WebSocketConnection"( channel, _extractHeaders( exchange ) )
+		var handlerAdapter = new "WsMessageHandlerAdapter"( connection )
+		var handlerProxy = createDynamicProxy( handlerAdapter, [ "boxexpress.ws.WebSocketMessageHandler" ] )
+		var listener = createObject( "java", "boxexpress.ws.BoxWebSocketListener" ).init( handlerProxy )
+		channel.getReceiveSetter().set( listener )
+
+		handlerFn( connection )
+
+		channel.resumeReceives()
+	}
+
+	/**
+	 * WebSocketHttpExchange.getRequestHeaders() returns
+	 * Map<String, List<String>> — different shape than
+	 * HttpServerExchange's HeaderMap used on the plain HTTP side
+	 * (UndertowExchangeAdapter.getRequestHeaders()) — so this reads
+	 * getRequestHeader(name) per name instead, taking the first value
+	 * per header the same way the HTTP side does.
+	 */
+	private function _extractHeaders( exchange ) {
+		var headerStruct = {}
+		for ( var headerName in exchange.getRequestHeaders().keySet() ) {
+			headerStruct[ headerName ] = exchange.getRequestHeader( headerName )
+		}
+		return headerStruct
+	}
+
+}
