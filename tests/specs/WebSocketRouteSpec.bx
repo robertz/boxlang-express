@@ -29,6 +29,13 @@ class extends="testbox.system.BaseSpec" {
 			} )
 		} )
 
+		variables.capturedHeaders = {}
+		variables.capturedCookies = {}
+		variables.app.ws( "/handshake-info", ( connection ) => {
+			variables.capturedHeaders = connection.headers
+			variables.capturedCookies = connection.cookies
+		} )
+
 		variables.app.listen( port = variables.testPort, options = { block: false } )
 		sleep( 300 )
 	}
@@ -80,6 +87,26 @@ class extends="testbox.system.BaseSpec" {
 				}
 
 				expect( variables.closeEvents.len() ).toBe( countBefore + 1 )
+			} )
+
+			it( "exposes the handshake request's headers and cookies on the connection", function() {
+				var client = new "../helpers/WebSocketTestClient"()
+				client.connect( "localhost", variables.testPort, "/handshake-info", {
+					"Cookie": "sessionId=abc123; theme=dark",
+					"X-Custom-Header": "hello"
+				} )
+
+				var waited = 0
+				while ( structIsEmpty( variables.capturedHeaders ) && waited < 2000 ) {
+					sleep( 100 )
+					waited += 100
+				}
+
+				expect( variables.capturedHeaders[ "X-Custom-Header" ] ?: "" ).toBe( "hello" )
+				expect( variables.capturedCookies[ "sessionId" ] ?: "" ).toBe( "abc123" )
+				expect( variables.capturedCookies[ "theme" ] ?: "" ).toBe( "dark" )
+
+				client.close()
 			} )
 
 			it( "falls through to the normal HTTP dispatch chain — a real 404, not silently accepted — for an upgrade request to an unregistered path", function() {

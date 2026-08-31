@@ -29,7 +29,7 @@ class {
 			return
 		}
 
-		var connection = new "../WebSocketConnection"( channel )
+		var connection = new "../WebSocketConnection"( channel, _extractHeaders( exchange ) )
 		var handlerAdapter = new "WsMessageHandlerAdapter"( connection )
 		var handlerProxy = createDynamicProxy( handlerAdapter, [ "boxexpress.ws.WebSocketMessageHandler" ] )
 		var listener = createObject( "java", "boxexpress.ws.BoxWebSocketListener" ).init( handlerProxy )
@@ -38,6 +38,22 @@ class {
 		handlerFn( connection )
 
 		channel.resumeReceives()
+	}
+
+	/**
+	 * WebSocketHttpExchange.getRequestHeaders() returns
+	 * Map<String, List<String>> — different shape than
+	 * HttpServerExchange's HeaderMap used on the plain HTTP side
+	 * (UndertowExchangeAdapter.getRequestHeaders()) — so this reads
+	 * getRequestHeader(name) per name instead, taking the first value
+	 * per header the same way the HTTP side does.
+	 */
+	private function _extractHeaders( exchange ) {
+		var headerStruct = {}
+		for ( var headerName in exchange.getRequestHeaders().keySet() ) {
+			headerStruct[ headerName ] = exchange.getRequestHeader( headerName )
+		}
+		return headerStruct
 	}
 
 }

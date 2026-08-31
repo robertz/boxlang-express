@@ -11,7 +11,7 @@
  */
 class {
 
-	function connect( host, port, path = "/" ) {
+	function connect( host, port, path = "/", extraHeaders = {} ) {
 		variables.socket = createObject( "java", "java.net.Socket" ).init( host, port )
 		var out = variables.socket.getOutputStream()
 		var crlf = char( 13 ) & char( 10 )
@@ -20,7 +20,11 @@ class {
 			& "Upgrade: websocket" & crlf
 			& "Connection: Upgrade" & crlf
 			& "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==" & crlf
-			& "Sec-WebSocket-Version: 13" & crlf & crlf
+			& "Sec-WebSocket-Version: 13" & crlf
+		for ( var headerName in extraHeaders ) {
+			handshake &= "#headerName#: #extraHeaders[ headerName ]#" & crlf
+		}
+		handshake &= crlf
 		out.write( handshake.getBytes( "UTF-8" ) )
 		out.flush()
 

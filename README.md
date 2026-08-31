@@ -240,6 +240,12 @@ already a simple value, same convention as `res.sse()`'s `emitter.send()`.
 this connection receives. `connection.onClose(callback)` —
 `callback(code, reason)` runs once, whether the client disconnected or
 `connection.close()` was called locally. `connection.isClosed()`.
+`connection.headers`/`connection.cookies` carry the handshake request's
+headers/cookies (mirroring `req.headers`/`req.cookies`) — read a session
+cookie here to authenticate a connection, since `app.ws()` routes sit
+outside the `use()` middleware chain entirely (no `Session`/`Cors`/`Csrf`
+middleware runs for a WebSocket upgrade). `connection.get(name)` reads a
+single header.
 
 Like `res.sse()`'s `emitter`, a `connection` is a plain object — stash it
 somewhere shared to push to it from a completely different route later
@@ -299,7 +305,11 @@ closes. `authorize(login, destination, access, connection)` gates each
 `SUBSCRIBE`/`SEND` (`access` is `"subscribe"` or `"publish"`) — return
 `false` and that one frame gets an `ERROR` instead of taking effect; the
 connection stays open. Both are optional — omit either to allow
-everything. `heartbeatMs`, if set, advertises that interval to the client
+everything. `connection.cookies`/`connection.headers` (from the WebSocket
+handshake, before any STOMP frame arrives) are available on the
+`connection` passed to both, alongside STOMP's own `login`/`passcode`
+frame headers — read a session cookie here for cookie-based auth instead
+of requiring clients to send credentials in the `CONNECT` frame. `heartbeatMs`, if set, advertises that interval to the client
 in `CONNECTED` and sends an empty keep-alive frame on that cadence (only
 server-initiated for now — see the note below).
 
@@ -1239,7 +1249,11 @@ Two more BoxLang-specific things that shaped how these are written:
   than being silently accepted. `WebSocketConnection`'s `send()`/`close()`
   are safe to call from another thread than the one that opened the
   connection — the same broadcast pattern and the same per-connection
-  lock `SseEmitter` already uses, for the same reason. See
+  lock `SseEmitter` already uses, for the same reason.
+  `connection.headers`/`connection.cookies` expose the handshake
+  request's headers/cookies (mirroring `req.headers`/`req.cookies`), since
+  `app.ws()` routes bypass the `use()` middleware chain entirely — a
+  session cookie is otherwise unreachable from a WebSocket handler. See
   [WebSocketConnection.bx](models/WebSocketConnection.bx) and
   [tests/specs/WebSocketRouteSpec.bx](tests/specs/WebSocketRouteSpec.bx).
 - Added `boxExpressStomp()` / `Stomp` — a STOMP 1.2 pub/sub broker built

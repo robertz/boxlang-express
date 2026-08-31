@@ -6,17 +6,31 @@
  * handler holding onto a connection to push to it later), each funneled
  * through a per-connection lock so two writers can't interleave on the
  * shared channel — same reasoning, same fix shape as SseEmitter's own
- * thread-safety fix.
+ * thread-safety fix. this.headers/this.cookies carry the handshake
+ * request's headers/cookies (mirroring Request.bx's req.headers/
+ * req.cookies) so an app.ws() handler or STOMP's authenticate() can read
+ * a session cookie instead of relying solely on STOMP's login/passcode
+ * frame headers.
  */
 class {
 
-	function init( channel ) {
+	function init( channel, headers = {} ) {
 		variables.channel = channel
 		variables.closed = false
 		variables.messageCallback = javacast( "null", "" )
 		variables.closeCallback = javacast( "null", "" )
 		variables.lockName = "WebSocketConnection-" & createUUID()
+		this.headers = headers
+		this.cookies = _parseCookies( headers[ "Cookie" ] ?: "" )
 		return this
+	}
+
+	/**
+	 * A single request header from the handshake, without reaching into
+	 * this.headers directly — mirrors Request.get().
+	 */
+	function get( name ) {
+		return this.headers[ name ] ?: javacast( "null", "" )
 	}
 
 	/**
@@ -100,6 +114,30 @@ class {
 		if ( !isNull( variables.closeCallback ) ) {
 			variables.closeCallback( code, reason )
 		}
+	}
+
+	/**
+	 * Same parsing as Request.bx's _parseCookies() — kept as its own copy
+	 * here rather than a shared util, since the handshake headers this
+	 * reads come from a differently-shaped exchange (WebSocketHttpExchange,
+	 * not HttpServerExchange) and the two call sites shouldn't be coupled
+	 * through a helper just to save a few lines.
+	 */
+	private function _parseCookies( cookieHeader ) {
+		var result = {}
+		if ( !len( cookieHeader ) ) {
+			return result
+		}
+		for ( var pair in cookieHeader.listToArray( ";" ) ) {
+			var trimmedPair = pair.trim()
+			var eqPos = trimmedPair.find( "=" )
+			if ( eqPos ) {
+				var cookieName = ( eqPos == 1 ? "" : trimmedPair.left( eqPos - 1 ) ).trim()
+				var cookieValue = ( eqPos == trimmedPair.len() ? "" : trimmedPair.right( trimmedPair.len() - eqPos ) ).trim()
+				result[ cookieName ] = urlDecode( cookieValue )
+			}
+		}
+		return result
 	}
 
 }
