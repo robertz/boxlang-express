@@ -1,6 +1,6 @@
 {
     "name":"BoxExpress",
-    "version":"0.2.3",
+    "version":"0.2.4",
     "author":"Robert Zehnder",
     "slug":"boxlang-express",
     "shortDescription":"An Express.js-style web framework for BoxLang",
