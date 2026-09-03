@@ -1,0 +1,301 @@
+/**
+ * Regression coverage for the SocketBox-parity features added to
+ * models/middleware/Stomp.bx: exchanges/bindings, the live connection
+ * registry (connectionMetadata), and server-side listeners. Separate from
+ * StompSpec.bx (core protocol behavior) since these are all genuinely
+ * additive features layered on top of it, not core STOMP itself — see
+ * Stomp.bx's own docblock and the README's STOMP section for why each
+ * exists and what SocketBox feature it mirrors.
+ */
+class extends="testbox.system.BaseSpec" {
+
+	function beforeAll() {
+		variables.codec = new "../../models/StompFrameCodec"()
+
+		variables.directApp = new "../../models/BoxExpress"()
+		variables.directPort = 4950
+		variables.directStomp = new "../../models/middleware/Stomp"( {
+			exchanges: { direct: { bindings: { "orders.created": "notifications" } } }
+		} )
+		variables.directApp.ws( "/stomp", variables.directStomp.handler() )
+
+		variables.topicApp = new "../../models/BoxExpress"()
+		variables.topicPort = 4951
+		variables.topicStomp = new "../../models/middleware/Stomp"( {
+			exchanges: { topic: { bindings: { "chat.room.*": "chatFanout", "sys.##": "sysAll" } } }
+		} )
+		variables.topicApp.ws( "/stomp", variables.topicStomp.handler() )
+
+		variables.fanoutApp = new "../../models/BoxExpress"()
+		variables.fanoutPort = 4952
+		variables.fanoutStomp = new "../../models/middleware/Stomp"( {
+			exchanges: { fanout: { bindings: { "myFanout": [ "dest1", "dest2" ] } } }
+		} )
+		variables.fanoutApp.ws( "/stomp", variables.fanoutStomp.handler() )
+
+		variables.distApp = new "../../models/BoxExpress"()
+		variables.distPort = 4953
+		variables.distStomp = new "../../models/middleware/Stomp"( {
+			exchanges: { distribution: { type: "roundrobin", bindings: { "myDist": [ "destA", "destB" ] } } }
+		} )
+		variables.distApp.ws( "/stomp", variables.distStomp.handler() )
+
+		variables.customApp = new "../../models/BoxExpress"()
+		variables.customPort = 4954
+		variables.customStomp = new "../../models/middleware/Stomp"( {
+			exchanges: { custom: { class: "tests.fixtures.stomp.UppercaseExchange" } }
+		} )
+		variables.customApp.ws( "/stomp", variables.customStomp.handler() )
+
+		variables.metaApp = new "../../models/BoxExpress"()
+		variables.metaPort = 4955
+		variables.metaStomp = new "../../models/middleware/Stomp"( {
+			authenticate: ( login, passcode, host, connection, connectionMetadata ) => {
+				connectionMetadata[ "role" ] = login == "admin" ? "admin" : "guest"
+				return true
+			},
+			authorize: ( login, destination, access, connection, connectionMetadata ) => {
+				return destination != "/topic/admin-only" || connectionMetadata[ "role" ] == "admin"
+			}
+		} )
+		variables.metaApp.ws( "/stomp", variables.metaStomp.handler() )
+
+		variables.listenerApp = new "../../models/BoxExpress"()
+		variables.listenerPort = 4956
+		variables.listenerCalls = []
+		variables.listenerStomp = new "../../models/middleware/Stomp"( {
+			listeners: {
+				"internal-topic": ( message ) => {
+					variables.listenerCalls.append( { body: message.getBody(), hasConnection: !isNull( message.getConnection() ) } )
+				}
+			}
+		} )
+		variables.listenerApp.ws( "/stomp", variables.listenerStomp.handler() )
+
+		variables.directApp.listen( port = variables.directPort, options = { block: false } )
+		variables.topicApp.listen( port = variables.topicPort, options = { block: false } )
+		variables.fanoutApp.listen( port = variables.fanoutPort, options = { block: false } )
+		variables.distApp.listen( port = variables.distPort, options = { block: false } )
+		variables.customApp.listen( port = variables.customPort, options = { block: false } )
+		variables.metaApp.listen( port = variables.metaPort, options = { block: false } )
+		variables.listenerApp.listen( port = variables.listenerPort, options = { block: false } )
+		sleep( 300 )
+	}
+
+	function afterAll() {
+		variables.directApp.close()
+		variables.topicApp.close()
+		variables.fanoutApp.close()
+		variables.distApp.close()
+		variables.customApp.close()
+		variables.metaApp.close()
+		variables.listenerApp.close()
+	}
+
+	private function _connectedClient( port ) {
+		var client = new "../helpers/WebSocketTestClient"()
+		client.connect( "localhost", port, "/stomp" )
+		client.sendText( variables.codec.serialize( new "../../models/StompFrame"( "CONNECT", { "accept-version": "1.2" } ) ) )
+		variables.codec.parse( client.readTextFrame() )
+		return client
+	}
+
+	function run() {
+		describe( "Stomp exchanges", function() {
+
+			it( "direct exchange remaps a bound destination and passes an unbound one through unchanged", function() {
+				var client = _connectedClient( variables.directPort )
+				client.sendText( variables.codec.serialize( new "../../models/StompFrame"( "SUBSCRIBE", { destination: "notifications", id: "s1" } ) ) )
+				sleep( 100 )
+
+				client.sendText( variables.codec.serialize( new "../../models/StompFrame"( "SEND", { destination: "orders.created" }, "order-1" ) ) )
+				var msg = variables.codec.parse( client.readTextFrame() )
+				expect( msg.getHeader( "destination" ) ).toBe( "notifications" )
+				expect( msg.getBody() ).toBe( "order-1" )
+
+				client.close()
+			} )
+
+			it( "topic exchange routes a wildcard-matching destination to every matching binding, and not to a non-matching one", function() {
+				var chatClient = _connectedClient( variables.topicPort )
+				chatClient.sendText( variables.codec.serialize( new "../../models/StompFrame"( "SUBSCRIBE", { destination: "chatFanout", id: "s1" } ) ) )
+				var sysClient = _connectedClient( variables.topicPort )
+				sysClient.sendText( variables.codec.serialize( new "../../models/StompFrame"( "SUBSCRIBE", { destination: "sysAll", id: "s1" } ) ) )
+				sleep( 100 )
+
+				var sender = _connectedClient( variables.topicPort )
+				sender.sendText( variables.codec.serialize( new "../../models/StompFrame"( "SEND", { destination: "topic/chat.room.42" }, "hi room 42" ) ) )
+				var chatMsg = variables.codec.parse( chatClient.readTextFrame() )
+				expect( chatMsg.getBody() ).toBe( "hi room 42" )
+
+				sender.sendText( variables.codec.serialize( new "../../models/StompFrame"( "SEND", { destination: "topic/sys.alert.disk" }, "disk low" ) ) )
+				var sysMsg = variables.codec.parse( sysClient.readTextFrame() )
+				expect( sysMsg.getBody() ).toBe( "disk low" )
+
+				chatClient.close()
+				sysClient.close()
+				sender.close()
+			} )
+
+			it( "fanout exchange delivers to every configured target destination", function() {
+				var d1 = _connectedClient( variables.fanoutPort )
+				d1.sendText( variables.codec.serialize( new "../../models/StompFrame"( "SUBSCRIBE", { destination: "dest1", id: "s1" } ) ) )
+				var d2 = _connectedClient( variables.fanoutPort )
+				d2.sendText( variables.codec.serialize( new "../../models/StompFrame"( "SUBSCRIBE", { destination: "dest2", id: "s1" } ) ) )
+				sleep( 100 )
+
+				var sender = _connectedClient( variables.fanoutPort )
+				sender.sendText( variables.codec.serialize( new "../../models/StompFrame"( "SEND", { destination: "fanout/myFanout" }, "to-all" ) ) )
+
+				expect( variables.codec.parse( d1.readTextFrame() ).getBody() ).toBe( "to-all" )
+				expect( variables.codec.parse( d2.readTextFrame() ).getBody() ).toBe( "to-all" )
+
+				d1.close()
+				d2.close()
+				sender.close()
+			} )
+
+			it( "distribution exchange (roundrobin) delivers each message to exactly one target, alternating", function() {
+				var dA = _connectedClient( variables.distPort )
+				dA.sendText( variables.codec.serialize( new "../../models/StompFrame"( "SUBSCRIBE", { destination: "destA", id: "s1" } ) ) )
+				var dB = _connectedClient( variables.distPort )
+				dB.sendText( variables.codec.serialize( new "../../models/StompFrame"( "SUBSCRIBE", { destination: "destB", id: "s1" } ) ) )
+				sleep( 100 )
+
+				var sender = _connectedClient( variables.distPort )
+				sender.sendText( variables.codec.serialize( new "../../models/StompFrame"( "SEND", { destination: "distribution/myDist" }, "first" ) ) )
+				sender.sendText( variables.codec.serialize( new "../../models/StompFrame"( "SEND", { destination: "distribution/myDist" }, "second" ) ) )
+
+				var firstMsg = variables.codec.parse( dA.readTextFrame() )
+				expect( firstMsg.getBody() ).toBe( "first" )
+				var secondMsg = variables.codec.parse( dB.readTextFrame() )
+				expect( secondMsg.getBody() ).toBe( "second" )
+
+				dA.close()
+				dB.close()
+				sender.close()
+			} )
+
+			it( "a custom exchange class (config.class) routes via its own route() method", function() {
+				var client = _connectedClient( variables.customPort )
+				client.sendText( variables.codec.serialize( new "../../models/StompFrame"( "SUBSCRIBE", { destination: "FOO", id: "s1" } ) ) )
+				sleep( 100 )
+
+				client.sendText( variables.codec.serialize( new "../../models/StompFrame"( "SEND", { destination: "custom/foo" }, "uppercased" ) ) )
+				var msg = variables.codec.parse( client.readTextFrame() )
+				expect( msg.getHeader( "destination" ) ).toBe( "FOO" )
+				expect( msg.getBody() ).toBe( "uppercased" )
+
+				client.close()
+			} )
+
+		} )
+
+		describe( "Stomp connection registry and connectionMetadata", function() {
+
+			it( "getConnections()/getConnectionDetails() reflect a live connection and clear it on disconnect", function() {
+				var client = new "../helpers/WebSocketTestClient"()
+				client.connect( "localhost", variables.metaPort, "/stomp" )
+				client.sendText( variables.codec.serialize( new "../../models/StompFrame"( "CONNECT", { "accept-version": "1.2", login: "admin" } ) ) )
+				variables.codec.parse( client.readTextFrame() )
+				sleep( 100 )
+
+				var connections = variables.metaStomp.getConnections()
+				var found = false
+				for ( var connectionId in connections ) {
+					if ( connections[ connectionId ].login == "admin" ) {
+						found = true
+						expect( connections[ connectionId ].connectionMetadata.role ).toBe( "admin" )
+					}
+				}
+				expect( found ).toBeTrue()
+
+				client.close()
+				sleep( 200 )
+
+				var stillFound = false
+				for ( var connectionId in variables.metaStomp.getConnections() ) {
+					if ( variables.metaStomp.getConnections()[ connectionId ].login == "admin" ) {
+						stillFound = true
+					}
+				}
+				expect( stillFound ).toBeFalse()
+			} )
+
+			it( "connectionMetadata populated by authenticate() is visible to authorize()", function() {
+				var adminClient = new "../helpers/WebSocketTestClient"()
+				adminClient.connect( "localhost", variables.metaPort, "/stomp" )
+				adminClient.sendText( variables.codec.serialize( new "../../models/StompFrame"( "CONNECT", { "accept-version": "1.2", login: "admin" } ) ) )
+				variables.codec.parse( adminClient.readTextFrame() )
+				// A successful SUBSCRIBE with no receipt header correctly
+				// sends nothing back — asking for one here (rather than
+				// racing a "did an ERROR arrive" sleep-and-hope) is what
+				// proves the admin's SUBSCRIBE actually succeeded.
+				adminClient.sendText( variables.codec.serialize( new "../../models/StompFrame"( "SUBSCRIBE", { destination: "/topic/admin-only", id: "s1", receipt: "admin-sub" } ) ) )
+				var adminReceipt = variables.codec.parse( adminClient.readTextFrame() )
+				expect( adminReceipt.getCommand() ).toBe( "RECEIPT" )
+
+				var guestClient = new "../helpers/WebSocketTestClient"()
+				guestClient.connect( "localhost", variables.metaPort, "/stomp" )
+				guestClient.sendText( variables.codec.serialize( new "../../models/StompFrame"( "CONNECT", { "accept-version": "1.2", login: "someone-else" } ) ) )
+				variables.codec.parse( guestClient.readTextFrame() )
+				guestClient.sendText( variables.codec.serialize( new "../../models/StompFrame"( "SUBSCRIBE", { destination: "/topic/admin-only", id: "s1" } ) ) )
+				var guestError = variables.codec.parse( guestClient.readTextFrame() )
+				expect( guestError.getCommand() ).toBe( "ERROR" )
+
+				adminClient.close()
+				guestClient.close()
+			} )
+
+			it( "authenticate()'s connectionMetadata is echoed back as extra CONNECTED headers", function() {
+				var client = new "../helpers/WebSocketTestClient"()
+				client.connect( "localhost", variables.metaPort, "/stomp" )
+				client.sendText( variables.codec.serialize( new "../../models/StompFrame"( "CONNECT", { "accept-version": "1.2", login: "admin" } ) ) )
+				var connectedFrame = variables.codec.parse( client.readTextFrame() )
+				expect( connectedFrame.getHeader( "role" ) ).toBe( "admin" )
+
+				client.close()
+			} )
+
+		} )
+
+		describe( "Stomp server-side listeners", function() {
+
+			it( "a configured listener runs for a message from a real client, receiving the originating connection", function() {
+				variables.listenerCalls = []
+				var client = _connectedClient( variables.listenerPort )
+				client.sendText( variables.codec.serialize( new "../../models/StompFrame"( "SEND", { destination: "internal-topic" }, "from-client" ) ) )
+
+				var waited = 0
+				while ( variables.listenerCalls.len() == 0 && waited < 2000 ) {
+					sleep( 100 )
+					waited += 100
+				}
+
+				expect( variables.listenerCalls.len() ).toBe( 1 )
+				expect( variables.listenerCalls[ 1 ].body ).toBe( "from-client" )
+				expect( variables.listenerCalls[ 1 ].hasConnection ).toBeTrue()
+
+				client.close()
+			} )
+
+			it( "a configured listener runs for a server-originated stomp.send(), with no originating connection", function() {
+				variables.listenerCalls = []
+				variables.listenerStomp.send( "internal-topic", "from-server" )
+
+				var waited = 0
+				while ( variables.listenerCalls.len() == 0 && waited < 2000 ) {
+					sleep( 100 )
+					waited += 100
+				}
+
+				expect( variables.listenerCalls.len() ).toBe( 1 )
+				expect( variables.listenerCalls[ 1 ].body ).toBe( "from-server" )
+				expect( variables.listenerCalls[ 1 ].hasConnection ).toBeFalse()
+			} )
+
+		} )
+
+	}
+
+}

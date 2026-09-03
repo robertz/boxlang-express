@@ -1,21 +1,29 @@
 /**
- * STOMP 1.2 broker on top of app.ws() — basic destination-based pub/sub:
- * SUBSCRIBE a destination, SEND to it, every current subscriber gets a
- * MESSAGE. Mirrors SocketBox's WebSocketSTOMP feature set (the design
- * this was modeled on — see plans/websocket-stomp.md), adapted to this
- * project's factory-function-plus-options-struct convention instead of
- * SocketBox's class-you-extend-and-override one, matching how every other
- * middleware here (Helmet, Cors, RateLimit) mirrors a proven design's
- * behavior without copying its exact API mechanics.
+ * STOMP 1.2 broker on top of app.ws() — destination-based pub/sub
+ * (SUBSCRIBE/SEND/MESSAGE), receipts, ack/nack, transactions, bidirectional
+ * heartbeat negotiation, exchanges/bindings, a live connection registry,
+ * and server-side listeners. Mirrors SocketBox's WebSocketSTOMP feature
+ * set (the design this was modeled on — see plans/websocket-stomp.md, and
+ * SocketBox's own README/WebSocketSTOMP.cfc read directly from
+ * coldbox-modules/SocketBox for the exchanges/registry/listener parity
+ * pass), adapted to this project's factory-function-plus-options-struct
+ * convention instead of SocketBox's class-you-extend-and-override one,
+ * matching how every other middleware here (Helmet, Cors, RateLimit)
+ * mirrors a proven design's behavior without copying its exact API
+ * mechanics.
  *
- * Deliberately smaller than SocketBox's own STOMP layer for a first
- * version: no exchanges/bindings (AMQP-style destination remapping — real
- * STOMP itself has no such concept; that's an addition SocketBox layers
- * on top, not core protocol), no transactions, no client ACK/NACK, no
- * binary bodies. Destination matching is exact-string only. Each of these
- * is a real, separable feature to add later if something actually needs
- * it — not cut for lack of design, cut because nothing here calls for
- * them yet.
+ * Deliberately still not built: multi-node clustering (SocketBox's
+ * ClusterManager/ClusterPeer — peer WebSocket connections between server
+ * processes, cache-backed peer discovery). That's a distributed-systems
+ * feature this project has no cache-abstraction or multi-node deployment
+ * story to build it against yet, not something to bolt on speculatively;
+ * DistributionExchange's round-robin counters and this broker's whole
+ * subscriber registry are explicitly single-process state as a result.
+ *
+ * NACK is bookkeeping-identical to ACK here — see _handleAcknowledge()'s
+ * docblock for why: this broker has no message queue to redeliver into,
+ * so the positive/negative distinction real brokers use to drive
+ * redelivery has nothing to act on.
  */
 class {
 
@@ -25,50 +33,124 @@ class {
 		variables.heartbeatMs = options.heartbeatMs ?: 0
 		variables.codec = new "../StompFrameCodec"()
 
-		// destination -> { "connectionId:subId" -> { connection: ..., subId: ... } }
+		// destination -> { "connectionId:subId" -> { connection, subId, connectionId, ackMode } }
 		// Keyed on a server-generated connectionId + the client's own subId,
 		// not the client's subId alone — see handler()'s docblock for why.
 		variables.subscribersByDestination = {}
+
+		// connectionId -> { ackId -> { subId, destination, ackMode, seq } } —
+		// messages delivered under a non-"auto" ack mode, waiting for an
+		// ACK/NACK. seq is a global monotonically increasing counter so
+		// "client" mode's cumulative ack can find every earlier pending
+		// message on the same subscription without needing insertion-order
+		// semantics from a BoxLang struct (which aren't guaranteed).
+		variables.pendingAcksByConnection = {}
+		variables.ackSeqCounter = 0
+
+		// connectionId -> { connection, login, connectionMetadata } for
+		// every currently CONNECTED client — SocketBox's getSTOMPConnections()
+		// equivalent (a real connection/presence registry, not just an
+		// opt-in hook), see getConnections()/getConnectionDetails() below.
+		variables.connectionsById = {}
+
+		// destination -> array of exchange objects, each with a
+		// route(destination, body, headers) method returning an array of
+		// physical destinations to actually deliver to — see
+		// models/middleware/stomp/exchanges/. A "direct" exchange always
+		// exists even if not configured, matching SocketBox's own default,
+		// so any destination with no recognized exchange prefix still
+		// resolves (via an identity route unless a binding remaps it) —
+		// this is what keeps every existing plain-destination test/usage
+		// unaffected by exchanges existing at all.
+		var exchangeConfig = duplicate( options.exchanges ?: {} )
+		if ( !structKeyExists( exchangeConfig, "direct" ) ) {
+			exchangeConfig[ "direct" ] = {}
+		}
+		variables.exchanges = {}
+		for ( var exchangeName in exchangeConfig ) {
+			variables.exchanges[ exchangeName ] = _buildExchange( exchangeName, exchangeConfig[ exchangeName ] )
+		}
+
+		// destination -> callback(message) — server-side code that reacts
+		// to messages routed to a destination without opening a WebSocket
+		// connection at all, SocketBox's "subscriptions" config feature
+		// (named "listeners" here instead — "subscriptions" was already
+		// taken by the very different per-connection mySubscriptions
+		// concept elsewhere in this file, and the name would collide
+		// conceptually even where it doesn't collide syntactically).
+		variables.listeners = options.listeners ?: {}
+
 		variables.lockName = "Stomp-" & createUUID()
 
 		return this
 	}
 
 	/**
+	 * name is either a built-in exchange type ("direct"/"topic"/"fanout"/
+	 * "distribution") or an app-chosen name for a custom exchange, in
+	 * which case config.class is the dotted path to a class implementing
+	 * route(destination, body, headers) — duck-typed, no formal interface,
+	 * matching how the rest of this codebase treats callback-shaped
+	 * options (RateLimit's keyGenerator, Session's store).
+	 */
+	function _buildExchange( name, config ) {
+		switch ( name ) {
+			case "direct": return new stomp.exchanges.DirectExchange( config )
+			case "topic": return new stomp.exchanges.TopicExchange( config )
+			case "fanout": return new stomp.exchanges.FanoutExchange( config )
+			case "distribution": return new stomp.exchanges.DistributionExchange( config )
+			default: {
+				if ( !len( config.class ?: "" ) ) {
+					throw(
+						type = "BoxExpress.InvalidExchangeConfig",
+						message = "Exchange '" & name & "' is not a built-in type (direct/topic/fanout/distribution) and has no 'class' to instantiate."
+					)
+				}
+				return new "#config.class#"( config )
+			}
+		}
+	}
+
+	/**
 	 * Returns the (connection) => {...} closure app.ws() expects. Per-
 	 * connection STOMP state (connected/login/this connection's own
-	 * subscription ids) lives in local vars here, shared across the nested
-	 * onMessage/onClose closures below — confirmed directly that BoxLang
-	 * closures correctly share and mutate an enclosing function's local
-	 * variables across separate invocations, not just assumed.
+	 * subscriptions/transactions/last-activity time) lives in local vars
+	 * here, shared across the nested onMessage/onClose closures and any
+	 * heartbeat threads started later below — confirmed directly that
+	 * BoxLang closures correctly share and mutate an enclosing function's
+	 * local variables across separate invocations, not just assumed.
 	 *
-	 * The _handle..., _deliver, _sendError, and _startHeartbeat helpers
-	 * below are deliberately NOT private, even though they're only ever
-	 * meant to be
-	 * called from within this class — confirmed directly (the hard way,
-	 * this middleware's first draft used private and every one of these
-	 * calls failed with "Method not found") that a private method isn't
-	 * reachable from a closure once that closure is invoked from outside
-	 * the class that defined it, which is exactly what happens here: these
-	 * closures are handed to app.ws()/WebSocketConnection and get called
-	 * later by boxexpress-ws-shim's own dispatch, not by this class itself.
+	 * The _handle..., _deliver, _sendError, _maybeReceipt, and heartbeat
+	 * helpers below are deliberately NOT private, even though they're only
+	 * ever meant to be called from within this class — confirmed directly
+	 * (the hard way, this middleware's first draft used private and every
+	 * one of these calls failed with "Method not found") that a private
+	 * method isn't reachable from a closure once that closure is invoked
+	 * from outside the class that defined it, which is exactly what
+	 * happens here: these closures are handed to app.ws()/WebSocketConnection
+	 * and get called later by boxexpress-ws-shim's own dispatch (or, for
+	 * heartbeat threads, by a java.lang.Thread), not by this class itself.
+	 * Every closure that crosses one of those dispatch boundaries captures
+	 * `var stomp = this` and calls through it rather than bare/self, for
+	 * the same reason.
 	 *
 	 * connectionId is generated here, once per connection, and threaded
 	 * through to every place that touches the shared
-	 * variables.subscribersByDestination registry — a real vulnerability
-	 * found in a security review, not a defensive-programming guess: that
-	 * registry used to be keyed on the client-supplied SUBSCRIBE `id`
-	 * header alone, shared across every connection on this broker
-	 * instance. STOMP subscription ids aren't secret — many client
-	 * libraries assign them sequentially (sub-0, sub-1, ...) — so a second
-	 * client subscribing to the same destination with the same id silently
-	 * overwrote the first client's entry, redirecting their messages to
-	 * the second client with no error to either side, and let the second
-	 * client's UNSUBSCRIBE delete the first client's subscription. Confirmed
-	 * exploitable by any client already authorized to subscribe to a shared
-	 * destination — no additional privilege needed. Fixed by scoping the
-	 * registry key to connectionId & subId, so no cross-connection
-	 * collision is possible even when subIds match exactly.
+	 * variables.subscribersByDestination/pendingAcksByConnection registries
+	 * — a real vulnerability found in a security review, not a defensive-
+	 * programming guess: that registry used to be keyed on the
+	 * client-supplied SUBSCRIBE `id` header alone, shared across every
+	 * connection on this broker instance. STOMP subscription ids aren't
+	 * secret — many client libraries assign them sequentially (sub-0,
+	 * sub-1, ...) — so a second client subscribing to the same destination
+	 * with the same id silently overwrote the first client's entry,
+	 * redirecting their messages to the second client with no error to
+	 * either side, and let the second client's UNSUBSCRIBE delete the
+	 * first client's subscription. Confirmed exploitable by any client
+	 * already authorized to subscribe to a shared destination — no
+	 * additional privilege needed. Fixed by scoping the registry key to
+	 * connectionId & subId, so no cross-connection collision is possible
+	 * even when subIds match exactly.
 	 */
 	function handler() {
 		var stomp = this
@@ -76,57 +158,161 @@ class {
 			var connectionId = createUUID()
 			var connected = false
 			var login = ""
-			var mySubscriptions = {}   // subscriptionId -> destination, for this connection only
+			var connectionMetadata = {}    // populated by authenticate(), read by authorize() and getConnectionDetails()
+			var mySubscriptions = {}       // subscriptionId -> destination, for this connection only
+			var activeTransactions = {}    // transactionId -> array of deferred actions, for this connection only
+			var lastActivityMs = stomp._nowMs()
+			var getLastActivityMs = () => lastActivityMs
 
 			connection.onMessage( ( raw ) => {
+				lastActivityMs = stomp._nowMs()
+
+				// A bare STOMP heartbeat is a single newline with no frame
+				// at all — updating lastActivityMs above is the entire
+				// point of receiving it, nothing else to do.
+				if ( !len( raw.trim() ) ) {
+					return
+				}
+
 				var frame = ""
 				try {
 					frame = variables.codec.parse( raw )
 				} catch ( any e ) {
-					stomp._sendError( connection, "Malformed frame" )
+					stomp._sendError( connection, "Malformed frame", "", true )
 					return
 				}
+
+				var receiptId = frame.getHeader( "receipt", "" )
 
 				switch ( frame.getCommand() ) {
 					case "CONNECT":
 					case "STOMP": {
-						var authResult = stomp._handleConnect( connection, frame )
+						var authResult = stomp._handleConnect( connection, frame, connectionMetadata )
 						connected = authResult.ok
 						login = authResult.login
+						if ( connected ) {
+							stomp._registerConnection( connectionId, connection, login, connectionMetadata )
+							if ( authResult.outgoingHeartbeatMs > 0 ) {
+								stomp._startOutgoingHeartbeat( connection, authResult.outgoingHeartbeatMs )
+							}
+							if ( authResult.incomingHeartbeatMs > 0 ) {
+								stomp._startHeartbeatMonitor( connection, authResult.incomingHeartbeatMs, getLastActivityMs )
+							}
+						}
 						break
 					}
 					case "SUBSCRIBE": {
 						if ( !connected ) {
-							stomp._sendError( connection, "Not connected" )
+							stomp._sendError( connection, "Not connected", receiptId, true )
 							break
 						}
-						stomp._handleSubscribe( connection, connectionId, frame, login, mySubscriptions )
+						if ( stomp._handleSubscribe( connection, connectionId, frame, login, mySubscriptions ) ) {
+							stomp._maybeReceipt( connection, receiptId )
+						}
 						break
 					}
 					case "UNSUBSCRIBE": {
-						if ( connected ) {
-							stomp._handleUnsubscribe( connectionId, frame, mySubscriptions )
+						if ( !connected ) {
+							stomp._sendError( connection, "Not connected", receiptId, true )
+							break
 						}
+						stomp._handleUnsubscribe( connectionId, frame, mySubscriptions )
+						stomp._maybeReceipt( connection, receiptId )
 						break
 					}
 					case "SEND": {
 						if ( !connected ) {
-							stomp._sendError( connection, "Not connected" )
+							stomp._sendError( connection, "Not connected", receiptId, true )
 							break
 						}
-						stomp._handleSend( connection, frame, login )
+						var sendTx = frame.getHeader( "transaction", "" )
+						if ( len( sendTx ) ) {
+							if ( !structKeyExists( activeTransactions, sendTx ) ) {
+								stomp._sendError( connection, "Unknown transaction: " & sendTx, receiptId )
+								break
+							}
+							// Deferred to COMMIT — see _handleSend's docblock
+							// for what that does and doesn't guarantee.
+							activeTransactions[ sendTx ].append( () => stomp._handleSend( connection, connectionId, frame, login ) )
+							stomp._maybeReceipt( connection, receiptId )
+						} else if ( stomp._handleSend( connection, connectionId, frame, login ) ) {
+							stomp._maybeReceipt( connection, receiptId )
+						}
+						break
+					}
+					case "ACK":
+					case "NACK": {
+						if ( !connected ) {
+							stomp._sendError( connection, "Not connected", receiptId, true )
+							break
+						}
+						var ackTx = frame.getHeader( "transaction", "" )
+						if ( len( ackTx ) ) {
+							if ( !structKeyExists( activeTransactions, ackTx ) ) {
+								stomp._sendError( connection, "Unknown transaction: " & ackTx, receiptId )
+								break
+							}
+							activeTransactions[ ackTx ].append( () => stomp._handleAcknowledge( connectionId, frame ) )
+							stomp._maybeReceipt( connection, receiptId )
+						} else if ( stomp._handleAcknowledge( connectionId, frame ) ) {
+							stomp._maybeReceipt( connection, receiptId )
+						} else {
+							stomp._sendError( connection, "No such pending message id", receiptId )
+						}
+						break
+					}
+					case "BEGIN": {
+						if ( !connected ) {
+							stomp._sendError( connection, "Not connected", receiptId, true )
+							break
+						}
+						var beginTx = frame.getHeader( "transaction", "" )
+						if ( !len( beginTx ) || structKeyExists( activeTransactions, beginTx ) ) {
+							stomp._sendError( connection, "Invalid or duplicate transaction id", receiptId )
+							break
+						}
+						activeTransactions[ beginTx ] = []
+						stomp._maybeReceipt( connection, receiptId )
+						break
+					}
+					case "COMMIT": {
+						if ( !connected ) {
+							stomp._sendError( connection, "Not connected", receiptId, true )
+							break
+						}
+						var commitTx = frame.getHeader( "transaction", "" )
+						if ( !structKeyExists( activeTransactions, commitTx ) ) {
+							stomp._sendError( connection, "Unknown transaction: " & commitTx, receiptId )
+							break
+						}
+						for ( var action in activeTransactions[ commitTx ] ) {
+							action()
+						}
+						structDelete( activeTransactions, commitTx )
+						stomp._maybeReceipt( connection, receiptId )
+						break
+					}
+					case "ABORT": {
+						if ( !connected ) {
+							stomp._sendError( connection, "Not connected", receiptId, true )
+							break
+						}
+						var abortTx = frame.getHeader( "transaction", "" )
+						if ( !structKeyExists( activeTransactions, abortTx ) ) {
+							stomp._sendError( connection, "Unknown transaction: " & abortTx, receiptId )
+							break
+						}
+						structDelete( activeTransactions, abortTx )
+						stomp._maybeReceipt( connection, receiptId )
 						break
 					}
 					case "DISCONNECT": {
-						var receiptId = frame.getHeader( "receipt", "" )
-						if ( len( receiptId ) ) {
-							connection.send( variables.codec.serialize( new "../StompFrame"( "RECEIPT", { "receipt-id": receiptId } ) ) )
-						}
+						stomp._maybeReceipt( connection, receiptId )
 						connection.close()
 						break
 					}
 					default: {
-						stomp._sendError( connection, "Unknown command: " & frame.getCommand() )
+						stomp._sendError( connection, "Unknown command: " & frame.getCommand(), receiptId, true )
 					}
 				}
 			} )
@@ -141,19 +327,31 @@ class {
 	 * Server-side send — the broadcast/publish path for app code outside
 	 * any single connection's own message handler (a route handler pushing
 	 * an update, the obvious real use case, same as it was for
-	 * SseEmitter's/WebSocketConnection's own broadcast patterns).
+	 * SseEmitter's/WebSocketConnection's own broadcast patterns). No
+	 * originating connection (unlike a client's own SEND) — matches
+	 * SocketBox's getChannel() being null for a server-originated message.
 	 */
 	function send( destination, data, headers = {} ) {
 		var payload = isSimpleValue( data ) ? toString( data ) : JSONSerialize( data )
 		_deliver( destination, payload, headers )
 	}
 
-	function _handleConnect( connection, frame ) {
+	/**
+	 * connectionMetadata is a plain struct, empty until authenticate()
+	 * populates it — passed by reference (BoxLang structs are reference
+	 * types, confirmed directly), so mutations authenticate() makes are
+	 * visible here immediately, get stored in the connection registry by
+	 * _registerConnection(), and are handed to every later authorize()
+	 * call for this connection unchanged. Also echoed back to the client
+	 * as extra CONNECTED headers, mirroring SocketBox's own contract for
+	 * this parameter exactly (their README: "which will be sent back to
+	 * the client via the headers of the CONNECTED frame").
+	 */
+	function _handleConnect( connection, frame, connectionMetadata ) {
 		var acceptedVersions = frame.getHeader( "accept-version", "1.2" )
 		if ( !acceptedVersions.listFind( "1.2" ) ) {
-			_sendError( connection, "Supported versions: 1.2" )
-			connection.close()
-			return { ok: false, login: "" }
+			_sendError( connection, "Supported versions: 1.2", frame.getHeader( "receipt", "" ), true )
+			return { ok: false, login: "", outgoingHeartbeatMs: 0, incomingHeartbeatMs: 0 }
 		}
 
 		var login = frame.getHeader( "login", "" )
@@ -161,36 +359,106 @@ class {
 		var host = frame.getHeader( "host", "" )
 
 		if ( !isNull( variables.authenticateFn ) ) {
-			var authenticated = variables.authenticateFn( login, passcode, host, connection )
+			var authenticated = variables.authenticateFn( login, passcode, host, connection, connectionMetadata )
 			if ( !authenticated ) {
-				_sendError( connection, "Authentication failed" )
-				connection.close()
-				return { ok: false, login: "" }
+				_sendError( connection, "Authentication failed", frame.getHeader( "receipt", "" ), true )
+				return { ok: false, login: "", outgoingHeartbeatMs: 0, incomingHeartbeatMs: 0 }
 			}
 		}
 
+		var negotiated = _negotiateHeartbeat( frame )
 		var connectedHeaders = { version: "1.2" }
+		for ( var metadataKey in connectionMetadata ) {
+			connectedHeaders[ metadataKey ] = toString( connectionMetadata[ metadataKey ] )
+		}
 		if ( variables.heartbeatMs > 0 ) {
-			connectedHeaders[ "heart-beat" ] = variables.heartbeatMs & ",0"
-			_startHeartbeat( connection )
+			// This server's own capabilities (sx,sy) — not the negotiated
+			// value, which each side computes independently from both
+			// sides' headers per spec. sy equals sx here: one configured
+			// interval covers both "how often I'll send" and "how often I
+			// expect to hear from you," a deliberate simplification rather
+			// than two separate options nothing currently calls for.
+			// Set after connectionMetadata above so a metadata key named
+			// "heart-beat" can never accidentally clobber the real one.
+			connectedHeaders[ "heart-beat" ] = variables.heartbeatMs & "," & variables.heartbeatMs
 		}
 		connection.send( variables.codec.serialize( new "../StompFrame"( "CONNECTED", connectedHeaders ) ) )
-		return { ok: true, login: login }
+		return {
+			ok: true,
+			login: login,
+			outgoingHeartbeatMs: negotiated.outgoingMs,
+			incomingHeartbeatMs: negotiated.incomingMs
+		}
+	}
+
+	function _registerConnection( connectionId, connection, login, connectionMetadata ) {
+		lock name="#variables.lockName#" type="exclusive" timeout="5" {
+			variables.connectionsById[ connectionId ] = {
+				connection: connection,
+				login: login,
+				connectionMetadata: connectionMetadata
+			}
+		}
+	}
+
+	function _metadataFor( connectionId ) {
+		var metadata = {}
+		// "exclusive", not a read-only lock type — matching every other
+		// lock in this file (no precedent elsewhere in this codebase for
+		// a read-only named lock, and this read is cheap enough that a
+		// dedicated read lock isn't worth introducing a new pattern for).
+		lock name="#variables.lockName#" type="exclusive" timeout="5" {
+			if ( structKeyExists( variables.connectionsById, connectionId ) ) {
+				metadata = variables.connectionsById[ connectionId ].connectionMetadata
+			}
+		}
+		return metadata
+	}
+
+	/**
+	 * STOMP's heart-beat negotiation (spec section 6): each side states
+	 * "I can send every (at fastest) X ms" and "I want to receive at least
+	 * every Y ms" as heart-beat:X,Y; the side that will actually SEND at
+	 * some interval computes it as max(its own X, the other side's Y) —
+	 * zero on either side of that pair means "don't bother," not "no
+	 * preference." A client that never sends a heart-beat header at all
+	 * defaults to "0,0" — can't send, doesn't want any — so a client with
+	 * no opinion on heartbeats correctly gets none, even if this server is
+	 * configured with heartbeatMs > 0.
+	 */
+	function _negotiateHeartbeat( frame ) {
+		var clientHeartbeat = frame.getHeader( "heart-beat", "0,0" )
+		var parts = clientHeartbeat.listToArray( "," )
+		var clientCanSendMs = parts.len() >= 1 ? val( parts[ 1 ] ) : 0
+		var clientWantsMs = parts.len() >= 2 ? val( parts[ 2 ] ) : 0
+		var serverCanSendMs = variables.heartbeatMs
+		var serverWantsMs = variables.heartbeatMs
+
+		return {
+			outgoingMs: ( serverCanSendMs > 0 && clientWantsMs > 0 ) ? max( serverCanSendMs, clientWantsMs ) : 0,
+			incomingMs: ( clientCanSendMs > 0 && serverWantsMs > 0 ) ? max( clientCanSendMs, serverWantsMs ) : 0
+		}
 	}
 
 	function _handleSubscribe( connection, connectionId, frame, login, mySubscriptions ) {
 		var destination = frame.getHeader( "destination", "" )
 		var subId = frame.getHeader( "id", "" )
 		if ( !len( destination ) || !len( subId ) ) {
-			_sendError( connection, "SUBSCRIBE requires destination and id headers" )
-			return
+			_sendError( connection, "SUBSCRIBE requires destination and id headers", frame.getHeader( "receipt", "" ), true )
+			return false
+		}
+
+		var ackMode = frame.getHeader( "ack", "auto" )
+		if ( !listFindNoCase( "auto,client,client-individual", ackMode ) ) {
+			_sendError( connection, "Invalid ack mode: " & ackMode, frame.getHeader( "receipt", "" ), true )
+			return false
 		}
 
 		if ( !isNull( variables.authorizeFn ) ) {
-			var allowed = variables.authorizeFn( login, destination, "subscribe", connection )
+			var allowed = variables.authorizeFn( login, destination, "subscribe", connection, _metadataFor( connectionId ) )
 			if ( !allowed ) {
 				_sendError( connection, "Not authorized to subscribe to " & destination )
-				return
+				return false
 			}
 		}
 
@@ -198,9 +466,15 @@ class {
 			if ( !structKeyExists( variables.subscribersByDestination, destination ) ) {
 				variables.subscribersByDestination[ destination ] = {}
 			}
-			variables.subscribersByDestination[ destination ][ connectionId & ":" & subId ] = { connection: connection, subId: subId }
+			variables.subscribersByDestination[ destination ][ connectionId & ":" & subId ] = {
+				connection: connection,
+				subId: subId,
+				connectionId: connectionId,
+				ackMode: ackMode
+			}
 		}
 		mySubscriptions[ subId ] = destination
+		return true
 	}
 
 	function _handleUnsubscribe( connectionId, frame, mySubscriptions ) {
@@ -213,14 +487,36 @@ class {
 			if ( structKeyExists( variables.subscribersByDestination, destination ) ) {
 				structDelete( variables.subscribersByDestination[ destination ], connectionId & ":" & subId )
 			}
+			// Any messages still pending ack on this subscription can never
+			// be acked now — drop them too, or they'd sit in the registry
+			// forever (a real, if small, leak: nothing else ever clears an
+			// entry whose subscription was torn down out from under it).
+			if ( structKeyExists( variables.pendingAcksByConnection, connectionId ) ) {
+				for ( var ackId in structCopy( variables.pendingAcksByConnection[ connectionId ] ) ) {
+					if ( variables.pendingAcksByConnection[ connectionId ][ ackId ].subId == subId ) {
+						structDelete( variables.pendingAcksByConnection[ connectionId ], ackId )
+					}
+				}
+			}
 		}
 		structDelete( mySubscriptions, subId )
 	}
 
-	function _handleSend( connection, frame, login ) {
+	/**
+	 * Also the deferred action a transactional SEND runs at COMMIT time —
+	 * authorization is (re-)evaluated then, against whatever authorizeFn
+	 * says at that later moment, not at the original SEND. Its boolean
+	 * result isn't separately reported back to the client in that deferred
+	 * case: the RECEIPT for the SEND frame itself was already sent at
+	 * buffering time (STOMP's receipt semantics are "frame accepted," not
+	 * "transaction contents individually confirmed"), matching how real
+	 * STOMP transactions don't give per-buffered-frame feedback either.
+	 */
+	function _handleSend( connection, connectionId, frame, login ) {
 		var destination = frame.getHeader( "destination", "" )
 		if ( !len( destination ) ) {
-			return
+			_sendError( connection, "SEND requires a destination header", frame.getHeader( "receipt", "" ), true )
+			return false
 		}
 		if ( !isNull( variables.authorizeFn ) ) {
 			// Passes the real connection, not a null placeholder — a
@@ -229,9 +525,9 @@ class {
 			// breaking the documented authorize(login, destination, access,
 			// connection) contract for publish checks specifically (only
 			// SUBSCRIBE's own authorize() call passed the real connection).
-			var allowed = variables.authorizeFn( login, destination, "publish", connection )
+			var allowed = variables.authorizeFn( login, destination, "publish", connection, _metadataFor( connectionId ) )
 			if ( !allowed ) {
-				return
+				return false
 			}
 		}
 		var extraHeaders = {}
@@ -239,7 +535,91 @@ class {
 		if ( len( contentType ) ) {
 			extraHeaders[ "content-type" ] = contentType
 		}
-		_deliver( destination, frame.getBody(), extraHeaders )
+		_deliver( destination, frame.getBody(), extraHeaders, connection )
+		return true
+	}
+
+	/**
+	 * Backs both ACK and NACK. Real STOMP brokers distinguish them for
+	 * redelivery — NACK signals "requeue this or route it elsewhere" — but
+	 * this broker delivers straight to open connections with no queue to
+	 * redeliver into, so there's nothing for that distinction to actually
+	 * change here; both just clear the bookkeeping for the acknowledged
+	 * message (and, in "client" mode, every earlier not-yet-acked message
+	 * on the same subscription, per spec's cumulative-ack rule). Returns
+	 * false if `id` doesn't match any message currently pending for this
+	 * connection — an unknown or already-acked id, or one for a
+	 * subscription that was "auto" mode and so was never registered here
+	 * at all.
+	 */
+	function _handleAcknowledge( connectionId, frame ) {
+		var ackId = frame.getHeader( "id", "" )
+		if ( !len( ackId ) ) {
+			return false
+		}
+		var found = false
+		lock name="#variables.lockName#" type="exclusive" timeout="5" {
+			if ( structKeyExists( variables.pendingAcksByConnection, connectionId )
+				&& structKeyExists( variables.pendingAcksByConnection[ connectionId ], ackId ) ) {
+				found = true
+				var target = variables.pendingAcksByConnection[ connectionId ][ ackId ]
+				if ( target.ackMode == "client" ) {
+					for ( var otherId in structCopy( variables.pendingAcksByConnection[ connectionId ] ) ) {
+						var other = variables.pendingAcksByConnection[ connectionId ][ otherId ]
+						if ( other.subId == target.subId && other.seq <= target.seq ) {
+							structDelete( variables.pendingAcksByConnection[ connectionId ], otherId )
+						}
+					}
+				} else {
+					structDelete( variables.pendingAcksByConnection[ connectionId ], ackId )
+				}
+			}
+		}
+		return found
+	}
+
+	/**
+	 * Resolves the published destination through the exchange whose name
+	 * prefixes it ("topic/chat.room.42" -> the "topic" exchange, routing
+	 * key "chat.room.42") to zero or more physical destinations — the
+	 * ones that actually appear in variables.subscribersByDestination/
+	 * variables.listeners. No recognized "name/" prefix (including a
+	 * destination with no "/" at all) falls through to the always-present
+	 * "direct" exchange with the WHOLE destination string as the routing
+	 * key, so a destination that never used the "exchangeName/..."
+	 * convention behaves identically to before exchanges existed.
+	 */
+	function _resolveDestinations( destination, body, headers ) {
+		var slashPos = destination.find( "/" )
+		var exchangeName = "direct"
+		var routingKey = destination
+		if ( slashPos ) {
+			var prefix = destination.mid( 1, slashPos - 1 )
+			if ( structKeyExists( variables.exchanges, prefix ) ) {
+				exchangeName = prefix
+				routingKey = destination.mid( slashPos + 1, destination.len() - slashPos )
+			}
+		}
+		return variables.exchanges[ exchangeName ].route( routingKey, body, headers )
+	}
+
+	/**
+	 * Resolves destination through the configured exchanges, then
+	 * delivers to every real WebSocket subscriber AND every server-side
+	 * listener registered for each resolved physical destination.
+	 * originConnection is the client connection that sent the original
+	 * SEND, or "" for a server-originated stomp.send() — passed through to
+	 * StompMessage, which turns "" into a real null for listeners
+	 * (mirroring SocketBox's getChannel(), also null for a server-
+	 * originated message). "" rather than an actual null here because a
+	 * BoxLang function parameter holding real null can't be referenced or
+	 * passed along at all — confirmed directly; see StompMessage.bx's
+	 * init() docblock for the full explanation.
+	 */
+	function _deliver( destination, body, extraHeaders, originConnection = "" ) {
+		for ( var physicalDestination in _resolveDestinations( destination, body, extraHeaders ) ) {
+			_deliverToDestination( physicalDestination, body, extraHeaders, originConnection )
+		}
 	}
 
 	/**
@@ -251,13 +631,17 @@ class {
 	 * each entry stores the subscriber's own connection + their own
 	 * client-chosen subId, keyed in the registry by connectionId & subId
 	 * so two different connections can never collide on the same key even
-	 * if their client-chosen subIds happen to match).
+	 * if their client-chosen subIds happen to match), plus one call per
+	 * server-side listener registered for this exact physical destination.
 	 * Snapshots the subscriber list under lock, then sends outside it —
 	 * WebSocketConnection.send() already has its own per-connection lock
 	 * (see WebSocketConnection.bx), so holding this registry's lock for
 	 * the actual network writes too would only add contention, not safety.
+	 * A subscriber whose ack mode isn't "auto" also gets registered into
+	 * pendingAcksByConnection under its own short lock, so their later
+	 * ACK/NACK has something to reference.
 	 */
-	function _deliver( destination, body, extraHeaders ) {
+	function _deliverToDestination( destination, body, extraHeaders, originConnection ) {
 		var recipients = {}
 		lock name="#variables.lockName#" type="exclusive" timeout="5" {
 			if ( structKeyExists( variables.subscribersByDestination, destination ) ) {
@@ -279,7 +663,42 @@ class {
 			headers[ "destination" ] = destination
 			headers[ "message-id" ] = createUUID()
 			headers[ "subscription" ] = subscriber.subId
+
+			if ( subscriber.ackMode != "auto" ) {
+				var ackId = createUUID()
+				headers[ "ack" ] = ackId
+				lock name="#variables.lockName#" type="exclusive" timeout="5" {
+					variables.ackSeqCounter++
+					if ( !structKeyExists( variables.pendingAcksByConnection, subscriber.connectionId ) ) {
+						variables.pendingAcksByConnection[ subscriber.connectionId ] = {}
+					}
+					variables.pendingAcksByConnection[ subscriber.connectionId ][ ackId ] = {
+						subId: subscriber.subId,
+						destination: destination,
+						ackMode: subscriber.ackMode,
+						seq: variables.ackSeqCounter
+					}
+				}
+			}
+
 			subscriber.connection.send( variables.codec.serialize( new "../StompFrame"( "MESSAGE", headers, body ) ) )
+		}
+
+		if ( structKeyExists( variables.listeners, destination ) ) {
+			var listenerHeaders = duplicate( extraHeaders )
+			listenerHeaders[ "destination" ] = destination
+			listenerHeaders[ "message-id" ] = createUUID()
+			try {
+				variables.listeners[ destination ]( new "../StompMessage"( "MESSAGE", listenerHeaders, body, originConnection ) )
+			} catch ( any e ) {
+				// A server-side listener's own bug shouldn't take down
+				// delivery to real subscribers or other listeners on the
+				// same destination — same posture as the shim's _guard()
+				// wrapper around WebSocket callbacks (see BoxWebSocketListener.java),
+				// logged the same way HttpBridge.bx logs its own caught
+				// dispatch errors rather than silently swallowed.
+				println( "[Stomp] listener for '" & destination & "' threw: " & e.message )
+			}
 		}
 	}
 
@@ -291,32 +710,107 @@ class {
 					structDelete( variables.subscribersByDestination[ destination ], connectionId & ":" & subId )
 				}
 			}
+			structDelete( variables.pendingAcksByConnection, connectionId )
+			structDelete( variables.connectionsById, connectionId )
 		}
 	}
 
-	function _sendError( connection, message ) {
-		connection.send( variables.codec.serialize( new "../StompFrame"( "ERROR", { message: message } ) ) )
+	/**
+	 * Debugging/introspection getters — mirror SocketBox's own
+	 * getSTOMPConnections()/getConnectionDetails()/getSubscriptions()/
+	 * getExchanges()/getConfig(), including returning the live internal
+	 * structs directly rather than copies (same as SocketBox does), since
+	 * these exist for inspecting broker state, not as a stable public
+	 * data API to build app logic against.
+	 */
+	function getConnections() {
+		return variables.connectionsById
+	}
+
+	function getConnectionDetails( connectionId ) {
+		return variables.connectionsById[ connectionId ] ?: {}
+	}
+
+	function getSubscriptions() {
+		return variables.subscribersByDestination
+	}
+
+	function getExchanges() {
+		return variables.exchanges
+	}
+
+	function getConfig() {
+		return { heartbeatMs: variables.heartbeatMs }
 	}
 
 	/**
-	 * Server-initiated keep-alive only for v1 — sends an empty STOMP
-	 * heartbeat (a bare newline) every heartbeatMs on its own virtual
-	 * thread, regardless of what heart-beat cadence the client itself
-	 * requested. Full bidirectional negotiation (respecting the client's
-	 * own requested interval, expecting client heartbeats back and timing
-	 * out a connection that stops sending them) is real STOMP behavior
-	 * this doesn't implement yet — a real gap, not an oversight, cut for
-	 * the same "nothing calls for it yet" reason as exchanges/transactions
-	 * above.
+	 * receiptId defaults to "" (send just the ERROR) since most call sites
+	 * that hit a genuine authorization/business-rule denial pass none.
+	 * fatal, when true, closes the connection right after sending — for
+	 * protocol-level violations (a malformed frame, an unrecognized
+	 * command, a frame sent before CONNECT completed, a SUBSCRIBE missing
+	 * required headers) where continuing the session doesn't make sense.
+	 * Business-rule rejections (authorize() returning false, an unknown
+	 * transaction/ack id) stay non-fatal — the connection remains usable,
+	 * matching the documented "that one frame gets an ERROR instead of
+	 * taking effect" behavior for authorization denials specifically.
 	 */
-	function _startHeartbeat( connection ) {
-		var intervalMs = variables.heartbeatMs
+	function _sendError( connection, message, receiptId = "", fatal = false ) {
+		var headers = { message: message }
+		if ( len( receiptId ) ) {
+			headers[ "receipt-id" ] = receiptId
+		}
+		connection.send( variables.codec.serialize( new "../StompFrame"( "ERROR", headers ) ) )
+		if ( fatal ) {
+			connection.close()
+		}
+	}
+
+	function _maybeReceipt( connection, receiptId ) {
+		if ( len( receiptId ) ) {
+			connection.send( variables.codec.serialize( new "../StompFrame"( "RECEIPT", { "receipt-id": receiptId } ) ) )
+		}
+	}
+
+	function _nowMs() {
+		return createObject( "java", "java.lang.System" ).currentTimeMillis()
+	}
+
+	function _startOutgoingHeartbeat( connection, intervalMs ) {
 		var thread = createObject( "java", "java.lang.Thread" ).init( createDynamicProxy(
 			new "../ThreadRunnable"( function() {
 				while ( !connection.isClosed() ) {
 					sleep( intervalMs )
 					if ( !connection.isClosed() ) {
 						connection.send( char( 10 ) )
+					}
+				}
+			} ),
+			[ "java.lang.Runnable" ]
+		) )
+		thread.setDaemon( true )
+		thread.start()
+	}
+
+	/**
+	 * Polls getLastActivityMs() — a closure over the connection's own
+	 * lastActivityMs local var in handler(), updated on every inbound
+	 * frame including bare heartbeats — and closes the connection with an
+	 * ERROR if nothing has arrived within roughly 2x the negotiated
+	 * incoming interval, the conventional grace margin real STOMP
+	 * clients/servers use to absorb normal network jitter instead of
+	 * timing out on every single missed beat.
+	 */
+	function _startHeartbeatMonitor( connection, intervalMs, getLastActivityMs ) {
+		var stomp = this
+		var timeoutMs = intervalMs * 2
+		var thread = createObject( "java", "java.lang.Thread" ).init( createDynamicProxy(
+			new "../ThreadRunnable"( function() {
+				while ( !connection.isClosed() ) {
+					sleep( intervalMs )
+					if ( !connection.isClosed() && ( stomp._nowMs() - getLastActivityMs() ) > timeoutMs ) {
+						stomp._sendError( connection, "Heart-beat timeout", "", true )
+						return
 					}
 				}
 			} ),

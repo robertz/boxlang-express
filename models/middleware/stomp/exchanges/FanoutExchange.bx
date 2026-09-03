@@ -1,0 +1,16 @@
+/**
+ * One binding name -> an array of target destinations, ALL of which get
+ * every message routed to that name.
+ */
+class {
+
+	function init( config = {} ) {
+		variables.bindings = config.bindings ?: {}
+		return this
+	}
+
+	function route( destination, body, headers ) {
+		return variables.bindings[ destination ] ?: []
+	}
+
+}

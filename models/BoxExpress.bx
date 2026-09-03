@@ -192,7 +192,25 @@ class {
 		if ( !structIsEmpty( variables.wsRoutes ) ) {
 			var wsConnectionCallback = new adapters.WsConnectionCallback( variables.wsRoutes )
 			var wsCallbackProxy = createDynamicProxy( wsConnectionCallback, [ "io.undertow.websockets.WebSocketConnectionCallback" ] )
-			var wsHandshakeHandler = createObject( "java", "io.undertow.websockets.WebSocketProtocolHandshakeHandler" ).init( wsCallbackProxy )
+
+			// Registering the STOMP-over-WebSocket subprotocol names here
+			// (rather than leaving the handshake handler's default, which
+			// negotiates none) is what lets stomp.js and other STOMP client
+			// libraries — several of which send Sec-WebSocket-Protocol and
+			// expect it echoed — complete the handshake cleanly. Harmless to
+			// every other app.ws() route: a client that never sends
+			// Sec-WebSocket-Protocol (a bare app.ws() consumer, or this
+			// project's own WebSocketTestClient) skips negotiation
+			// entirely, and one that sends an unrelated protocol name just
+			// gets none selected — confirmed directly this doesn't fail the
+			// handshake, only skips echoing a protocol back.
+			var wsSubprotocols = createObject( "java", "java.util.HashSet" ).init()
+			wsSubprotocols.add( "v12.stomp" )
+			wsSubprotocols.add( "v11.stomp" )
+			wsSubprotocols.add( "v10.stomp" )
+			var wsHandshakes = createObject( "java", "java.util.ArrayList" ).init()
+			wsHandshakes.add( createObject( "java", "io.undertow.websockets.core.protocol.version13.Hybi13Handshake" ).init( wsSubprotocols, false ) )
+			var wsHandshakeHandler = createObject( "java", "io.undertow.websockets.WebSocketProtocolHandshakeHandler" ).init( wsHandshakes, wsCallbackProxy )
 
 			var upgradeRouter = new adapters.WsUpgradeRouter( wsHandshakeHandler, variables.wsRoutes, proxy )
 			rootProxy = createDynamicProxy( upgradeRouter, [ "io.undertow.server.HttpHandler" ] )

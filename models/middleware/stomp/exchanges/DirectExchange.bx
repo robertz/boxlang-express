@@ -1,0 +1,21 @@
+/**
+ * Configured automatically even when not listed in options.exchanges,
+ * matching SocketBox's own default — every SEND whose destination has no
+ * recognized exchange prefix routes through this one, applying a binding
+ * if one matches or passing the destination through unchanged otherwise.
+ * This is what keeps every existing destination string (no exchange
+ * concept in play at all) behaving exactly as it did before exchanges
+ * existed.
+ */
+class {
+
+	function init( config = {} ) {
+		variables.bindings = config.bindings ?: {}
+		return this
+	}
+
+	function route( destination, body, headers ) {
+		return [ variables.bindings[ destination ] ?: destination ]
+	}
+
+}

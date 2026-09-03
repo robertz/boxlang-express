@@ -1,0 +1,34 @@
+/**
+ * Fanout's opposite — one binding name -> an array of candidate
+ * destinations, but a given message goes to exactly ONE of them, chosen
+ * by "random" (default) or "roundrobin". Round-robin state is a plain
+ * counter per binding name, not persisted or synchronized across
+ * multiple app instances — see Stomp.bx's README note on clustering.
+ */
+class {
+
+	function init( config = {} ) {
+		variables.bindings = config.bindings ?: {}
+		variables.type = config.type ?: "random"
+		variables.roundRobinCounters = {}
+		variables.lockName = "DistributionExchange-" & createUUID()
+		return this
+	}
+
+	function route( destination, body, headers ) {
+		var targets = variables.bindings[ destination ] ?: []
+		if ( !targets.len() ) {
+			return []
+		}
+		if ( variables.type == "roundrobin" ) {
+			var nextIndex = 0
+			lock name="#variables.lockName#" type="exclusive" timeout="5" {
+				nextIndex = variables.roundRobinCounters[ destination ] ?: 0
+				variables.roundRobinCounters[ destination ] = nextIndex + 1
+			}
+			return [ targets[ ( nextIndex % targets.len() ) + 1 ] ]
+		}
+		return [ targets[ randRange( 1, targets.len() ) ] ]
+	}
+
+}

@@ -1,0 +1,8 @@
+class {
+	function init( config = {} ) {
+		return this
+	}
+	function route( destination, body, headers ) {
+		return [ uCase( destination ) ]
+	}
+}

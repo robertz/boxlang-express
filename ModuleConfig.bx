@@ -17,7 +17,7 @@ class {
 	/**
 	 * Module version. Keep in sync with box.json.
 	 */
-	this.version = "0.2.4";
+	this.version = "0.2.6";
 
 	/**
 	 * BoxLang mapping for this module. Registered as bxModules.boxexpress

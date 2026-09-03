@@ -221,17 +221,169 @@ class extends="testbox.system.BaseSpec" {
 				client.close()
 			} )
 
-			it( "advertises heart-beat in CONNECTED and sends periodic keep-alives when heartbeatMs is configured", function() {
+			it( "advertises heart-beat in CONNECTED and sends periodic keep-alives once the client says it wants them", function() {
 				var client = new "../helpers/WebSocketTestClient"()
 				client.connect( "localhost", variables.hbPort, "/stomp" )
-				client.sendText( variables.codec.serialize( new "../../models/StompFrame"( "CONNECT", { "accept-version": "1.2" } ) ) )
+				// "0,100": can't send heartbeats itself, wants them from the
+				// server at ~100ms — negotiated outgoing = max(server's 200,
+				// client's 100) = 200, same cadence the wait below expects.
+				client.sendText( variables.codec.serialize( new "../../models/StompFrame"( "CONNECT", { "accept-version": "1.2", "heart-beat": "0,100" } ) ) )
 				var connectedFrame = variables.codec.parse( client.readTextFrame() )
-				expect( connectedFrame.getHeader( "heart-beat" ) ).toBe( "200,0" )
+				// The server's own advertised capability (sx,sy) — both
+				// halves of the same configured heartbeatMs, not the
+				// negotiated value each side computes independently.
+				expect( connectedFrame.getHeader( "heart-beat" ) ).toBe( "200,200" )
 
 				var heartbeat = client.readTextFrame()
 				expect( heartbeat ).toBe( char( 10 ) )
 
 				client.close()
+			} )
+
+			it( "sends no heartbeat once the client says it doesn't want any, even though heartbeatMs is configured", function() {
+				var client = new "../helpers/WebSocketTestClient"()
+				client.connect( "localhost", variables.hbPort, "/stomp" )
+				// "0,0": explicit opt-out — a client with no heart-beat
+				// header at all defaults to this same "0,0", so this also
+				// covers that (more common) case.
+				client.sendText( variables.codec.serialize( new "../../models/StompFrame"( "CONNECT", { "accept-version": "1.2", "heart-beat": "0,0" } ) ) )
+				variables.codec.parse( client.readTextFrame() )   // CONNECTED
+
+				// Prove nothing arrives on its own by sending a real message
+				// and confirming THAT'S what shows up — not a sleep-and-hope.
+				client.sendText( variables.codec.serialize( new "../../models/StompFrame"( "SUBSCRIBE", { destination: "/topic/hb-optout", id: "sub-hb" } ) ) )
+				sleep( 100 )
+				variables.hbStomp.send( "/topic/hb-optout", "confirm" )
+				var msg = variables.codec.parse( client.readTextFrame() )
+				expect( msg.getBody() ).toBe( "confirm" )
+
+				client.close()
+			} )
+
+			it( "closes the connection with an ERROR when a client that promised heartbeats stops sending them", function() {
+				var client = new "../helpers/WebSocketTestClient"()
+				client.connect( "localhost", variables.hbPort, "/stomp" )
+				// "50,0": promises to send every 50ms, doesn't need any from
+				// the server — negotiated incoming = max(client's 50,
+				// server's 200) = 200, so the monitor's ~2x grace window is
+				// ~400ms with nothing at all sent after CONNECT.
+				client.sendText( variables.codec.serialize( new "../../models/StompFrame"( "CONNECT", { "accept-version": "1.2", "heart-beat": "50,0" } ) ) )
+				variables.codec.parse( client.readTextFrame() )   // CONNECTED
+
+				sleep( 600 )
+				var errorFrame = variables.codec.parse( client.readTextFrame() )
+				expect( errorFrame.getCommand() ).toBe( "ERROR" )
+				expect( errorFrame.getHeader( "message" ) ).toBe( "Heart-beat timeout" )
+
+				client.close()
+			} )
+
+			it( "sends a RECEIPT for SUBSCRIBE/SEND/UNSUBSCRIBE when a receipt header is present, not just DISCONNECT", function() {
+				var conn = _connectedClient( variables.testPort )
+
+				conn.client.sendText( variables.codec.serialize( new "../../models/StompFrame"( "SUBSCRIBE", { destination: "/topic/receipt-test", id: "sub-r", receipt: "r-1" } ) ) )
+				var subReceipt = variables.codec.parse( conn.client.readTextFrame() )
+				expect( subReceipt.getCommand() ).toBe( "RECEIPT" )
+				expect( subReceipt.getHeader( "receipt-id" ) ).toBe( "r-1" )
+
+				conn.client.sendText( variables.codec.serialize( new "../../models/StompFrame"( "SEND", { destination: "/topic/receipt-test", receipt: "r-2" }, "hi" ) ) )
+
+				// The SEND delivers a MESSAGE to this same connection's own
+				// subscription before the RECEIPT for the SEND frame itself
+				// — _deliver() runs inside _handleSend(), which returns
+				// before the switch calls _maybeReceipt(). Drain it first.
+				variables.codec.parse( conn.client.readTextFrame() )
+
+				var sendReceipt = variables.codec.parse( conn.client.readTextFrame() )
+				expect( sendReceipt.getCommand() ).toBe( "RECEIPT" )
+				expect( sendReceipt.getHeader( "receipt-id" ) ).toBe( "r-2" )
+
+				conn.client.sendText( variables.codec.serialize( new "../../models/StompFrame"( "UNSUBSCRIBE", { id: "sub-r", receipt: "r-3" } ) ) )
+				var unsubReceipt = variables.codec.parse( conn.client.readTextFrame() )
+				expect( unsubReceipt.getCommand() ).toBe( "RECEIPT" )
+				expect( unsubReceipt.getHeader( "receipt-id" ) ).toBe( "r-3" )
+
+				conn.client.close()
+			} )
+
+			it( "requires a client ACK before a client-individual message is considered handled, and rejects an unknown ack id", function() {
+				var conn = _connectedClient( variables.testPort )
+				conn.client.sendText( variables.codec.serialize( new "../../models/StompFrame"( "SUBSCRIBE", { destination: "/topic/ack-test", id: "sub-ack", ack: "client-individual" } ) ) )
+				sleep( 100 )
+
+				conn.client.sendText( variables.codec.serialize( new "../../models/StompFrame"( "SEND", { destination: "/topic/ack-test" }, "needs-ack" ) ) )
+				var msg = variables.codec.parse( conn.client.readTextFrame() )
+				var ackId = msg.getHeader( "ack", "" )
+				expect( len( ackId ) ).toBeTrue()
+
+				conn.client.sendText( variables.codec.serialize( new "../../models/StompFrame"( "ACK", { id: ackId, receipt: "ack-1" } ) ) )
+				var ackReceipt = variables.codec.parse( conn.client.readTextFrame() )
+				expect( ackReceipt.getCommand() ).toBe( "RECEIPT" )
+
+				// Acking the same id again has nothing left to reference.
+				conn.client.sendText( variables.codec.serialize( new "../../models/StompFrame"( "ACK", { id: ackId } ) ) )
+				var errorFrame = variables.codec.parse( conn.client.readTextFrame() )
+				expect( errorFrame.getCommand() ).toBe( "ERROR" )
+
+				conn.client.close()
+			} )
+
+			it( "client ack mode acknowledges cumulatively — one ACK clears every earlier pending message on that subscription", function() {
+				var conn = _connectedClient( variables.testPort )
+				conn.client.sendText( variables.codec.serialize( new "../../models/StompFrame"( "SUBSCRIBE", { destination: "/topic/cumulative-ack", id: "sub-cum", ack: "client" } ) ) )
+				sleep( 100 )
+
+				conn.client.sendText( variables.codec.serialize( new "../../models/StompFrame"( "SEND", { destination: "/topic/cumulative-ack" }, "one" ) ) )
+				var first = variables.codec.parse( conn.client.readTextFrame() )
+				conn.client.sendText( variables.codec.serialize( new "../../models/StompFrame"( "SEND", { destination: "/topic/cumulative-ack" }, "two" ) ) )
+				var second = variables.codec.parse( conn.client.readTextFrame() )
+
+				// Acking the SECOND message should also clear the first —
+				// neither ack id should be independently referenceable
+				// afterward.
+				conn.client.sendText( variables.codec.serialize( new "../../models/StompFrame"( "ACK", { id: second.getHeader( "ack" ), receipt: "cum-1" } ) ) )
+				var receipt = variables.codec.parse( conn.client.readTextFrame() )
+				expect( receipt.getCommand() ).toBe( "RECEIPT" )
+
+				conn.client.sendText( variables.codec.serialize( new "../../models/StompFrame"( "ACK", { id: first.getHeader( "ack" ) } ) ) )
+				var errorFrame = variables.codec.parse( conn.client.readTextFrame() )
+				expect( errorFrame.getCommand() ).toBe( "ERROR" )
+
+				conn.client.close()
+			} )
+
+			it( "buffers a transactional SEND until COMMIT, and discards it on ABORT", function() {
+				var conn = _connectedClient( variables.testPort )
+				conn.client.sendText( variables.codec.serialize( new "../../models/StompFrame"( "SUBSCRIBE", { destination: "/topic/tx-test", id: "sub-tx" } ) ) )
+				sleep( 100 )
+
+				conn.client.sendText( variables.codec.serialize( new "../../models/StompFrame"( "BEGIN", { transaction: "tx-1" } ) ) )
+				conn.client.sendText( variables.codec.serialize( new "../../models/StompFrame"( "SEND", { destination: "/topic/tx-test", transaction: "tx-1" }, "committed-message" ) ) )
+
+				// Nothing has arrived yet — prove it by aborting a SECOND,
+				// independent transaction's buffered SEND and confirming
+				// its message never shows up either, then committing the
+				// first and confirming that ONE message (not the aborted
+				// one) is what arrives.
+				conn.client.sendText( variables.codec.serialize( new "../../models/StompFrame"( "BEGIN", { transaction: "tx-2" } ) ) )
+				conn.client.sendText( variables.codec.serialize( new "../../models/StompFrame"( "SEND", { destination: "/topic/tx-test", transaction: "tx-2" }, "aborted-message" ) ) )
+				conn.client.sendText( variables.codec.serialize( new "../../models/StompFrame"( "ABORT", { transaction: "tx-2" } ) ) )
+
+				conn.client.sendText( variables.codec.serialize( new "../../models/StompFrame"( "COMMIT", { transaction: "tx-1" } ) ) )
+				var msg = variables.codec.parse( conn.client.readTextFrame() )
+				expect( msg.getBody() ).toBe( "committed-message" )
+
+				conn.client.close()
+			} )
+
+			it( "rejects SEND/ACK/BEGIN/COMMIT referencing an unknown transaction id", function() {
+				var conn = _connectedClient( variables.testPort )
+
+				conn.client.sendText( variables.codec.serialize( new "../../models/StompFrame"( "SEND", { destination: "/topic/no-such-tx", transaction: "ghost" }, "x" ) ) )
+				var errorFrame = variables.codec.parse( conn.client.readTextFrame() )
+				expect( errorFrame.getCommand() ).toBe( "ERROR" )
+
+				conn.client.close()
 			} )
 
 			it( "escapes a colon and embedded newline in a header value instead of corrupting the frame", function() {
@@ -245,6 +397,16 @@ class extends="testbox.system.BaseSpec" {
 				expect( msg.getHeader( "destination" ) ).toBe( trickyDestination )
 
 				conn.client.close()
+			} )
+
+			it( "honors content-length so an embedded NUL byte in the body round-trips instead of being read as the terminator", function() {
+				var bodyWithEmbeddedNul = "before" & char( 0 ) & "after"
+				var frame = new "../../models/StompFrame"( "SEND", { destination: "/topic/x" }, bodyWithEmbeddedNul )
+				var wire = variables.codec.serialize( frame )
+				expect( wire ).toInclude( "content-length:" & len( bodyWithEmbeddedNul.getBytes( "UTF-8" ) ) )
+
+				var parsed = variables.codec.parse( wire )
+				expect( parsed.getBody() ).toBe( bodyWithEmbeddedNul )
 			} )
 
 		} )

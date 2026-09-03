@@ -1,0 +1,56 @@
+/**
+ * Wildcard routing over dot-separated destination segments (AMQP's own
+ * topic-exchange convention, which SocketBox's design is itself modeled
+ * on) — "*" matches exactly one segment, "#" matches zero or more
+ * remaining segments. Called out deliberately: SocketBox's own README is
+ * internally inconsistent about this (prose says "* and #", the config
+ * example uses "##" for the same thing) — "*"/"#" is the standard AMQP
+ * convention this adopts instead of guessing which one they meant.
+ *
+ * Every binding whose pattern matches gets routed to (not just the first
+ * match), the real semantics of a topic exchange — a message can and
+ * often should reach multiple destinations.
+ */
+class {
+
+	function init( config = {} ) {
+		variables.bindings = config.bindings ?: {}
+		return this
+	}
+
+	function route( destination, body, headers ) {
+		var targets = []
+		var destSegments = destination.listToArray( "." )
+		for ( var pattern in variables.bindings ) {
+			if ( _matches( pattern.listToArray( "." ), destSegments ) ) {
+				targets.append( variables.bindings[ pattern ] )
+			}
+		}
+		return targets
+	}
+
+	private function _matches( patternSegments, destSegments ) {
+		var pi = 1
+		var di = 1
+		while ( pi <= patternSegments.len() ) {
+			var segment = patternSegments[ pi ]
+			// "##" is a literal "#" in a double-quoted BoxLang string (a
+			// bare "#" opens a string-interpolation expression) — this is
+			// comparing against the single-character wildcard, not a
+			// two-character one.
+			if ( segment == "##" ) {
+				return true
+			}
+			if ( di > destSegments.len() ) {
+				return false
+			}
+			if ( segment != "*" && segment != destSegments[ di ] ) {
+				return false
+			}
+			pi++
+			di++
+		}
+		return di > destSegments.len()
+	}
+
+}

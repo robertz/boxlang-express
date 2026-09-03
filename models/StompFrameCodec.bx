@@ -21,22 +21,12 @@ class {
 		// zero-length slice (an empty command, an empty body), the same
 		// bug class already fixed everywhere else in this codebase
 		// (RangeParser.bx, BodyParsers.bx, Multipart.bx, Request.bx —
-		// see docs/ARCHITECTURE.md's BoxLang landmines section).
+		// see docs/ARCHITECTURE.md's BoxLang landmines section). mid()
+		// with a zero count is safe (confirmed directly), unlike
+		// left()/right(), so no zero-guard is needed around it.
 		var separatorPos = rawText.find( char( 10 ) & char( 10 ) )
 		var headerBlock = separatorPos ? rawText.mid( 1, separatorPos - 1 ) : rawText
-		var body = separatorPos ? rawText.mid( separatorPos + 2, rawText.len() - separatorPos - 1 ) : ""
-
-		// Strip the trailing NUL terminator (and a single trailing newline
-		// before it, some clients send "...\n\0") without assuming binary
-		// bodies — this project's STOMP support is text/JSON only, matching
-		// SseEmitter's own scope.
-		var nulPos = body.find( char( 0 ) )
-		if ( nulPos ) {
-			body = body.mid( 1, nulPos - 1 )
-		}
-		if ( body.len() && body.right( 1 ) == char( 10 ) ) {
-			body = body.mid( 1, body.len() - 1 )
-		}
+		var rawBody = separatorPos ? rawText.mid( separatorPos + 2, rawText.len() - separatorPos - 1 ) : ""
 
 		var headerLines = headerBlock.listToArray( char( 10 ) )
 		var command = headerLines[ 1 ]
@@ -58,15 +48,53 @@ class {
 			i++
 		}
 
+		// Per spec, a content-length header (when present) is authoritative:
+		// the body is exactly that many octets, and a NUL byte inside that
+		// range is part of the body, not its terminator. Honoring it here
+		// (rather than always scanning for the first NUL) is what makes a
+		// body containing an embedded NUL — common with binary payloads,
+		// and something real client libraries send content-length for by
+		// default — round-trip correctly instead of getting silently
+		// truncated. Without content-length, fall back to the NUL-scan
+		// (plus a single trailing newline some clients send before the
+		// NUL), same as before.
+		var body = ""
+		var contentLength = headers[ "content-length" ] ?: ""
+		if ( len( contentLength ) && isNumeric( contentLength ) ) {
+			body = rawBody.mid( 1, int( contentLength ) )
+		} else {
+			body = rawBody
+			var nulPos = body.find( char( 0 ) )
+			if ( nulPos ) {
+				body = body.mid( 1, nulPos - 1 )
+			}
+			if ( body.len() && body.right( 1 ) == char( 10 ) ) {
+				body = body.mid( 1, body.len() - 1 )
+			}
+		}
+
 		return new "StompFrame"( command, headers, body )
 	}
 
+	/**
+	 * Always emits a freshly-computed content-length (byte length, not
+	 * BoxLang's character length — they diverge on any multi-byte UTF-8
+	 * character, confirmed directly) rather than trusting a caller-
+	 * supplied one, which could be stale or simply absent. Any
+	 * content-length already present on the frame's headers is dropped in
+	 * favor of this one.
+	 */
 	function serialize( frame ) {
+		var body = frame.getBody()
 		var out = frame.getCommand() & char( 10 )
 		for ( var key in frame.getHeaders() ) {
+			if ( key == "content-length" ) {
+				continue
+			}
 			out &= _escape( key ) & ":" & _escape( frame.getHeaders()[ key ] ) & char( 10 )
 		}
-		out &= char( 10 ) & frame.getBody() & char( 0 )
+		out &= _escape( "content-length" ) & ":" & toString( body ).getBytes( "UTF-8" ).length & char( 10 )
+		out &= char( 10 ) & body & char( 0 )
 		return out
 	}
 

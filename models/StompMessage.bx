@@ -1,0 +1,81 @@
+/**
+ * Handed to a server-side listener registered via Stomp's options.listeners
+ * (see Stomp.bx) — a message that arrived at a destination that listener
+ * subscribed to, whether it came from a real WebSocket client's SEND or
+ * from app code calling stomp.send(). Deliberately not StompFrame: a
+ * listener needs auto-JSON-deserialized bodies and a handle back to the
+ * originating connection (null for a server-originated send), neither of
+ * which the wire-level StompFrame/StompFrameCodec pair has any reason to
+ * know about.
+ */
+class {
+
+	/**
+	 * connection defaults to "" (not an actual null) — confirmed directly
+	 * that a BoxLang function parameter holding a real null can't be
+	 * referenced by name at all inside that function, not even for a
+	 * plain assignment or pass-through (isNull() is the only thing that
+	 * can touch it safely); only a `variables.`-scope member can hold and
+	 * later re-read an actual null. "" is a normal, always-referenceable
+	 * sentinel for "no connection" here, converted to a real null via a
+	 * direct assignment below — safe because that assignment never reads
+	 * the null-holding value through a parameter, it just writes a fresh
+	 * javacast("null","") literal once the sentinel is recognized.
+	 */
+	function init( command, headers = {}, body = "", connection = "" ) {
+		variables.command = command
+		variables.headers = headers
+		variables.rawBody = body
+		if ( isSimpleValue( connection ) && connection == "" ) {
+			variables.connection = javacast( "null", "" )
+		} else {
+			variables.connection = connection
+		}
+		return this
+	}
+
+	function getCommand() {
+		return variables.command
+	}
+
+	function getHeader( name, defaultValue = "" ) {
+		return variables.headers[ name ] ?: defaultValue
+	}
+
+	function getHeaders() {
+		return variables.headers
+	}
+
+	/**
+	 * Auto-deserializes when content-type is application/json (the same
+	 * convention stomp.send()'s own caller-facing side uses: JSON unless
+	 * already a simple value) — falls back to the raw string if the body
+	 * claims that content-type but isn't actually valid JSON, rather than
+	 * throwing and taking a listener down with it.
+	 */
+	function getBody() {
+		if ( getHeader( "content-type", "" ) == "application/json" && len( variables.rawBody ) ) {
+			try {
+				return JSONDeserialize( variables.rawBody )
+			} catch ( any e ) {
+				return variables.rawBody
+			}
+		}
+		return variables.rawBody
+	}
+
+	function getBodyRaw() {
+		return variables.rawBody
+	}
+
+	/**
+	 * The WebSocketConnection that sent this message, or null when it
+	 * originated from server-side code (stomp.send()) rather than a real
+	 * client SEND — mirrors SocketBox's getChannel(), which has the same
+	 * null-for-server-originated behavior.
+	 */
+	function getConnection() {
+		return variables.connection
+	}
+
+}

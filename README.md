@@ -47,6 +47,10 @@ views, sessions, static files & uploads, error handling, and process
 lifecycle, each with runnable examples — see
 [kisdigital.com/projects/boxlang-express/docs/getting-started](https://kisdigital.com/projects/boxlang-express/docs/getting-started).
 
+For design decisions and the reasoning behind them, see
+[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md). To contribute, see
+[CONTRIBUTING.md](CONTRIBUTING.md).
+
 ## Install
 
 Published on [ForgeBox](https://www.forgebox.io/) as `boxlang-express`:
@@ -292,26 +296,38 @@ Or via the underlying class directly:
 
 ```js
 stomp = new bxModules.boxexpress.models.middleware.Stomp( {
-	authenticate: ( login, passcode, host, connection ) => login == "demo" && passcode == "demo",
-	authorize: ( login, destination, access, connection ) => true,   // access is "subscribe" or "publish"
+	authenticate: ( login, passcode, host, connection, connectionMetadata ) => {
+		connectionMetadata.role = login == "admin" ? "admin" : "guest"   // read back in authorize() below
+		return login == "demo" && passcode == "demo"
+	},
+	authorize: ( login, destination, access, connection, connectionMetadata ) => {
+		return destination != "/topic/admin-only" || connectionMetadata.role == "admin"
+	},
 	heartbeatMs: 10000
 } )
 app.ws( "/stomp", stomp.handler() )
 ```
 
-`authenticate(login, passcode, host, connection)` gates `CONNECT` —
-return `false` and the client gets an `ERROR` frame and the connection
-closes. `authorize(login, destination, access, connection)` gates each
-`SUBSCRIBE`/`SEND` (`access` is `"subscribe"` or `"publish"`) — return
-`false` and that one frame gets an `ERROR` instead of taking effect; the
-connection stays open. Both are optional — omit either to allow
-everything. `connection.cookies`/`connection.headers` (from the WebSocket
-handshake, before any STOMP frame arrives) are available on the
-`connection` passed to both, alongside STOMP's own `login`/`passcode`
-frame headers — read a session cookie here for cookie-based auth instead
-of requiring clients to send credentials in the `CONNECT` frame. `heartbeatMs`, if set, advertises that interval to the client
-in `CONNECTED` and sends an empty keep-alive frame on that cadence (only
-server-initiated for now — see the note below).
+`authenticate(login, passcode, host, connection, connectionMetadata)`
+gates `CONNECT` — return `false` and the client gets an `ERROR` frame and
+the connection closes. `authorize(login, destination, access,
+connection, connectionMetadata)` gates each `SUBSCRIBE`/`SEND` (`access`
+is `"subscribe"` or `"publish"`) — return `false` and that one frame gets
+an `ERROR` instead of taking effect; the connection stays open. Both are
+optional — omit either to allow everything. `connection.cookies`/
+`connection.headers` (from the WebSocket handshake, before any STOMP
+frame arrives) are available on the `connection` passed to both,
+alongside STOMP's own `login`/`passcode` frame headers — read a session
+cookie here for cookie-based auth instead of requiring clients to send
+credentials in the `CONNECT` frame.
+
+`connectionMetadata` is a plain struct, empty until `authenticate()`
+populates it — mutations persist for the life of the connection (it's
+the same struct instance every later `authorize()` call for that
+connection receives) and are echoed back to the client as extra
+`CONNECTED` headers. Attach whatever per-connection state your app needs
+once at connect time (a user id, a tenant, roles) instead of
+re-deriving it on every frame.
 
 `stomp.send(destination, data, headers)` is the server-side publish path
 for app code outside any connection's own message handling — a route
@@ -319,19 +335,142 @@ handler pushing an update, the same broadcast pattern
 `WebSocketConnection`/`SseEmitter` already support. `data` is
 JSON-serialized unless it's already a simple value.
 
+**Receipts.** Any client frame carrying a `receipt` header gets a
+`RECEIPT` frame back once it's been processed — not just `DISCONNECT`.
+If that frame's processing itself failed, the `ERROR` frame carries the
+matching `receipt-id` instead.
+
+**Acknowledgment (`ACK`/`NACK`).** `SUBSCRIBE`'s `ack` header —
+`"auto"` (default), `"client"`, or `"client-individual"` — controls
+whether the client must explicitly acknowledge each `MESSAGE`. Under
+`"client"`/`"client-individual"`, every `MESSAGE` carries an `ack`
+header; the client references it in a later `ACK`/`NACK` frame's `id`
+header. `"client"` mode is cumulative (acking one message also acks
+every earlier unacked message on that subscription, per spec); an
+unknown/already-acked `id` gets an `ERROR`. `NACK` is bookkeeping-
+identical to `ACK` here: this broker delivers straight to open
+connections with no message queue to redeliver into, so the positive/
+negative distinction real brokers use to drive redelivery has nothing to
+act on.
+
+**Transactions.** `BEGIN transaction:tx-1` / `COMMIT` / `ABORT` scope a
+set of `SEND`/`ACK`/`NACK` frames (via their own `transaction` header) so
+they take effect together on `COMMIT` or are discarded on `ABORT` —
+scoped to one connection, per spec. A `RECEIPT` for a buffered frame is
+sent when the frame is accepted into the transaction, not deferred to
+`COMMIT` (STOMP's receipt semantics are "frame accepted," not
+"transaction contents individually confirmed").
+
+**Heartbeats**, negotiated per spec section 6: send a `heart-beat:cx,cy`
+header on `CONNECT` (`cx` = fastest interval you can send at, `0` if you
+can't; `cy` = interval you want to receive at, `0` if you don't want
+any) and the server computes both directions independently —
+`heartbeatMs` (if configured) is this server's own capability in both
+directions, `max()`'d against what the client asked for. A client that
+sends no `heart-beat` header defaults to `"0,0"` (no heartbeats either
+way) even if the server is configured for them. When an incoming
+interval is negotiated, the server also monitors it: if nothing arrives
+(a real frame or a bare heartbeat) within roughly 2x that interval, it
+sends an `ERROR` and closes the connection.
+
+`Sec-WebSocket-Protocol` negotiation (`v12.stomp`/`v11.stomp`/
+`v10.stomp`) is handled automatically by `app.ws()`'s handshake, for
+client libraries (stomp.js and others) that send and expect it echoed —
+harmless to every other `app.ws()` route, since a client that never
+sends that header skips negotiation entirely.
+
+**Exchanges & bindings** — AMQP-style destination routing, not part of
+core STOMP itself but a proven pattern real STOMP brokers (including
+Ortus's own [SocketBox](https://github.com/coldbox-modules/SocketBox),
+whose exchange design this mirrors) layer on top. A destination prefixed
+`"exchangeName/rest"` routes through the exchange registered under that
+name; anything else (no `"/"`, or a prefix that isn't a configured
+exchange name) routes through the always-present `direct` exchange with
+the whole destination string as the routing key — so every destination
+that never uses the `"exchangeName/..."` convention behaves exactly as
+it did before exchanges existed:
+
+```js
+stomp = new bxModules.boxexpress.models.middleware.Stomp( {
+	exchanges: {
+		direct: { bindings: { "orders.created": "notifications" } },
+		topic: { bindings: { "chat.room.*": "chatFanout", "sys.##": "sysAll" } },
+		fanout: { bindings: { "myFanout": [ "dest1", "dest2" ] } },
+		distribution: { type: "roundrobin", bindings: { "myDist": [ "destA", "destB" ] } }
+	}
+} )
+```
+
+- **`direct`** (always configured even if omitted) — routes a destination
+  through `bindings` if one matches, or passes it through unchanged
+  otherwise.
+- **`topic`** — wildcard matching over dot-separated segments: `*`
+  matches exactly one segment, `#` matches zero or more remaining
+  segments (the standard AMQP convention — note `#` needs to be written
+  as `##` inside a BoxLang string literal, since a bare `#` starts
+  string interpolation; `"sys.##"` is the one-character pattern `sys.#`,
+  confirmed directly). Every binding whose pattern matches gets routed
+  to, not just the first — a topic message can reach multiple
+  destinations.
+- **`fanout`** — one binding name routes to every destination in its
+  array.
+- **`distribution`** — the opposite of fanout: one binding name routes to
+  exactly one destination from its array, chosen by `"random"` (default)
+  or `"roundrobin"`.
+- **A custom exchange** — any name other than the four built-ins, with a
+  `class` pointing to a dotted class path implementing `route(destination,
+  body, headers)` (returning an array of physical destinations to
+  deliver to) — duck-typed, no formal interface, matching how this
+  codebase treats every other callback-shaped middleware option.
+
+`getExchanges()` returns the configured exchange instances (for
+debugging — see the introspection getters below).
+
+**A live connection registry.** `stomp.getConnections()` returns every
+currently-`CONNECT`ed client, keyed by an internal connection id, each
+entry `{ connection, login, connectionMetadata }` — automatically
+populated on `CONNECT` and cleared on disconnect. `stomp.
+getConnectionDetails(connectionId)` reads one entry. `stomp.
+getSubscriptions()` and `stomp.getConfig()` round out the introspection
+surface (mirroring SocketBox's own `getSTOMPConnections()`/
+`getConnectionDetails()`/`getSubscriptions()`/`getConfig()`) — these
+return live internal structs, meant for debugging/ops, not as a stable
+data API to build app logic against.
+
+**Server-side listeners** — react to messages routed to a destination
+from plain server code, without opening a WebSocket connection:
+
+```js
+stomp = new bxModules.boxexpress.models.middleware.Stomp( {
+	listeners: {
+		"audit-log": ( message ) => {
+			logMessage( message.getBody() )   // auto-JSON-deserialized if content-type is application/json
+			// message.getConnection() is the originating WebSocketConnection,
+			// or null if this arrived via stomp.send() from server code
+		}
+	}
+} )
+```
+
+A listener's own exception is caught and logged, not allowed to break
+delivery to real subscribers or other listeners on the same destination.
+See [StompMessage.bx](models/StompMessage.bx) for the message object's
+full API (`getCommand()`/`getBody()`/`getBodyRaw()`/`getHeaders()`/
+`getHeader()`/`getConnection()`).
+
 This is a real, if intentionally smaller, first version — not the whole
-STOMP ecosystem some brokers support. Deliberately not built yet:
-**exchanges/bindings** (AMQP-style destination remapping — not part of
-core STOMP itself, an addition some brokers layer on top), **transactions**
-(`BEGIN`/`COMMIT`/`ABORT`), **client `ACK`/`NACK`** (messages are
-delivered without requiring acknowledgment), **binary bodies** (text/JSON
-only, matching `res.sse()`'s own scope), and **full bidirectional
-heartbeat negotiation** (the server advertises and sends heartbeats on
-its own configured interval regardless of what the client requested, and
-doesn't yet expect or check for heartbeats coming back). Each is a real,
-separable feature to add if something actually needs it. Destination
-matching is exact-string only — `/topic/a` and `/topic/a/` are different
-destinations.
+STOMP ecosystem some brokers support. Deliberately not built:
+**multi-node clustering** (SocketBox's `ClusterManager`/`ClusterPeer` —
+peer WebSocket connections between server processes, cache-backed peer
+discovery — a distributed-systems feature this project has no cache-
+abstraction or multi-node deployment story to build against yet) and
+**binary bodies** (the underlying WebSocket transport here only carries
+text frames, so this is a hard limit of the transport, not a broker
+choice — `content-length` is honored on read/write so a body containing
+an embedded NUL byte still round-trips correctly, but genuinely binary
+octets can't). Destination matching (both the subscriber registry and
+exchange bindings) is exact-string only — `/topic/a` and `/topic/a/` are
+different destinations.
 
 Header values are escaped per the STOMP spec (backslash, newline, colon),
 not just stripped — a destination or login value built from
@@ -1211,6 +1350,61 @@ Two more BoxLang-specific things that shaped how these are written:
   rather than `../fixtures/...`.
 
 ## Changelog
+
+**0.2.6**
+- Filled in the STOMP 1.2 gaps identified in a spec-compliance pass over
+  `Stomp.bx`/`StompFrameCodec.bx`: `RECEIPT` now sent for any client
+  frame carrying a `receipt` header (previously only `DISCONNECT`);
+  full `ACK`/`NACK` support (`SUBSCRIBE`'s `ack` header, an `ack` header
+  on `MESSAGE` under `client`/`client-individual` modes, cumulative
+  acking in `client` mode); `BEGIN`/`COMMIT`/`ABORT` transactions,
+  scoped per connection per spec; bidirectional heartbeat negotiation
+  (`heart-beat:cx,cy` on `CONNECT`, each direction's interval computed
+  independently per spec section 6, plus server-side monitoring that
+  closes a connection whose negotiated incoming heartbeats stop
+  arriving); and `content-length` honored on both read and write so a
+  body with an embedded NUL byte round-trips correctly instead of being
+  silently truncated at the first one. `app.ws()`'s WebSocket handshake
+  now also negotiates the `v12.stomp`/`v11.stomp`/`v10.stomp`
+  `Sec-WebSocket-Protocol` subprotocols, for client libraries (stomp.js
+  and others) that send and expect one echoed back — harmless to every
+  other `app.ws()` route, confirmed directly: a client that never sends
+  that header skips negotiation entirely. See
+  [Stomp.bx](models/middleware/Stomp.bx),
+  [StompFrameCodec.bx](models/StompFrameCodec.bx), and
+  [tests/specs/StompSpec.bx](tests/specs/StompSpec.bx) (20 specs, up
+  from 12).
+- Followed up with a parity pass against
+  [SocketBox](https://github.com/coldbox-modules/SocketBox) (Ortus's own
+  WebSocket/STOMP library, read directly from source for this — its
+  README and `WebSocketSTOMP.cfc`) to close the remaining real gaps:
+  **exchanges/bindings** (`direct`/`topic`/`fanout`/`distribution`, plus
+  a custom-exchange escape hatch via a `class` config key), a **live
+  connection registry** (`getConnections()`/`getConnectionDetails()`) with
+  **`connectionMetadata`** threaded through `authenticate()`/`authorize()`
+  and echoed back as `CONNECTED` headers, and **server-side listeners**
+  (`options.listeners`) that react to a destination from plain server
+  code via a new [StompMessage.bx](models/StompMessage.bx) wrapper
+  (auto-JSON-deserializing body, `getConnection()` null for a
+  server-originated message). Deliberately still not built: multi-node
+  clustering (SocketBox's `ClusterManager`/`ClusterPeer` — a distributed-
+  systems feature with no cache-abstraction or multi-node deployment
+  story here to build it against) and binary bodies (a transport limit
+  of WebSocket text frames, not a broker choice).
+  Found and fixed a new, previously-undiscovered BoxLang landmine while
+  building this: a function parameter (or local `var`) holding an actual
+  `null` can't be referenced by name at all — not read, reassigned, or
+  passed through to another function, only `isNull()`-checked — unlike a
+  `variables.`-scope member, which tolerates storing and reading back a
+  real `null` directly. Worked around with a `""` sentinel converted to a
+  real `null` only via a direct `variables.x = javacast("null","")`
+  assignment (see `StompMessage.bx`'s `init()`); now documented in
+  `docs/ARCHITECTURE.md`'s landmines list alongside a second, smaller one
+  (a bare `#` inside a BoxLang string literal needs escaping as `##`,
+  which broke `TopicExchange.bx`'s own `#` wildcard match on first
+  write). See
+  [tests/specs/StompParitySpec.bx](tests/specs/StompParitySpec.bx) (10
+  new specs). Full suite: 230/230.
 
 **0.2.4**
 - Added `java-src/boxexpress/ws/` — this project's first compiled Java,
