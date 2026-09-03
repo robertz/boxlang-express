@@ -397,6 +397,39 @@ you real debugging time:
   that holds live object references (not copies of the objects
   themselves), `structCopy()` (shallow) is the one that works — see
   `Stomp.bx`'s `_deliver()`.
+- **A function parameter (or any local `var`) holding an actual `null`
+  can't be referenced by its bare name at all** — not read, not
+  reassigned, not passed through to another function — anywhere outside
+  `isNull()`. Confirmed directly with a minimal repro: `function foo( b =
+  javacast("null","") ) { println(b) }` throws `"The requested key [b]
+  was not located in any scope or it's undefined"`, and so does a
+  *required* parameter that receives an explicit `javacast("null","")`
+  argument — this isn't about default values specifically. Only a
+  `variables.`-scope (or `this.`-scope) member tolerates storing and
+  later reading back an actual `null` directly (confirmed: `variables.y =
+  javacast("null","")` then `variables.y` works fine). The workaround
+  used throughout this codebase where a value can legitimately be
+  null-or-absent across a function boundary: use a non-null sentinel
+  (`""` for "nothing here") through every parameter/return that crosses a
+  function call, and convert `""` to a real `javacast("null","")` only at
+  the final point of a direct `variables.x = ...` assignment, guarded by
+  a check of the sentinel — never by reading back a parameter that might
+  already be holding `null`. See `StompMessage.bx`'s `init()` for the
+  worked example (`connection` arrives as `""` or a real object, never
+  `null`).
+- **A bare `#` inside a double-quoted string literal starts a
+  string-interpolation expression**, the ordinary CFML/BoxLang rule — but
+  it bites hard when the literal character you actually want IS `#`
+  itself (STOMP/AMQP's topic-exchange wildcard, in `TopicExchange.bx`'s
+  case). `"##"` is how you get one literal `#` (`"##".len()` is `1`,
+  confirmed directly) — a bare `"#"` in a string either throws a parse
+  error (`"Unterminated hash expression"`, as it did here — a *compile*-
+  time failure that only surfaces the first time something actually
+  loads that class, not when the buggy line is written) or, in other
+  positions, silently tries to interpolate an expression that doesn't
+  exist. Anywhere a literal `#` needs to appear in a BoxLang string
+  (including a struct key or a STOMP binding pattern an app author writes
+  in their own config), it has to be written as `##`.
 
 ## Testing philosophy
 
@@ -440,7 +473,10 @@ read backward through it before asking.
   inefficiency, the SSE newline-injection vulnerability) shipped in a
   merged PR and was only caught because someone separately asked for a
   review afterward. Nothing currently blocks a PR from merging without
-  one.
+  one. This is a deliberate, revisitable decision, not an oversight —
+  see [CONTRIBUTING.md](../CONTRIBUTING.md)'s "Branch & merge workflow":
+  direct merges are fine for a single-maintainer project, and PRs become
+  required the moment a second developer joins.
 - **Versioning has had at least one real inconsistency** — a fix branch
   created from a stale point in git history got merged forward with a
   changelog entry that reused an already-used version number, producing a
