@@ -139,6 +139,12 @@ class {
 		var idx = 0
 		var self = this
 		var next
+		// Cache of _splitPath( req.path ), invalidated only when req.path itself
+		// changes (a USE layer mounting/unmounting) — without this, every layer
+		// in the stack re-splits the same path string, even though it's usually
+		// unchanged from the layer before it.
+		var cachedPath = javacast( "null", "" )
+		var cachedSegments = javacast( "null", "" )
 
 		next = function( err ) {
 			if ( res.isSent() ) {
@@ -174,7 +180,11 @@ class {
 			}
 
 			var exactMatch = ( layer.method != "USE" )
-			var reqSegments = _splitPath( req.path )
+			if ( isNull( cachedPath ) || cachedPath != req.path ) {
+				cachedPath = req.path
+				cachedSegments = _splitPath( req.path )
+			}
+			var reqSegments = cachedSegments
 			var matchResult = _matchPath( layer.pattern.segments, reqSegments, exactMatch )
 
 			if ( !matchResult.matched ) {

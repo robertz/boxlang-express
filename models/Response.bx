@@ -23,6 +23,18 @@ class {
 			405: "Method Not Allowed", 409: "Conflict", 422: "Unprocessable Entity",
 			500: "Internal Server Error", 502: "Bad Gateway", 503: "Service Unavailable"
 		}
+		// Built once per instance instead of on every sendFile()/download() call.
+		variables.MIME_TYPES = {
+			html: "text/html; charset=utf-8", htm: "text/html; charset=utf-8",
+			css: "text/css; charset=utf-8", js: "text/javascript; charset=utf-8",
+			json: "application/json; charset=utf-8", txt: "text/plain; charset=utf-8",
+			png: "image/png", jpg: "image/jpeg", jpeg: "image/jpeg", gif: "image/gif",
+			svg: "image/svg+xml", ico: "image/x-icon",
+			woff: "font/woff", woff2: "font/woff2",
+			pdf: "application/pdf", zip: "application/zip",
+			csv: "text/csv; charset=utf-8", xml: "application/xml; charset=utf-8",
+			mp4: "video/mp4", mp3: "audio/mpeg"
+		}
 		return this
 	}
 
@@ -278,19 +290,8 @@ class {
 	}
 
 	private function _guessMimeType( fileName ) {
-		var mimeTypes = {
-			html: "text/html; charset=utf-8", htm: "text/html; charset=utf-8",
-			css: "text/css; charset=utf-8", js: "text/javascript; charset=utf-8",
-			json: "application/json; charset=utf-8", txt: "text/plain; charset=utf-8",
-			png: "image/png", jpg: "image/jpeg", jpeg: "image/jpeg", gif: "image/gif",
-			svg: "image/svg+xml", ico: "image/x-icon",
-			woff: "font/woff", woff2: "font/woff2",
-			pdf: "application/pdf", zip: "application/zip",
-			csv: "text/csv; charset=utf-8", xml: "application/xml; charset=utf-8",
-			mp4: "video/mp4", mp3: "audio/mpeg"
-		}
 		var ext = listLast( fileName, "." ).lcase()
-		return mimeTypes[ ext ] ?: "application/octet-stream"
+		return variables.MIME_TYPES[ ext ] ?: "application/octet-stream"
 	}
 
 	/**

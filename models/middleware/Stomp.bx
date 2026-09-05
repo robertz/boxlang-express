@@ -40,12 +40,14 @@ class {
 
 		// connectionId -> { ackId -> { subId, destination, ackMode, seq } } —
 		// messages delivered under a non-"auto" ack mode, waiting for an
-		// ACK/NACK. seq is a global monotonically increasing counter so
-		// "client" mode's cumulative ack can find every earlier pending
-		// message on the same subscription without needing insertion-order
-		// semantics from a BoxLang struct (which aren't guaranteed).
+		// ACK/NACK. seq only ever needs to order messages within a single
+		// connection's own subscriptions (see _handleAcknowledge — cumulative
+		// ack only ever compares seqs inside one connectionId's own entries),
+		// so it's tracked per connection (ackSeqByConnection, alongside its
+		// own lock below) rather than one counter shared/contended across
+		// every connection on the broker.
 		variables.pendingAcksByConnection = {}
-		variables.ackSeqCounter = 0
+		variables.ackSeqByConnection = {}
 
 		// connectionId -> { connection, login, connectionMetadata } for
 		// every currently CONNECTED client — SocketBox's getSTOMPConnections()
@@ -80,9 +82,25 @@ class {
 		// conceptually even where it doesn't collide syntactically).
 		variables.listeners = options.listeners ?: {}
 
-		variables.lockName = "Stomp-" & createUUID()
+		// Sharded, not one broker-wide lock: subscribersByDestination is
+		// partitioned by a lock per destination (_destLockName()) and
+		// pendingAcksByConnection/connectionsById/ackSeqByConnection share a
+		// lock per connectionId (_connLockName()) — a SUBSCRIBE/SEND/ACK on
+		// one destination or connection no longer blocks behind unrelated
+		// traffic on another. Every method here still only ever holds one
+		// such lock at a time (never nests two), so there's no new deadlock
+		// risk from splitting what used to be a single name.
+		variables.lockPrefix = "Stomp-" & createUUID()
 
 		return this
+	}
+
+	function _destLockName( destination ) {
+		return variables.lockPrefix & "-dest-" & destination
+	}
+
+	function _connLockName( connectionId ) {
+		return variables.lockPrefix & "-conn-" & connectionId
 	}
 
 	/**
@@ -392,7 +410,7 @@ class {
 	}
 
 	function _registerConnection( connectionId, connection, login, connectionMetadata ) {
-		lock name="#variables.lockName#" type="exclusive" timeout="5" {
+		lock name="#_connLockName( connectionId )#" type="exclusive" timeout="5" {
 			variables.connectionsById[ connectionId ] = {
 				connection: connection,
 				login: login,
@@ -407,7 +425,7 @@ class {
 		// lock in this file (no precedent elsewhere in this codebase for
 		// a read-only named lock, and this read is cheap enough that a
 		// dedicated read lock isn't worth introducing a new pattern for).
-		lock name="#variables.lockName#" type="exclusive" timeout="5" {
+		lock name="#_connLockName( connectionId )#" type="exclusive" timeout="5" {
 			if ( structKeyExists( variables.connectionsById, connectionId ) ) {
 				metadata = variables.connectionsById[ connectionId ].connectionMetadata
 			}
@@ -462,7 +480,7 @@ class {
 			}
 		}
 
-		lock name="#variables.lockName#" type="exclusive" timeout="5" {
+		lock name="#_destLockName( destination )#" type="exclusive" timeout="5" {
 			if ( !structKeyExists( variables.subscribersByDestination, destination ) ) {
 				variables.subscribersByDestination[ destination ] = {}
 			}
@@ -483,14 +501,19 @@ class {
 			return
 		}
 		var destination = mySubscriptions[ subId ]
-		lock name="#variables.lockName#" type="exclusive" timeout="5" {
+		lock name="#_destLockName( destination )#" type="exclusive" timeout="5" {
 			if ( structKeyExists( variables.subscribersByDestination, destination ) ) {
 				structDelete( variables.subscribersByDestination[ destination ], connectionId & ":" & subId )
 			}
-			// Any messages still pending ack on this subscription can never
-			// be acked now — drop them too, or they'd sit in the registry
-			// forever (a real, if small, leak: nothing else ever clears an
-			// entry whose subscription was torn down out from under it).
+		}
+		// Any messages still pending ack on this subscription can never be
+		// acked now — drop them too, or they'd sit in the registry forever (a
+		// real, if small, leak: nothing else ever clears an entry whose
+		// subscription was torn down out from under it). A separate,
+		// connection-scoped lock from the destination one above — the two
+		// registries don't need to change atomically together, only each
+		// needs to be internally consistent.
+		lock name="#_connLockName( connectionId )#" type="exclusive" timeout="5" {
 			if ( structKeyExists( variables.pendingAcksByConnection, connectionId ) ) {
 				for ( var ackId in structCopy( variables.pendingAcksByConnection[ connectionId ] ) ) {
 					if ( variables.pendingAcksByConnection[ connectionId ][ ackId ].subId == subId ) {
@@ -558,7 +581,7 @@ class {
 			return false
 		}
 		var found = false
-		lock name="#variables.lockName#" type="exclusive" timeout="5" {
+		lock name="#_connLockName( connectionId )#" type="exclusive" timeout="5" {
 			if ( structKeyExists( variables.pendingAcksByConnection, connectionId )
 				&& structKeyExists( variables.pendingAcksByConnection[ connectionId ], ackId ) ) {
 				found = true
@@ -643,7 +666,7 @@ class {
 	 */
 	function _deliverToDestination( destination, body, extraHeaders, originConnection ) {
 		var recipients = {}
-		lock name="#variables.lockName#" type="exclusive" timeout="5" {
+		lock name="#_destLockName( destination )#" type="exclusive" timeout="5" {
 			if ( structKeyExists( variables.subscribersByDestination, destination ) ) {
 				// structCopy(), not duplicate() — confirmed directly that
 				// duplicate() tries to deep-copy every value, including the
@@ -667,8 +690,9 @@ class {
 			if ( subscriber.ackMode != "auto" ) {
 				var ackId = createUUID()
 				headers[ "ack" ] = ackId
-				lock name="#variables.lockName#" type="exclusive" timeout="5" {
-					variables.ackSeqCounter++
+				lock name="#_connLockName( subscriber.connectionId )#" type="exclusive" timeout="5" {
+					var nextSeq = ( variables.ackSeqByConnection[ subscriber.connectionId ] ?: 0 ) + 1
+					variables.ackSeqByConnection[ subscriber.connectionId ] = nextSeq
 					if ( !structKeyExists( variables.pendingAcksByConnection, subscriber.connectionId ) ) {
 						variables.pendingAcksByConnection[ subscriber.connectionId ] = {}
 					}
@@ -676,7 +700,7 @@ class {
 						subId: subscriber.subId,
 						destination: destination,
 						ackMode: subscriber.ackMode,
-						seq: variables.ackSeqCounter
+						seq: nextSeq
 					}
 				}
 			}
@@ -703,14 +727,17 @@ class {
 	}
 
 	function _removeAllSubscriptions( connectionId, mySubscriptions ) {
-		lock name="#variables.lockName#" type="exclusive" timeout="5" {
-			for ( var subId in mySubscriptions ) {
-				var destination = mySubscriptions[ subId ]
+		for ( var subId in mySubscriptions ) {
+			var destination = mySubscriptions[ subId ]
+			lock name="#_destLockName( destination )#" type="exclusive" timeout="5" {
 				if ( structKeyExists( variables.subscribersByDestination, destination ) ) {
 					structDelete( variables.subscribersByDestination[ destination ], connectionId & ":" & subId )
 				}
 			}
+		}
+		lock name="#_connLockName( connectionId )#" type="exclusive" timeout="5" {
 			structDelete( variables.pendingAcksByConnection, connectionId )
+			structDelete( variables.ackSeqByConnection, connectionId )
 			structDelete( variables.connectionsById, connectionId )
 		}
 	}

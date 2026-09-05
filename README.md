@@ -185,8 +185,9 @@ reached — but it's there for a direct-exposure deployment or a deliberately
 higher ceiling.
 
 Every request gets a line on stdout as soon as it's received —
-`[2026-08-10 10:45:41] GET /users/42 127.0.0.1` — there's no setting to turn
-this off yet.
+`[2026-08-10 10:45:41] GET /users/42 127.0.0.1`. Turn it off with
+`app.set("log", false)` — useful for a high-throughput deployment that
+doesn't want a synchronous stdout write on every request.
 
 #### Auto-restart on file change (`app.set("reloadOnChange", true)`)
 
