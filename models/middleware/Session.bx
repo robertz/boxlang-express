@@ -82,7 +82,13 @@ class {
 			// touched" check below — serialize-and-compare rather than a
 			// dirty flag, since req.session is a plain struct handlers mutate
 			// directly (req.session.views = ...), with no setter to hook.
-			var originalSnapshot = JSONSerialize( data )
+			// Only worth taking when one of the two options can actually skip
+			// a save/cookie — with both at their true defaults, every session
+			// is saved unconditionally and this snapshot (and the matching
+			// compare in hasChanged() below) would just be wasted JSON work
+			// on every request.
+			var trackChanges = ( resave == false ) || ( saveUninitialized == false )
+			var originalSnapshot = trackChanges ? JSONSerialize( data ) : ""
 			var wasDestroyed = false
 
 			req.session = data
@@ -151,10 +157,13 @@ class {
 				next()
 			} finally {
 				if ( !wasDestroyed ) {
-					var changed = hasChanged()
+					// hasChanged() (a JSONSerialize of the whole session) only runs
+					// when the option in front of it is actually false — with the
+					// historical always-save defaults, the boolean short-circuits
+					// before ever touching it.
 					var shouldSave = isNewSession
-						? ( changed || saveUninitialized != false )
-						: ( changed || resave != false )
+						? ( ( saveUninitialized != false ) || hasChanged() )
+						: ( ( resave != false ) || hasChanged() )
 					if ( shouldSave ) {
 						store.set( sessionId, req.session, maxAge )
 					}
