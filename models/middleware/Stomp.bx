@@ -24,12 +24,20 @@
  * docblock for why: this broker has no message queue to redeliver into,
  * so the positive/negative distinction real brokers use to drive
  * redelivery has nothing to act on.
+ *
+ * options.onSend (optional) mirrors SocketBox's onSend() interception —
+ * see _handleSend()'s docblock for its absorb/transform/pass-through
+ * contract. Lets a consumer run server-side logic against a client SEND
+ * (a presence heartbeat that needs to broadcast a computed count instead
+ * of the raw ping, message filtering, etc.) without resorting to a REST
+ * side-channel just because the broker had no way to intercept SEND.
  */
 class {
 
 	function init( options = {} ) {
 		variables.authenticateFn = options.authenticate ?: javacast( "null", "" )
 		variables.authorizeFn = options.authorize ?: javacast( "null", "" )
+		variables.onSendFn = options.onSend ?: javacast( "null", "" )
 		variables.heartbeatMs = options.heartbeatMs ?: 0
 		variables.codec = new "../StompFrameCodec"()
 
@@ -527,13 +535,14 @@ class {
 
 	/**
 	 * Also the deferred action a transactional SEND runs at COMMIT time —
-	 * authorization is (re-)evaluated then, against whatever authorizeFn
-	 * says at that later moment, not at the original SEND. Its boolean
-	 * result isn't separately reported back to the client in that deferred
-	 * case: the RECEIPT for the SEND frame itself was already sent at
-	 * buffering time (STOMP's receipt semantics are "frame accepted," not
-	 * "transaction contents individually confirmed"), matching how real
-	 * STOMP transactions don't give per-buffered-frame feedback either.
+	 * authorization (and, below, onSendFn) is (re-)evaluated then, against
+	 * whatever authorizeFn says at that later moment, not at the original
+	 * SEND. Its boolean result isn't separately reported back to the client
+	 * in that deferred case: the RECEIPT for the SEND frame itself was
+	 * already sent at buffering time (STOMP's receipt semantics are "frame
+	 * accepted," not "transaction contents individually confirmed"),
+	 * matching how real STOMP transactions don't give per-buffered-frame
+	 * feedback either.
 	 */
 	function _handleSend( connection, connectionId, frame, login ) {
 		var destination = frame.getHeader( "destination", "" )
@@ -558,7 +567,41 @@ class {
 		if ( len( contentType ) ) {
 			extraHeaders[ "content-type" ] = contentType
 		}
-		_deliver( destination, frame.getBody(), extraHeaders, connection )
+		var body = frame.getBody()
+
+		// Opt-in interception point for a client SEND, mirroring SocketBox's
+		// WebSocketSTOMP::onSend() — a plain relay-to-subscribers is often
+		// not what a SEND should do: a presence heartbeat needs to update
+		// server-side TTL bookkeeping and broadcast a *computed* count, not
+		// the ping itself; a chat SEND might need profanity filtering; both
+		// need the server to run logic against the frame before (or instead
+		// of) delivering it verbatim. Without this hook, a consumer's only
+		// option was a side-channel (a plain REST endpoint that then calls
+		// stomp.send() itself) — see this project's own STOMP plan doc for
+		// the presence-heartbeat case that motivated adding it.
+		//
+		// Contract (only consulted when options.onSend was provided):
+		//   - false/null return  -> absorb: nothing gets delivered, the
+		//     SEND is treated as fully handled by the hook itself (which
+		//     may have already called stomp.send() on any destination it
+		//     likes, e.g. to broadcast a computed value instead).
+		//   - {body:, headers:} struct return -> transform: overrides what
+		//     gets delivered to destination's subscribers.
+		//   - true, or anything else (including no explicit return) ->
+		//     pass-through: deliver the frame exactly as authorizeFn above
+		//     already would have, unchanged.
+		if ( !isNull( variables.onSendFn ) ) {
+			var hookResult = variables.onSendFn( destination, body, extraHeaders, connection, _metadataFor( connectionId ) )
+			if ( isNull( hookResult ) || hookResult == false ) {
+				return true
+			}
+			if ( isStruct( hookResult ) ) {
+				body = hookResult.body ?: body
+				extraHeaders = hookResult.headers ?: extraHeaders
+			}
+		}
+
+		_deliver( destination, body, extraHeaders, connection )
 		return true
 	}
 

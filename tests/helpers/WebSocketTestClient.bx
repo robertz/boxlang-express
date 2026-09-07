@@ -112,6 +112,25 @@ class {
 		return createObject( "java", "java.lang.String" ).init( bodyBytes, "UTF-8" )
 	}
 
+	/**
+	 * Same as readTextFrame(), but returns "" instead of blocking forever
+	 * when nothing arrives within timeoutMs — needed to assert a negative
+	 * ("this destination should receive nothing") without hanging the test
+	 * suite. Restores the socket to blocking (no timeout) before returning
+	 * either way, so later readTextFrame() calls on this client aren't
+	 * left with a timeout they didn't ask for.
+	 */
+	function readTextFrameWithTimeout( timeoutMs ) {
+		variables.socket.setSoTimeout( javacast( "int", arguments.timeoutMs ) )
+		try {
+			return readTextFrame()
+		} catch ( "java.net.SocketTimeoutException" e ) {
+			return ""
+		} finally {
+			variables.socket.setSoTimeout( 0 )
+		}
+	}
+
 	function close() {
 		variables.socket.close()
 	}

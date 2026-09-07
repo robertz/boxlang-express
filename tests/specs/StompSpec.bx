@@ -41,9 +41,34 @@ class extends="testbox.system.BaseSpec" {
 		variables.hbStomp = new "../../models/middleware/Stomp"( { heartbeatMs: 200 } )
 		variables.hbApp.ws( "/stomp", variables.hbStomp.handler() )
 
+		// Exercises all three onSend contract outcomes: SEND to
+		// /queue/absorb-me is swallowed (and, to prove the hook actually
+		// ran rather than just silently dropping, rebroadcasts a computed
+		// value to a different destination — the exact shape the presence-
+		// heartbeat use case that motivated this hook needs); SEND to
+		// /queue/transform-me gets its body/headers overridden; anything
+		// else passes through unchanged, same as when onSend isn't
+		// configured at all.
+		variables.onSendApp = new "../../models/BoxExpress"()
+		variables.onSendPort = 4943
+		variables.onSendStomp = new "../../models/middleware/Stomp"( {
+			onSend: ( destination, body, headers, connection, connectionMetadata ) => {
+				if ( destination == "/queue/absorb-me" ) {
+					variables.onSendStomp.send( "/queue/computed", "computed:" & body )
+					return false
+				}
+				if ( destination == "/queue/transform-me" ) {
+					return { body: "transformed:" & body, headers: { "x-transformed": "yes" } }
+				}
+				return true
+			}
+		} )
+		variables.onSendApp.ws( "/stomp", variables.onSendStomp.handler() )
+
 		variables.app.listen( port = variables.testPort, options = { block: false } )
 		variables.authApp.listen( port = variables.authPort, options = { block: false } )
 		variables.hbApp.listen( port = variables.hbPort, options = { block: false } )
+		variables.onSendApp.listen( port = variables.onSendPort, options = { block: false } )
 		sleep( 300 )
 	}
 
@@ -51,6 +76,7 @@ class extends="testbox.system.BaseSpec" {
 		variables.app.close()
 		variables.authApp.close()
 		variables.hbApp.close()
+		variables.onSendApp.close()
 	}
 
 	private function _connectedClient( port ) {
@@ -382,6 +408,87 @@ class extends="testbox.system.BaseSpec" {
 				conn.client.sendText( variables.codec.serialize( new "../../models/StompFrame"( "SEND", { destination: "/topic/no-such-tx", transaction: "ghost" }, "x" ) ) )
 				var errorFrame = variables.codec.parse( conn.client.readTextFrame() )
 				expect( errorFrame.getCommand() ).toBe( "ERROR" )
+
+				conn.client.close()
+			} )
+
+			it( "onSend absorbs a SEND (no delivery to the original destination) when it returns false", function() {
+				var conn = _connectedClient( variables.onSendPort )
+				conn.client.sendText( variables.codec.serialize( new "../../models/StompFrame"( "SUBSCRIBE", { destination: "/queue/absorb-me", id: "sub-absorb" } ) ) )
+				sleep( 100 )
+
+				conn.client.sendText( variables.codec.serialize( new "../../models/StompFrame"( "SEND", { destination: "/queue/absorb-me" }, "ping" ) ) )
+
+				var raw = conn.client.readTextFrameWithTimeout( 500 )
+				expect( raw ).toBe( "" )
+
+				conn.client.close()
+			} )
+
+			it( "onSend can broadcast to a different destination from inside the hook while absorbing the original SEND", function() {
+				var conn = _connectedClient( variables.onSendPort )
+				conn.client.sendText( variables.codec.serialize( new "../../models/StompFrame"( "SUBSCRIBE", { destination: "/queue/computed", id: "sub-computed" } ) ) )
+				sleep( 100 )
+
+				conn.client.sendText( variables.codec.serialize( new "../../models/StompFrame"( "SEND", { destination: "/queue/absorb-me" }, "ping" ) ) )
+
+				var msg = variables.codec.parse( conn.client.readTextFrame() )
+				expect( msg.getHeader( "destination" ) ).toBe( "/queue/computed" )
+				expect( msg.getBody() ).toBe( "computed:ping" )
+
+				conn.client.close()
+			} )
+
+			it( "onSend transforms the body/headers actually delivered when it returns a {body:,headers:} struct", function() {
+				var conn = _connectedClient( variables.onSendPort )
+				conn.client.sendText( variables.codec.serialize( new "../../models/StompFrame"( "SUBSCRIBE", { destination: "/queue/transform-me", id: "sub-transform" } ) ) )
+				sleep( 100 )
+
+				conn.client.sendText( variables.codec.serialize( new "../../models/StompFrame"( "SEND", { destination: "/queue/transform-me" }, "raw" ) ) )
+
+				var msg = variables.codec.parse( conn.client.readTextFrame() )
+				expect( msg.getBody() ).toBe( "transformed:raw" )
+				expect( msg.getHeader( "x-transformed" ) ).toBe( "yes" )
+
+				conn.client.close()
+			} )
+
+			it( "onSend returning true passes the SEND through unchanged, same as no onSend configured at all", function() {
+				var conn = _connectedClient( variables.onSendPort )
+				conn.client.sendText( variables.codec.serialize( new "../../models/StompFrame"( "SUBSCRIBE", { destination: "/queue/pass-through", id: "sub-pass" } ) ) )
+				sleep( 100 )
+
+				conn.client.sendText( variables.codec.serialize( new "../../models/StompFrame"( "SEND", { destination: "/queue/pass-through" }, "unchanged" ) ) )
+
+				var msg = variables.codec.parse( conn.client.readTextFrame() )
+				expect( msg.getBody() ).toBe( "unchanged" )
+
+				conn.client.close()
+			} )
+
+			it( "onSend still sends a RECEIPT for an absorbed SEND — the frame was accepted, just not relayed", function() {
+				var conn = _connectedClient( variables.onSendPort )
+
+				conn.client.sendText( variables.codec.serialize( new "../../models/StompFrame"( "SEND", { destination: "/queue/absorb-me", receipt: "absorb-r1" }, "ping" ) ) )
+
+				var receiptFrame = variables.codec.parse( conn.client.readTextFrame() )
+				expect( receiptFrame.getCommand() ).toBe( "RECEIPT" )
+				expect( receiptFrame.getHeader( "receipt-id" ) ).toBe( "absorb-r1" )
+
+				conn.client.close()
+			} )
+
+			it( "onSend runs at COMMIT time for a transactional SEND, same timing authorize() already gets", function() {
+				var conn = _connectedClient( variables.onSendPort )
+				conn.client.sendText( variables.codec.serialize( new "../../models/StompFrame"( "SUBSCRIBE", { destination: "/queue/transform-me", id: "sub-tx-transform" } ) ) )
+				sleep( 100 )
+
+				conn.client.sendText( variables.codec.serialize( new "../../models/StompFrame"( "BEGIN", { transaction: "tx-onsend" } ) ) )
+				conn.client.sendText( variables.codec.serialize( new "../../models/StompFrame"( "SEND", { destination: "/queue/transform-me", transaction: "tx-onsend" }, "buffered" ) ) )
+				conn.client.sendText( variables.codec.serialize( new "../../models/StompFrame"( "COMMIT", { transaction: "tx-onsend" } ) ) )
+
+				var msg = variables.codec.parse( conn.client.readTextFrame() )
+				expect( msg.getBody() ).toBe( "transformed:buffered" )
 
 				conn.client.close()
 			} )
