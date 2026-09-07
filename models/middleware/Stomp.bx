@@ -559,6 +559,11 @@ class {
 			// SUBSCRIBE's own authorize() call passed the real connection).
 			var allowed = variables.authorizeFn( login, destination, "publish", connection, _metadataFor( connectionId ) )
 			if ( !allowed ) {
+				// Matches _handleSubscribe's equivalent denial above — a denied SEND used to just
+				// vanish with no signal in either direction (no ERROR frame, no delivery), unlike
+				// every other rejection path in this file. Non-fatal (doesn't close the
+				// connection), same as the SUBSCRIBE denial.
+				_sendError( connection, "Not authorized to send to " & destination )
 				return false
 			}
 		}
