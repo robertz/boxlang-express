@@ -27,9 +27,27 @@ import io.undertow.websockets.core.WebSocketChannel;
  * handler that does any blocking work there (a blocking send back to the
  * client, in the very first version of this shim's own test) intermittently
  * reset the connection instead of throwing a clean error — same class of
- * bug, worse failure mode (flaky instead of loud). One virtual-thread-per-
- * task executor per listener instance, matching the one-thread-per-request
- * model the rest of this project already uses.
+ * bug, worse failure mode (flaky instead of loud).
+ *
+ * One virtual thread PER CONNECTION, reused for every frame that
+ * connection sends — not Executors.newVirtualThreadPerTaskExecutor(),
+ * which this originally used and which spins up a brand new virtual
+ * thread for every individual submit(), running them fully concurrently
+ * with no ordering guarantee at all. That matters here specifically
+ * because handler (e.g. models/middleware/Stomp.bx's per-connection frame
+ * dispatch) closes over plain, unlocked BoxLang structs — mySubscriptions,
+ * activeTransactions, the connected/login flags — that assume frames from
+ * ONE connection are handled one at a time, in the order they arrived, the
+ * same assumption STOMP's own transaction semantics (BEGIN/SEND*/COMMIT)
+ * depend on. A client sending several frames in a burst (rapid-fire
+ * SUBSCRIBE+SEND, or several SENDs inside one transaction) could have them
+ * picked up by different concurrent virtual threads and processed out of
+ * order, or race each other mutating that per-connection state — a single
+ * reused virtual thread draining a queue keeps per-connection ordering
+ * intact while still never touching Undertow's I/O thread, and still
+ * costs nothing idle (virtual threads park for free) between messages.
+ * Different connections still run fully in parallel, each on its own
+ * listener instance and own single-thread executor.
  *
  * Deliberately minimal: text messages only (no binary), full-message
  * buffering only (no streaming/fragmented handling) — matches this
@@ -40,7 +58,7 @@ import io.undertow.websockets.core.WebSocketChannel;
 public class BoxWebSocketListener extends AbstractReceiveListener {
 
 	private final WebSocketMessageHandler handler;
-	private final ExecutorService executor = Executors.newVirtualThreadPerTaskExecutor();
+	private final ExecutorService executor = Executors.newSingleThreadExecutor( Thread.ofVirtual().name( "ws-conn-", 0 ).factory() );
 
 	public BoxWebSocketListener( WebSocketMessageHandler handler ) {
 		this.handler = handler;
@@ -57,11 +75,25 @@ public class BoxWebSocketListener extends AbstractReceiveListener {
 		int code = cm.getCode();
 		String reason = cm.getReason();
 		executor.submit( _guard( () -> handler.onClose( channel, code, reason ) ) );
+		// Connection is done — shutdown() lets this already-submitted (and
+		// any still-queued, earlier) task finish before the thread exits,
+		// it just refuses anything submitted after this point. Without it,
+		// newSingleThreadExecutor()'s one thread parks forever waiting for
+		// work that will never come, leaking a thread for the life of the
+		// process instead of per-connection like the previous
+		// newVirtualThreadPerTaskExecutor() (whose threads were ephemeral
+		// by construction, so this was never a concern before).
+		executor.shutdown();
 	}
 
 	@Override
 	protected void onError( WebSocketChannel channel, Throwable error ) {
 		executor.submit( _guard( () -> handler.onError( channel, error ) ) );
+		// onError doesn't always come paired with onCloseMessage for the
+		// same connection — shut down here too so an error-only connection
+		// end doesn't leak its thread either. Idempotent: shutdown() on an
+		// already-shutdown executor (the onCloseMessage case) is a no-op.
+		executor.shutdown();
 	}
 
 	/**

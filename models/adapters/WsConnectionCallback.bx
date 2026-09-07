@@ -10,8 +10,44 @@
  */
 class {
 
+	/**
+	 * Eagerly resolves both java-src/-compiled classes this adapter needs —
+	 * boxexpress.ws.BoxWebSocketListener (below) and boxexpress.ws.
+	 * WebSocketMessageHandler (the _warmMessageHandlerInterface() call) —
+	 * synchronously, here, rather than lazily on the first real connection.
+	 *
+	 * Found the hard way: neither class ships as a prebuilt .class; BoxLang's
+	 * module class loader compiles each on demand the first time it's
+	 * resolved by name (createObject() for the former, the interface name
+	 * passed to createDynamicProxy() for the latter — see
+	 * BoxWebSocketListener.java's own docblock for why a real compiled Java
+	 * class is needed here at all). Resolving either one fresh on every
+	 * onConnect() (i.e. every handshake, including StompJs's own reconnect
+	 * attempts) hit that on-demand compile-and-define path repeatedly
+	 * instead of once, and two connections landing close enough together (a
+	 * page's own connection racing an in-flight reconnect, two browser tabs
+	 * opening within the same instant) could both miss whatever caching
+	 * that path does internally and both try to define the class into the
+	 * same per-module classloader — which throws LinkageError: attempted
+	 * duplicate class definition, since a ClassLoader can only ever define
+	 * one class under a given fully-qualified name. Reproduced directly:
+	 * identical failure with this project's own unmodified released
+	 * version, on the very first handshake against a freshly started
+	 * server, so it's a real bug here, not a downstream consumer's
+	 * environment.
+	 *
+	 * init() runs exactly once, synchronously, while app.ws() is still
+	 * being set up — strictly before app.listen() ever accepts a
+	 * connection (see BoxExpress.bx) — so resolving both classes here
+	 * instead of lazily removes the race outright: by the time any real,
+	 * possibly-concurrent connection reaches onConnect(), both classes are
+	 * already defined and this single-threaded resolution is the only one
+	 * that will ever happen.
+	 */
 	function init( wsRoutes ) {
 		variables.wsRoutes = wsRoutes
+		variables.listenerClass = createObject( "java", "boxexpress.ws.BoxWebSocketListener" )
+		_warmMessageHandlerInterface()
 		return this
 	}
 
@@ -32,12 +68,35 @@ class {
 		var connection = new "../WebSocketConnection"( channel, _extractHeaders( exchange ) )
 		var handlerAdapter = new "WsMessageHandlerAdapter"( connection )
 		var handlerProxy = createDynamicProxy( handlerAdapter, [ "boxexpress.ws.WebSocketMessageHandler" ] )
-		var listener = createObject( "java", "boxexpress.ws.BoxWebSocketListener" ).init( handlerProxy )
+		var listener = variables.listenerClass.init( handlerProxy )
 		channel.getReceiveSetter().set( listener )
 
 		handlerFn( connection )
 
 		channel.resumeReceives()
+	}
+
+	/**
+	 * Forces boxexpress.ws.WebSocketMessageHandler's class definition to
+	 * happen once, here, instead of on the first real (and possibly
+	 * concurrent) connection's createDynamicProxy() call in onConnect().
+	 * The proxy itself is throwaway — createDynamicProxy() necessarily
+	 * builds a fresh proxy instance per call (each connection needs its
+	 * own, wrapping its own WsMessageHandlerAdapter), so unlike
+	 * BoxWebSocketListener there's nothing reusable to cache — only the
+	 * underlying interface class resolution this warms up front.
+	 * WsMessageHandlerAdapter.init() only stores whatever it's given
+	 * without dereferencing it, so "" (not a real null — see
+	 * StompMessage.bx's own init() docblock for why: a BoxLang function
+	 * parameter holding an actual null can't be referenced by name inside
+	 * that function at all, and init() does exactly that with a bare
+	 * `connection = connection` assignment) is a safe throwaway value
+	 * here; none of this adapter's methods are ever invoked on this
+	 * warm-up instance in the first place.
+	 */
+	private function _warmMessageHandlerInterface() {
+		var throwawayAdapter = new "WsMessageHandlerAdapter"( "" )
+		createDynamicProxy( throwawayAdapter, [ "boxexpress.ws.WebSocketMessageHandler" ] )
 	}
 
 	/**
