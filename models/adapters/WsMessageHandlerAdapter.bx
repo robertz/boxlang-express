@@ -20,10 +20,25 @@ class {
 		variables.connection._dispatchClose( code, reason )
 	}
 
+	/**
+	 * Still no app-facing error hook (see WebSocketConnection) — matches SseEmitter's own posture,
+	 * where a failed write just flips isClosed() rather than surfacing the exception itself. But an
+	 * abrupt disconnect (network drop, sleep, TCP reset) doesn't always get a paired onClose() from
+	 * Undertow — confirmed directly in BoxWebSocketListener.java's own onError() docblock — so
+	 * without this, the connection's app-level onClose() callback (Stomp.bx's per-connection
+	 * registry teardown, in particular) could simply never run, leaking that connection's
+	 * subscriptions/pending-acks/registry entry forever. 1006 is the standard WebSocket "abnormal
+	 * closure" code (RFC 6455 §7.4.1) for exactly this case — no real close frame was ever
+	 * exchanged. _dispatchClose() is guarded against double-firing, so this is safe even when a
+	 * real onCloseMessage does still arrive for the same connection afterward.
+	 */
 	function onError( channel, error ) {
-		// No app-facing error hook yet (see WebSocketConnection) — matches
-		// SseEmitter's own posture, where a failed write just flips
-		// isClosed() rather than surfacing the exception itself.
+		var reason = "WebSocket error"
+		try {
+			reason = error.getMessage()
+		} catch ( any e ) {
+		}
+		variables.connection._dispatchClose( 1006, reason ?: "WebSocket error" )
 	}
 
 }

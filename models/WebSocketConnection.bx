@@ -109,7 +109,17 @@ class {
 		}
 	}
 
+	/**
+	 * Guarded against firing twice — WsMessageHandlerAdapter's onError() now also calls this (an
+	 * abrupt disconnect doesn't always get a paired onCloseMessage from Undertow — see
+	 * BoxWebSocketListener.java's own onError() docblock), so a connection that errors and then
+	 * still receives a real close frame shouldn't run the app's close callback (and whatever
+	 * cleanup it does, e.g. Stomp.bx's per-connection registry teardown) more than once.
+	 */
 	function _dispatchClose( code, reason ) {
+		if ( variables.closed ) {
+			return
+		}
 		variables.closed = true
 		if ( !isNull( variables.closeCallback ) ) {
 			variables.closeCallback( code, reason )
