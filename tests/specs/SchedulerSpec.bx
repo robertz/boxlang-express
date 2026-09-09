@@ -1,0 +1,167 @@
+/**
+ * Regression coverage for app.schedule()/Scheduler.bx — fixed-interval
+ * recurring jobs. No real HTTP server needed for any of this (schedule()
+ * lazily creates its own Scheduler independent of listen()), so these
+ * specs never call app.listen() — just app.schedule() and app.close().
+ *
+ * Every timing-dependent assertion here polls for an observed count
+ * rather than sleeping a fixed amount and hoping, the same discipline
+ * used throughout this project's other async specs (SseSpec, StompSpec).
+ */
+class extends="testbox.system.BaseSpec" {
+
+	private function _waitUntil( conditionFn, timeoutMs = 2000, pollMs = 20 ) {
+		var waited = 0
+		while ( !conditionFn() && waited < timeoutMs ) {
+			sleep( pollMs )
+			waited += pollMs
+		}
+	}
+
+	function run() {
+		describe( "app.schedule()", function() {
+
+			afterEach( function() {
+				variables.app.close()
+			} )
+
+			it( "fires the callback on the configured interval", function() {
+				variables.app = new "../../models/BoxExpress"()
+				var tickCount = createObject( "java", "java.util.concurrent.atomic.AtomicInteger" ).init( 0 )
+
+				variables.app.schedule( 50, () => {
+					tickCount.incrementAndGet()
+				} )
+
+				_waitUntil( () => tickCount.get() >= 3, 2000 )
+				expect( tickCount.get() ).toBeGTE( 3 )
+			} )
+
+			it( "does not fire before the first interval elapses unless immediate is true", function() {
+				variables.app = new "../../models/BoxExpress"()
+				var tickCount = createObject( "java", "java.util.concurrent.atomic.AtomicInteger" ).init( 0 )
+
+				variables.app.schedule( 500, () => {
+					tickCount.incrementAndGet()
+				} )
+
+				sleep( 100 )
+				expect( tickCount.get() ).toBe( 0 )
+			} )
+
+			it( "immediate: true runs the first tick right away instead of waiting a full interval", function() {
+				variables.app = new "../../models/BoxExpress"()
+				var tickCount = createObject( "java", "java.util.concurrent.atomic.AtomicInteger" ).init( 0 )
+
+				variables.app.schedule( 500, () => {
+					tickCount.incrementAndGet()
+				}, { immediate: true } )
+
+				_waitUntil( () => tickCount.get() >= 1, 300 )
+				expect( tickCount.get() ).toBe( 1 )
+			} )
+
+			it( "skips a tick by default when the previous run of the same job hasn't finished", function() {
+				variables.app = new "../../models/BoxExpress"()
+				var startCount = createObject( "java", "java.util.concurrent.atomic.AtomicInteger" ).init( 0 )
+
+				variables.app.schedule( 30, () => {
+					startCount.incrementAndGet()
+					sleep( 250 )
+				} )
+
+				// At a 30ms interval, ~20 ticks would fire in 600ms if none
+				// were skipped — with a 250ms job body and no overlap, only
+				// ~2 can actually start in that window.
+				sleep( 600 )
+				expect( startCount.get() ).toBeLTE( 3 )
+			} )
+
+			it( "allowOverlap: true lets more than one run of the same job be in flight at once", function() {
+				variables.app = new "../../models/BoxExpress"()
+				var currentlyRunning = createObject( "java", "java.util.concurrent.atomic.AtomicInteger" ).init( 0 )
+				var peakConcurrency = createObject( "java", "java.util.concurrent.atomic.AtomicInteger" ).init( 0 )
+
+				variables.app.schedule( 30, () => {
+					var nowRunning = currentlyRunning.incrementAndGet()
+					// A compare-and-set loop instead of AtomicInteger's own
+					// updateAndGet(), which takes a java.util.function.
+					// IntUnaryOperator — this codebase's established pattern
+					// (see Stomp.bx's AtomicBoolean use) is to stick to plain
+					// get()/compareAndSet() rather than hand a bare BoxLang
+					// closure to a Java functional-interface parameter.
+					var currentPeak = peakConcurrency.get()
+					while ( nowRunning > currentPeak && !peakConcurrency.compareAndSet( currentPeak, nowRunning ) ) {
+						currentPeak = peakConcurrency.get()
+					}
+					sleep( 250 )
+					currentlyRunning.decrementAndGet()
+				}, { allowOverlap: true } )
+
+				_waitUntil( () => peakConcurrency.get() >= 2, 1000 )
+				expect( peakConcurrency.get() ).toBeGTE( 2 )
+			} )
+
+			it( "cancel() stops future ticks", function() {
+				variables.app = new "../../models/BoxExpress"()
+				var tickCount = createObject( "java", "java.util.concurrent.atomic.AtomicInteger" ).init( 0 )
+
+				var job = variables.app.schedule( 30, () => {
+					tickCount.incrementAndGet()
+				} )
+
+				_waitUntil( () => tickCount.get() >= 2, 1000 )
+				job.cancel()
+				var countAtCancel = tickCount.get()
+
+				sleep( 200 )
+				expect( tickCount.get() ).toBe( countAtCancel )
+			} )
+
+			it( "app.close() tears down the scheduler — no further ticks after close", function() {
+				variables.app = new "../../models/BoxExpress"()
+				var tickCount = createObject( "java", "java.util.concurrent.atomic.AtomicInteger" ).init( 0 )
+
+				variables.app.schedule( 30, () => {
+					tickCount.incrementAndGet()
+				} )
+
+				_waitUntil( () => tickCount.get() >= 2, 1000 )
+				variables.app.close()
+				var countAtClose = tickCount.get()
+
+				sleep( 200 )
+				expect( tickCount.get() ).toBe( countAtClose )
+			} )
+
+			it( "a thrown error inside a job is caught and logged, and doesn't stop subsequent ticks", function() {
+				variables.app = new "../../models/BoxExpress"()
+				var tickCount = createObject( "java", "java.util.concurrent.atomic.AtomicInteger" ).init( 0 )
+
+				variables.app.schedule( 30, () => {
+					tickCount.incrementAndGet()
+					throw( message = "boom from a scheduled job", type = "SchedulerSpec.Boom" )
+				} )
+
+				_waitUntil( () => tickCount.get() >= 3, 1000 )
+				expect( tickCount.get() ).toBeGTE( 3 )
+			} )
+
+			it( "getScheduledJobs() reflects a registered job's name, and is empty before any job is scheduled", function() {
+				variables.app = new "../../models/BoxExpress"()
+				expect( variables.app.getScheduledJobs() ).toBeEmpty()
+
+				variables.app.schedule( 500, () => {}, { name: "cleanup" } )
+
+				var jobs = variables.app.getScheduledJobs()
+				var names = []
+				for ( var jobId in jobs ) {
+					names.append( jobs[ jobId ].name )
+				}
+				expect( names ).toInclude( "cleanup" )
+			} )
+
+		} )
+	}
+
+}
