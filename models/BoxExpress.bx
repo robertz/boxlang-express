@@ -16,6 +16,7 @@ class {
 		variables.running = false
 		variables.reloadWatcher = javacast( "null", "" )
 		variables.shutdownHook = javacast( "null", "" )
+		variables.scheduler = javacast( "null", "" )
 		variables.closed = false
 		variables.color = new AnsiColor()
 		return this
@@ -82,6 +83,36 @@ class {
 	function ws( path, handler ) {
 		variables.wsRoutes[ path ] = handler
 		return this
+	}
+
+	/**
+	 * Registers a fixed-interval recurring job — the setInterval
+	 * equivalent, not a cron scheduler (see Scheduler.bx's own docblock
+	 * for why that's deliberately out of scope). Lazily creates one
+	 * internal Scheduler instance on the first call; an app that never
+	 * calls schedule() pays nothing for it, same "no cost until used"
+	 * posture as wsRoutes/WsUpgradeRouter above.
+	 *
+	 *   app.schedule( 60000, () => { ... } )
+	 *   app.schedule( 60000, ( job ) => { ... }, { name: "cleanup", immediate: true } )
+	 *
+	 * Returns a job handle ({ cancel(), name }) — see Scheduler.bx's
+	 * schedule() for the full options (name/immediate/allowOverlap).
+	 */
+	function schedule( intervalMs, callback, options = {} ) {
+		if ( isNull( variables.scheduler ) ) {
+			variables.scheduler = new Scheduler( this.settings )
+		}
+		return variables.scheduler.schedule( intervalMs, callback, options )
+	}
+
+	/**
+	 * Introspection getter, same pattern as Stomp.bx's getConnections()/
+	 * getSubscriptions() — an empty struct before the first schedule()
+	 * call, since there's no Scheduler instance yet to ask.
+	 */
+	function getScheduledJobs() {
+		return isNull( variables.scheduler ) ? {} : variables.scheduler.getJobs()
 	}
 
 	/**
@@ -265,6 +296,11 @@ class {
 		if ( !isNull( variables.reloadWatcher ) ) {
 			variables.reloadWatcher.stop()
 			variables.reloadWatcher = javacast( "null", "" )
+		}
+
+		if ( !isNull( variables.scheduler ) ) {
+			variables.scheduler.shutdown()
+			variables.scheduler = javacast( "null", "" )
 		}
 
 		if ( !isNull( variables.shutdownHook ) ) {

@@ -1,0 +1,200 @@
+/**
+ * Backs app.schedule() — fixed-interval recurring jobs, the setInterval
+ * equivalent. Deliberately no cron-expression parsing: that's a real,
+ * separable feature (a parser, timezone handling, calendar edge cases)
+ * this pass isn't building, not an oversight.
+ *
+ * One java.util.concurrent.ScheduledExecutorService (single-threaded)
+ * drives ticks for every job on this instance; each tick's actual
+ * callback runs on its own virtual thread via
+ * Executors.newVirtualThreadPerTaskExecutor(), same split
+ * UndertowVirtualThreadHandler.bx uses for HTTP requests — a slow job
+ * body never delays another job's tick, since the tick thread only ever
+ * does the (cheap) work of deciding whether to submit, not the job
+ * itself.
+ *
+ * No persistence across restarts (in-memory only, single process), no
+ * missed-run catch-up after downtime, and no clustering/distributed
+ * coordination — every process instance runs every job independently,
+ * the same boundary Stomp.bx's docblock draws around multi-node
+ * clustering for itself. An app running multiple instances behind a
+ * load balancer will get the same job firing once per instance, not
+ * once total; that's a real, known limitation of an in-process
+ * scheduler, not something to work around here.
+ */
+class {
+
+	function init( settings = {} ) {
+		variables.settings = settings
+		variables.tickExecutor = createObject( "java", "java.util.concurrent.Executors" ).newSingleThreadScheduledExecutor()
+		variables.taskExecutor = createObject( "java", "java.util.concurrent.Executors" ).newVirtualThreadPerTaskExecutor()
+		variables.jobs = {}
+		variables.jobCounter = 0
+		return this
+	}
+
+	/**
+	 * intervalMs is both the tick period and, unless immediate is true,
+	 * the delay before the first tick — scheduleAtFixedRate() fires on a
+	 * fixed wall-clock cadence regardless of how long an individual job
+	 * body takes (that's what "fixed rate" means to the JDK scheduler);
+	 * whether an overrunning job's next tick actually runs or gets
+	 * skipped is decided by this class's own overlap policy below, not by
+	 * the JDK executor.
+	 *
+	 * options.name defaults to an internal job id — set it to get a
+	 * meaningful label in getJobs()/the "[Scheduler] job '...' threw"
+	 * error log below, instead of "job-3".
+	 *
+	 * options.immediate runs the first tick right away (0 delay) instead
+	 * of waiting one full interval first, for a job that should run once
+	 * at startup and then on its normal cadence.
+	 *
+	 * options.allowOverlap (default false) — by default, a tick is
+	 * skipped entirely (not queued, not delayed — just skipped) if the
+	 * previous run of this same job hasn't finished yet, claimed
+	 * atomically via an AtomicBoolean so the tick thread and whichever
+	 * virtual thread is still running the previous job body can't both
+	 * think they own the same tick. Skip-by-default exists so a job that
+	 * occasionally runs long (a slow query, a network call) doesn't pile
+	 * up an unbounded number of overlapping virtual threads all doing the
+	 * same work concurrently — the failure mode this is guarding against
+	 * is real resource exhaustion, not a theoretical one. Pass
+	 * allowOverlap: true for a job that's actually safe to run
+	 * concurrently with itself (each run independent, no shared state).
+	 *
+	 * The callback receives this job's own handle ({ cancel(), name }) as
+	 * its one argument — a job that needs to cancel itself (a one-shot
+	 * "run until some condition, then stop" job) doesn't need to hang
+	 * onto the return value of schedule() to do it. A callback declared
+	 * with no parameters just ignores it.
+	 */
+	function schedule( intervalMs, callback, options = {} ) {
+		variables.jobCounter++
+		var jobId = "job-" & variables.jobCounter
+		var jobName = options.name ?: jobId
+		var allowOverlap = options.allowOverlap ?: false
+		var immediate = options.immediate ?: false
+
+		var scheduler = this
+		var handle = {
+			name: jobName,
+			cancel: function() {
+				scheduler._cancelJob( jobId )
+			}
+		}
+
+		variables.jobs[ jobId ] = {
+			name: jobName,
+			callback: callback,
+			allowOverlap: allowOverlap,
+			handle: handle,
+			runningFlag: createObject( "java", "java.util.concurrent.atomic.AtomicBoolean" ).init( false )
+		}
+
+		var tickRunnable = createDynamicProxy(
+			new ThreadRunnable( function() {
+				scheduler._runTick( jobId )
+			} ),
+			[ "java.lang.Runnable" ]
+		)
+
+		var initialDelayMs = immediate ? 0 : intervalMs
+		variables.jobs[ jobId ].future = variables.tickExecutor.scheduleAtFixedRate(
+			tickRunnable,
+			javacast( "long", initialDelayMs ),
+			javacast( "long", intervalMs ),
+			createObject( "java", "java.util.concurrent.TimeUnit" ).MILLISECONDS
+		)
+
+		return handle
+	}
+
+	/**
+	 * Runs on the single tick-executor thread — every job on this
+	 * Scheduler shares it, so this needs to stay cheap (claim-and-submit
+	 * only) and never itself run job code, or a slow job would delay
+	 * every other job's ticks exactly the way the class docblock says
+	 * this design avoids.
+	 */
+	function _runTick( jobId ) {
+		var job = variables.jobs[ jobId ] ?: javacast( "null", "" )
+		if ( isNull( job ) ) {
+			return   // cancelled between the tick firing and this running
+		}
+
+		if ( !job.allowOverlap && !job.runningFlag.compareAndSet( false, true ) ) {
+			return   // previous run of this job hasn't finished yet — skip
+		}
+		if ( job.allowOverlap ) {
+			job.runningFlag.set( true )
+		}
+
+		variables.taskExecutor.submit( createDynamicProxy(
+			new ThreadRunnable( function() {
+				try {
+					job.callback( job.handle )
+				} catch ( any e ) {
+					// Caught and logged, never left to kill future ticks —
+					// same posture as HttpBridge.bx's dispatch guard and
+					// Stomp.bx's server-side listener guard (see
+					// Stomp.bx's "listener for" log line). Unconditional,
+					// not gated behind app.set("log", false), matching
+					// both of those: that setting only quiets routine
+					// traffic logging, never an actual caught failure.
+					println( "[Scheduler] job '" & job.name & "' threw: " & e.message )
+				} finally {
+					job.runningFlag.set( false )
+				}
+			} ),
+			[ "java.lang.Runnable" ]
+		) )
+	}
+
+	function _cancelJob( jobId ) {
+		var job = variables.jobs[ jobId ] ?: javacast( "null", "" )
+		if ( isNull( job ) ) {
+			return
+		}
+		job.future.cancel( false )
+		structDelete( variables.jobs, jobId )
+	}
+
+	/**
+	 * Live introspection, same pattern as Stomp.bx's getConnections()/
+	 * getSubscriptions() — reads current state, not a stable data API to
+	 * build app logic against. running reflects the AtomicBoolean at the
+	 * moment of the call, not a snapshot guaranteed to still be accurate
+	 * by the time a caller looks at it.
+	 */
+	function getJobs() {
+		var result = {}
+		for ( var jobId in variables.jobs ) {
+			var job = variables.jobs[ jobId ]
+			result[ jobId ] = {
+				name: job.name,
+				allowOverlap: job.allowOverlap,
+				running: job.runningFlag.get()
+			}
+		}
+		return result
+	}
+
+	/**
+	 * Cancels every job and stops both executors — called from
+	 * BoxExpress.close(), the same teardown block that already stops
+	 * reloadWatcher/undertowServer. shutdownNow() (not shutdown()) since
+	 * there's no reason to let already-queued ticks run once the app is
+	 * closing; a job body already in flight on the virtual-thread
+	 * executor is interrupted, same as any other in-flight work when the
+	 * process is going down.
+	 */
+	function shutdown() {
+		for ( var jobId in structCopy( variables.jobs ) ) {
+			_cancelJob( jobId )
+		}
+		variables.tickExecutor.shutdownNow()
+		variables.taskExecutor.shutdownNow()
+	}
+
+}
