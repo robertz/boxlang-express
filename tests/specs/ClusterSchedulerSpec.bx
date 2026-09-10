@@ -1,0 +1,183 @@
+/**
+ * Regression coverage for Scheduler.bx's cluster-aware jobs
+ * (options.clustered) and BoxExpress.bx's app.getClusterManager() —
+ * see plans/cluster-support.md's "Consumer 2: Scheduler leader election".
+ *
+ * A real FileSystemStore-backed cache is registered at runtime (see
+ * ClusterManagerSpec.bx's own docblock for why the in-memory "default"
+ * cache can't be used here).
+ */
+class extends="testbox.system.BaseSpec" {
+
+	private function _waitUntil( conditionFn, timeoutMs = 4000, pollMs = 50 ) {
+		var waited = 0
+		while ( !conditionFn() && waited < timeoutMs ) {
+			sleep( pollMs )
+			waited += pollMs
+		}
+	}
+
+	function beforeAll() {
+		variables.cacheDir = expandPath( "./tmp-cluster-scheduler-spec-cache-" & createUUID() )
+		variables.cacheName = "clusterSchedSpecCache" & createUUID().replace( "-", "", "all" )
+		cacheService().createCache( variables.cacheName, "BoxCacheProvider", {
+			objectStore: "FileSystemStore",
+			directory: variables.cacheDir
+		} )
+	}
+
+	function afterAll() {
+		try {
+			directoryDelete( variables.cacheDir, true )
+		} catch ( any e ) {
+		}
+	}
+
+	function run() {
+
+		describe( "app.getClusterManager()", function() {
+
+			afterEach( function() {
+				variables.app.close()
+			} )
+
+			it( "is lazily created once and reused on repeated calls", function() {
+				variables.app = new "../../models/BoxExpress"()
+				var cm1 = variables.app.getClusterManager()
+				var cm2 = variables.app.getClusterManager()
+				expect( cm1 ).toBe( cm2 )
+			} )
+
+			it( "defaults to disabled when the app never configures cluster settings", function() {
+				variables.app = new "../../models/BoxExpress"()
+				expect( variables.app.getClusterManager().isEnabled() ).toBeFalse()
+			} )
+
+			it( "app.set('cluster', {...}) is visible to app.getClusterManager()", function() {
+				variables.app = new "../../models/BoxExpress"()
+				variables.app.set( "cluster", {
+					enabled: true, name: "sched-peer-#createUUID()#", cacheProvider: variables.cacheName
+				} )
+				expect( variables.app.getClusterManager().isEnabled() ).toBeTrue()
+			} )
+
+		} )
+
+		describe( "app.schedule() with options.clustered", function() {
+
+			afterEach( function() {
+				if ( !isNull( variables.app1 ) ) {
+					variables.app1.close()
+				}
+				if ( !isNull( variables.app2 ) ) {
+					variables.app2.close()
+				}
+			} )
+
+			private function _twoClusteredApps( idleTimeoutSeconds = 2 ) {
+				variables.app1 = new "../../models/BoxExpress"()
+				variables.app2 = new "../../models/BoxExpress"()
+				variables.app1.set( "cluster", {
+					enabled: true, name: "sched-peer-a-#createUUID()#",
+					cacheProvider: variables.cacheName, peerIdleTimeoutSeconds: idleTimeoutSeconds
+				} )
+				variables.app2.set( "cluster", {
+					enabled: true, name: "sched-peer-b-#createUUID()#",
+					cacheProvider: variables.cacheName, peerIdleTimeoutSeconds: idleTimeoutSeconds
+				} )
+				// Force both ClusterManagers into existence (and their first
+				// heartbeat) before either app schedules a clustered job, so
+				// there's no race between "job registered" and "peer visible".
+				variables.app1.getClusterManager()
+				variables.app2.getClusterManager()
+			}
+
+			it( "runs a clustered job only on the elected manager, never on the other instance", function() {
+				_twoClusteredApps()
+				_waitUntil( () => variables.app1.getClusterManager().getManagerNode() ==
+					variables.app2.getClusterManager().getManagerNode() )
+
+				var app1IsManager = variables.app1.getClusterManager().isManager()
+				var ticksOnManager = createObject( "java", "java.util.concurrent.atomic.AtomicInteger" ).init( 0 )
+				var ticksOnNonManager = createObject( "java", "java.util.concurrent.atomic.AtomicInteger" ).init( 0 )
+
+				var managerApp = app1IsManager ? variables.app1 : variables.app2
+				var nonManagerApp = app1IsManager ? variables.app2 : variables.app1
+
+				managerApp.schedule( 40, () => {
+					ticksOnManager.incrementAndGet()
+				}, { clustered: true, name: "clustered-job" } )
+				nonManagerApp.schedule( 40, () => {
+					ticksOnNonManager.incrementAndGet()
+				}, { clustered: true, name: "clustered-job" } )
+
+				_waitUntil( () => ticksOnManager.get() >= 3, 1000 )
+				expect( ticksOnManager.get() ).toBeGTE( 3 )
+				expect( ticksOnNonManager.get() ).toBe( 0 )
+			} )
+
+			it( "still runs an unclustered job on every instance even when cluster is enabled", function() {
+				_twoClusteredApps()
+
+				var ticks1 = createObject( "java", "java.util.concurrent.atomic.AtomicInteger" ).init( 0 )
+				var ticks2 = createObject( "java", "java.util.concurrent.atomic.AtomicInteger" ).init( 0 )
+
+				variables.app1.schedule( 40, () => ticks1.incrementAndGet() )
+				variables.app2.schedule( 40, () => ticks2.incrementAndGet() )
+
+				_waitUntil( () => ticks1.get() >= 2 && ticks2.get() >= 2, 1000 )
+				expect( ticks1.get() ).toBeGTE( 2 )
+				expect( ticks2.get() ).toBeGTE( 2 )
+			} )
+
+			it( "failover: after the manager instance closes, the survivor becomes manager and starts running the clustered job", function() {
+				_twoClusteredApps( 2 )
+				_waitUntil( () => variables.app1.getClusterManager().getManagerNode() ==
+					variables.app2.getClusterManager().getManagerNode() )
+
+				var app1IsManager = variables.app1.getClusterManager().isManager()
+				var managerApp = app1IsManager ? variables.app1 : variables.app2
+				var survivorApp = app1IsManager ? variables.app2 : variables.app1
+
+				var survivorTicks = createObject( "java", "java.util.concurrent.atomic.AtomicInteger" ).init( 0 )
+				survivorApp.schedule( 40, () => {
+					survivorTicks.incrementAndGet()
+				}, { clustered: true, name: "failover-job" } )
+
+				sleep( 150 )
+				expect( survivorTicks.get() ).toBe( 0 )   // not manager yet — shouldn't have run
+
+				managerApp.close()   // simulates a crashed leader — no graceful cache cleanup
+				if ( managerApp == variables.app1 ) {
+					variables.app1 = javacast( "null", "" )
+				} else {
+					variables.app2 = javacast( "null", "" )
+				}
+
+				_waitUntil( () => survivorApp.getClusterManager().isManager(), 6000 )
+				_waitUntil( () => survivorTicks.get() >= 1, 1000 )
+				expect( survivorTicks.get() ).toBeGTE( 1 )
+			} )
+
+		} )
+
+		describe( "Scheduler constructed directly, without an app reference", function() {
+
+			it( "treats a clustered job as unclustered instead of throwing", function() {
+				var scheduler = new "../../models/Scheduler"( {} )
+				var tickCount = createObject( "java", "java.util.concurrent.atomic.AtomicInteger" ).init( 0 )
+
+				scheduler.schedule( 40, () => {
+					tickCount.incrementAndGet()
+				}, { clustered: true, name: "no-app-job" } )
+
+				_waitUntil( () => tickCount.get() >= 2, 1000 )
+				expect( tickCount.get() ).toBeGTE( 2 )
+				scheduler.shutdown()
+			} )
+
+		} )
+
+	}
+
+}

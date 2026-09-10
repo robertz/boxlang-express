@@ -17,6 +17,7 @@ class {
 		variables.reloadWatcher = javacast( "null", "" )
 		variables.shutdownHook = javacast( "null", "" )
 		variables.scheduler = javacast( "null", "" )
+		variables.clusterManager = javacast( "null", "" )
 		variables.closed = false
 		variables.color = new AnsiColor()
 		return this
@@ -101,9 +102,30 @@ class {
 	 */
 	function schedule( intervalMs, callback, options = {} ) {
 		if ( isNull( variables.scheduler ) ) {
-			variables.scheduler = new Scheduler( this.settings )
+			variables.scheduler = new Scheduler( this.settings, this )
 		}
 		return variables.scheduler.schedule( intervalMs, callback, options )
+	}
+
+	/**
+	 * Lazily builds this app's one shared ClusterManager — cross-process
+	 * peer discovery and manager election, backed by a durable cache().
+	 * See plans/cluster-support.md for the full design. Safe to call even
+	 * when clustering was never configured (cluster.enabled stays false,
+	 * the module default): every ClusterManager method then behaves as a
+	 * no-op, so this never throws just because it was called.
+	 *
+	 * Shared explicitly, not built separately per-feature, so a clustered
+	 * app.schedule() job and boxExpressStomp({ cluster: app.getClusterManager() })
+	 * reuse one peer-discovery loop instead of running two redundant ones:
+	 *
+	 *   stomp = boxExpressStomp( { cluster: app.getClusterManager() } )
+	 */
+	function getClusterManager() {
+		if ( isNull( variables.clusterManager ) ) {
+			variables.clusterManager = new cluster.ClusterManager( this, this.settings )
+		}
+		return variables.clusterManager
 	}
 
 	/**
@@ -301,6 +323,11 @@ class {
 		if ( !isNull( variables.scheduler ) ) {
 			variables.scheduler.shutdown()
 			variables.scheduler = javacast( "null", "" )
+		}
+
+		if ( !isNull( variables.clusterManager ) ) {
+			variables.clusterManager.shutdown()
+			variables.clusterManager = javacast( "null", "" )
 		}
 
 		if ( !isNull( variables.shutdownHook ) ) {

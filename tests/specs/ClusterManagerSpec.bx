@@ -1,0 +1,365 @@
+/**
+ * Regression coverage for models/cluster/ClusterManager.bx — cross-process
+ * peer discovery, manager election, and the STOMP relay mesh, all backed
+ * by a durable, shared cache(). See plans/cluster-support.md for the full
+ * design.
+ *
+ * A real FileSystemStore-backed cache is registered here at runtime (via
+ * cacheService().createCache(), confirmed directly to work exactly like a
+ * boxlang.json-declared cache) rather than requiring a custom boxlang.json
+ * for the whole test run — CacheStoreSpec.bx's own docblock explains why
+ * the "default" cache alone isn't enough here: it's in-memory, and this
+ * class explicitly rejects a non-durable cacheProvider once enabled.
+ *
+ * Every timing-dependent assertion polls for an observed condition rather
+ * than sleeping a fixed amount and hoping — same discipline as
+ * SchedulerSpec/SseSpec/StompSpec.
+ */
+class extends="testbox.system.BaseSpec" {
+
+	private function _waitUntil( conditionFn, timeoutMs = 4000, pollMs = 50 ) {
+		var waited = 0
+		while ( !conditionFn() && waited < timeoutMs ) {
+			sleep( pollMs )
+			waited += pollMs
+		}
+	}
+
+	function beforeAll() {
+		variables.cacheDir = expandPath( "./tmp-cluster-spec-cache-" & createUUID() )
+		variables.cacheName = "clusterSpecCache" & createUUID().replace( "-", "", "all" )
+		cacheService().createCache( variables.cacheName, "BoxCacheProvider", {
+			objectStore: "FileSystemStore",
+			directory: variables.cacheDir
+		} )
+	}
+
+	function afterAll() {
+		try {
+			directoryDelete( variables.cacheDir, true )
+		} catch ( any e ) {
+			// Best-effort cleanup only — a leftover temp dir under the
+			// project root isn't worth failing the suite over.
+		}
+	}
+
+	function run() {
+
+		describe( "ClusterManager - config & validation", function() {
+
+			it( "defaults to disabled, where every method is a no-op", function() {
+				var cm = new "../../models/cluster/ClusterManager"( {}, {} )
+				expect( cm.isEnabled() ).toBeFalse()
+				expect( cm.isManager() ).toBeTrue()
+				expect( cm.getPeers() ).toBeEmpty()
+			} )
+
+			it( "throws when enabled but cacheProvider is missing", function() {
+				var app = new "../../models/BoxExpress"()
+				expect( function() {
+					new "../../models/cluster/ClusterManager"( app, {
+						cluster: { enabled: true, name: "peer-a" }
+					} )
+				} ).toThrow( "BoxExpress.ClusterConfigError" )
+				app.close()
+			} )
+
+			it( "throws when enabled but name is missing", function() {
+				var app = new "../../models/BoxExpress"()
+				expect( function() {
+					new "../../models/cluster/ClusterManager"( app, {
+						cluster: { enabled: true, cacheProvider: variables.cacheName }
+					} )
+				} ).toThrow( "BoxExpress.ClusterConfigError" )
+				app.close()
+			} )
+
+			it( "throws when cacheProvider resolves to a non-distributed object store", function() {
+				var app = new "../../models/BoxExpress"()
+				expect( function() {
+					new "../../models/cluster/ClusterManager"( app, {
+						cluster: { enabled: true, name: "peer-a", cacheProvider: "default" }
+					} )
+				} ).toThrow( "BoxExpress.ClusterConfigError" )
+				app.close()
+			} )
+
+			it( "does not throw when a non-distributed store is explicitly allowed via allowedObjectStores", function() {
+				var app = new "../../models/BoxExpress"()
+				var cm = new "../../models/cluster/ClusterManager"( app, {
+					cluster: {
+						enabled: true,
+						name: "peer-a",
+						cacheProvider: "default",
+						allowedObjectStores: [ "ConcurrentStore" ]
+					}
+				} )
+				expect( cm.isEnabled() ).toBeTrue()
+				expect( cm.getMyPeerName() ).toBe( "peer-a" )
+				cm.shutdown()
+				app.close()
+			} )
+
+			it( "does not throw when the cacheProvider is genuinely durable", function() {
+				var app = new "../../models/BoxExpress"()
+				var cm = new "../../models/cluster/ClusterManager"( app, {
+					cluster: { enabled: true, name: "peer-a", cacheProvider: variables.cacheName }
+				} )
+				expect( cm.isEnabled() ).toBeTrue()
+				cm.shutdown()
+				app.close()
+			} )
+
+		} )
+
+		describe( "ClusterManager - peer discovery & election", function() {
+
+			afterEach( function() {
+				if ( !isNull( variables.cm1 ) ) {
+					variables.cm1.shutdown()
+				}
+				if ( !isNull( variables.cm2 ) ) {
+					variables.cm2.shutdown()
+				}
+				variables.app1.close()
+				variables.app2.close()
+			} )
+
+			private function _twoPeers( idleTimeoutSeconds = 2 ) {
+				variables.app1 = new "../../models/BoxExpress"()
+				variables.app2 = new "../../models/BoxExpress"()
+				var peerA = "peer-a-#createUUID()#"
+				var peerB = "peer-b-#createUUID()#"
+				variables.cm1 = new "../../models/cluster/ClusterManager"( variables.app1, {
+					cluster: {
+						enabled: true, name: peerA, cacheProvider: variables.cacheName,
+						peerIdleTimeoutSeconds: idleTimeoutSeconds
+					}
+				} )
+				variables.cm2 = new "../../models/cluster/ClusterManager"( variables.app2, {
+					cluster: {
+						enabled: true, name: peerB, cacheProvider: variables.cacheName,
+						peerIdleTimeoutSeconds: idleTimeoutSeconds
+					}
+				} )
+				return { peerA: peerA, peerB: peerB }
+			}
+
+			it( "two instances see each other immediately — the first heartbeat is written synchronously at construction", function() {
+				var peers = _twoPeers()
+				expect( variables.cm1.getPeers() ).toInclude( peers.peerB )
+				expect( variables.cm2.getPeers() ).toInclude( peers.peerA )
+			} )
+
+			it( "a peer never sees its own name in its own getPeers()", function() {
+				var peers = _twoPeers()
+				expect( variables.cm1.getPeers() ).notToInclude( peers.peerA )
+			} )
+
+			it( "exactly one of two peers is elected manager, and both agree on who", function() {
+				var peers = _twoPeers()
+				_waitUntil( () => variables.cm1.getManagerNode() == variables.cm2.getManagerNode() )
+
+				var manager = variables.cm1.getManagerNode()
+				expect( [ peers.peerA, peers.peerB ] ).toInclude( manager )
+				expect( variables.cm2.getManagerNode() ).toBe( manager )
+				expect( variables.cm1.isManager() ? peers.peerA : peers.peerB ).toBe( manager )
+			} )
+
+			it( "repeated rapid isManager()/getManagerNode() calls from two instances never throw, even under heavy concurrent access to the shared manager key", function() {
+				// Confirmed directly (2026-09-09): FileSystemStore's set()
+				// does an internal read-before-write, and under genuinely
+				// concurrent access to the *same* key from two instances
+				// in the same process (hammering it far harder than real,
+				// network-latency-separated nodes would) that read can
+				// transiently fail. getManagerNode()/getPeers() catch
+				// that and fail safe (treat it as "not manager this
+				// round," never "definitely me") — this exercises that
+				// path directly rather than trusting it only showed up
+				// once by coincidence.
+				var peers = _twoPeers( 30 )
+				for ( var i = 1; i <= 40; i++ ) {
+					expect( function() {
+						variables.cm1.isManager()
+						variables.cm2.isManager()
+					} ).notToThrow()
+				}
+			} )
+
+			it( "a peer that stops heartbeating drops out of the survivor's getPeers(), and the survivor becomes manager", function() {
+				var peers = _twoPeers( 2 )
+				_waitUntil( () => variables.cm1.getManagerNode() == variables.cm2.getManagerNode() )
+
+				// Kill peerA outright (its heartbeat job stops) — matches a
+				// real crashed node, not a graceful "I'm leaving" handshake.
+				variables.cm1.shutdown()
+
+				_waitUntil( () => !variables.cm2.getPeers().contains( peers.peerA ), 6000 )
+				expect( variables.cm2.getPeers() ).notToInclude( peers.peerA )
+
+				_waitUntil( () => variables.cm2.isManager(), 6000 )
+				expect( variables.cm2.isManager() ).toBeTrue()
+			} )
+
+		} )
+
+		describe( "ClusterManager - relay mesh", function() {
+
+			afterEach( function() {
+				variables.relayApp1.close()
+				variables.relayApp2.close()
+			} )
+
+			it( "openRelay() connects to a live peer, and relay() delivers the envelope to the peer's handler", function() {
+				variables.relayApp1 = new "../../models/BoxExpress"()
+				variables.relayApp2 = new "../../models/BoxExpress"()
+				var port1 = 4970
+				var port2 = 4971
+				var peer1 = "ws://localhost:#port1#"
+				var peer2 = "ws://localhost:#port2#"
+
+				var cm1 = new "../../models/cluster/ClusterManager"( variables.relayApp1, {
+					cluster: { enabled: true, name: peer1, cacheProvider: variables.cacheName, peerIdleTimeoutSeconds: 30 }
+				} )
+				var cm2 = new "../../models/cluster/ClusterManager"( variables.relayApp2, {
+					cluster: { enabled: true, name: peer2, cacheProvider: variables.cacheName, peerIdleTimeoutSeconds: 30 }
+				} )
+
+				var received = []
+				cm1.openRelay( function( destination, body, headers, originPeer ) {
+					received.append( { destination: destination, body: body, originPeer: originPeer } )
+				} )
+				cm2.openRelay( function( destination, body, headers, originPeer ) {} )
+
+				// listen() must come *after* every app.ws() route is
+				// registered (openRelay() registers /__cluster) — it only
+				// installs the WebSocket upgrade path at all if at least
+				// one route already exists at that moment (BoxExpress.bx's
+				// own listen(): `if ( !structIsEmpty( variables.wsRoutes ) )`).
+				// A route added afterward is silently unreachable — found
+				// by hitting exactly that ordering bug here first.
+				variables.relayApp1.listen( port = port1, options = { block: false } )
+				variables.relayApp2.listen( port = port2, options = { block: false } )
+				// listen({block:false}) returns before the socket is
+				// actually bound — confirmed directly (2026-09-09) that
+				// connecting immediately after can hit a real
+				// ConnectException, not just a theoretical race.
+				sleep( 300 )
+
+				_waitUntil( () => cm2.getPeers().contains( peer1 ), 6000 )
+				cm2._reconcilePeerConnections()
+
+				cm2.relay( "news", "hello-from-2", { "x-test": "1" } )
+
+				_waitUntil( () => received.len() > 0, 3000 )
+				expect( received.len() ).toBe( 1 )
+				expect( received[ 1 ].destination ).toBe( "news" )
+				expect( received[ 1 ].body ).toBe( "hello-from-2" )
+				expect( received[ 1 ].originPeer ).toBe( peer2 )
+
+				cm1.shutdown()
+				cm2.shutdown()
+			} )
+
+		} )
+
+		describe( "ClusterManager - full server list", function() {
+
+			afterEach( function() {
+				variables.serverApp1.close()
+				variables.serverApp2.close()
+				try {
+					directoryDelete( variables.serverListCacheDir, true )
+				} catch ( any e ) {
+				}
+			} )
+
+			it( "two running servers each report the full cluster member list, including themselves, over a real HTTP request", function() {
+				// A dedicated cache for this test, not the shared
+				// variables.cacheName every other test in this file uses —
+				// confirmed directly (2026-09-09) that reusing it here
+				// makes getClusterMembers() pick up unrelated stale peer
+				// entries other tests already wrote (some with 30s TTLs),
+				// breaking the exact-length assertions below in a way
+				// that has nothing to do with this test's own two servers.
+				variables.serverListCacheDir = expandPath( "./tmp-cluster-serverlist-spec-cache-" & createUUID() )
+				var serverListCacheName = "clusterServerListCache" & createUUID().replace( "-", "", "all" )
+				cacheService().createCache( serverListCacheName, "BoxCacheProvider", {
+					objectStore: "FileSystemStore",
+					directory: variables.serverListCacheDir
+				} )
+
+				// Local vars, not variables.serverApp1/2 — the route
+				// handlers below are closures nested inside this it()
+				// closure, and need to close over something the request-
+				// handling virtual thread resolves reliably later.
+				// variables.serverApp1/2 are still set (from these same
+				// local vars) purely for afterEach's cleanup access, the
+				// one cross-closure pattern already proven safe elsewhere
+				// in this codebase (see SchedulerSpec.bx's it()/afterEach
+				// pairing).
+				var app1 = new "../../models/BoxExpress"()
+				var app2 = new "../../models/BoxExpress"()
+				variables.serverApp1 = app1
+				variables.serverApp2 = app2
+				var port1 = 4972
+				var port2 = 4973
+				var peer1 = "ws://localhost:#port1#"
+				var peer2 = "ws://localhost:#port2#"
+
+				app1.set( "cluster", {
+					enabled: true, name: peer1, cacheProvider: serverListCacheName, peerIdleTimeoutSeconds: 30
+				} )
+				app2.set( "cluster", {
+					enabled: true, name: peer2, cacheProvider: serverListCacheName, peerIdleTimeoutSeconds: 30
+				} )
+
+				app1.get( "/cluster/members", ( req, res ) => {
+					res.json( { members: app1.getClusterManager().getClusterMembers() } )
+				} )
+				app2.get( "/cluster/members", ( req, res ) => {
+					res.json( { members: app2.getClusterManager().getClusterMembers() } )
+				} )
+
+				app1.listen( port = port1, options = { block: false } )
+				app2.listen( port = port2, options = { block: false } )
+				sleep( 300 )   // listen({block:false}) returns before the socket is actually bound
+
+				// Force both ClusterManagers into existence (and their
+				// first heartbeat) *before* polling — confirmed directly
+				// (2026-09-09) why this can't just be the wait condition
+				// itself: `app1...!=2 || app2...!=2` short-circuits, so as
+				// long as app1 alone reads !=2 (true from the moment it's
+				// first constructed, since it only knows about itself),
+				// app2.getClusterManager() — which lazily constructs it
+				// and writes *its* first heartbeat — never gets called at
+				// all. A real deadlock: app1 can never reach 2 because
+				// app2 never starts existing, and app2 never starts
+				// existing because the OR never evaluates that side.
+				var cm1 = app1.getClusterManager()
+				var cm2 = app2.getClusterManager()
+
+				_waitUntil( () => cm1.getClusterMembers().len() == 2 && cm2.getClusterMembers().len() == 2 )
+
+				var httpClient = new "../helpers/HttpClient"()
+
+				var response1 = httpClient.get( "http://localhost:#port1#/cluster/members" )
+				expect( response1.statusCode ).toBe( 200 )
+				var members1 = JSONDeserialize( response1.body ).members
+				expect( members1 ).toHaveLength( 2 )
+				expect( members1 ).toInclude( peer1 )
+				expect( members1 ).toInclude( peer2 )
+
+				var response2 = httpClient.get( "http://localhost:#port2#/cluster/members" )
+				expect( response2.statusCode ).toBe( 200 )
+				var members2 = JSONDeserialize( response2.body ).members
+				expect( members2 ).toHaveLength( 2 )
+				expect( members2 ).toInclude( peer1 )
+				expect( members2 ).toInclude( peer2 )
+			} )
+
+		} )
+
+	}
+
+}

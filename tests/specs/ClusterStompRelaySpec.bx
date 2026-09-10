@@ -1,0 +1,221 @@
+/**
+ * Regression coverage for the STOMP cluster relay — boxExpressStomp()'s
+ * options.cluster wired through app.getClusterManager() into Stomp.bx's
+ * _deliver(). See plans/cluster-support.md's "Consumer 1: STOMP message
+ * relay". First verified manually against two real separate `boxlang`
+ * OS processes sharing a FileSystemStore-backed cache before being written
+ * up as these permanent, faster in-process specs.
+ *
+ * A real FileSystemStore-backed cache is registered at runtime — see
+ * ClusterManagerSpec.bx's own docblock for why.
+ */
+class extends="testbox.system.BaseSpec" {
+
+	private function _waitUntil( conditionFn, timeoutMs = 5000, pollMs = 50 ) {
+		var waited = 0
+		while ( !conditionFn() && waited < timeoutMs ) {
+			sleep( pollMs )
+			waited += pollMs
+		}
+	}
+
+	function beforeAll() {
+		variables.cacheDir = expandPath( "./tmp-cluster-stomp-spec-cache-" & createUUID() )
+		variables.cacheName = "clusterStompSpecCache" & createUUID().replace( "-", "", "all" )
+		cacheService().createCache( variables.cacheName, "BoxCacheProvider", {
+			objectStore: "FileSystemStore",
+			directory: variables.cacheDir
+		} )
+	}
+
+	function afterAll() {
+		try {
+			directoryDelete( variables.cacheDir, true )
+		} catch ( any e ) {
+		}
+	}
+
+	/**
+	 * Two real BoxExpress apps, each listening on its own port, each with
+	 * a clustered Stomp broker sharing the same durable cache — the same
+	 * topology the manual two-process demo used, just both in this one
+	 * process for speed.
+	 */
+	private function _twoNodes( secret1 = "", secret2 = "" ) {
+		variables.app1 = new "../../models/BoxExpress"()
+		variables.app2 = new "../../models/BoxExpress"()
+		var port1 = variables.port1
+		var port2 = variables.port2
+		var peer1 = "ws://localhost:#port1#"
+		var peer2 = "ws://localhost:#port2#"
+
+		// secret1 is node1's own credential — used both to check an
+		// *incoming* peer connection against, and (since ClusterManager
+		// presents this same value outbound to every peer it connects to)
+		// as what node1 presents *to* node2. Passing different values for
+		// secret1/secret2 simulates two nodes with mismatched secrets.
+		variables.app1.set( "cluster", {
+			enabled: true, name: peer1, cacheProvider: variables.cacheName,
+			peerIdleTimeoutSeconds: 30, secretKey: secret1
+		} )
+		variables.app2.set( "cluster", {
+			enabled: true, name: peer2, cacheProvider: variables.cacheName,
+			peerIdleTimeoutSeconds: 30, secretKey: secret2
+		} )
+
+		// Deliberately no listen() here — a caller still has to register
+		// app.ws("/stomp", ...) (which openRelay(), called from inside
+		// Stomp's own constructor, pairs with an implicit /__cluster
+		// route) before calling listen(). BoxExpress.bx's listen() only
+		// installs the WebSocket upgrade path at all if at least one ws
+		// route already exists at that exact moment — a route registered
+		// afterward is silently unreachable. Found by hitting exactly
+		// that ordering bug here first.
+		return { peer1: peer1, peer2: peer2 }
+	}
+
+	private function _startNodes() {
+		variables.app1.listen( port = variables.port1, options = { block: false } )
+		variables.app2.listen( port = variables.port2, options = { block: false } )
+		// listen({block:false}) returns before the socket is actually
+		// bound — confirmed directly (2026-09-09) that an immediate
+		// connection attempt right after can hit a real ConnectException,
+		// not just a theoretical race. Same fixed settle time StompSpec's
+		// own beforeAll() already uses after its listen() calls.
+		sleep( 300 )
+	}
+
+	function run() {
+
+		describe( "boxExpressStomp({ cluster: ... })", function() {
+
+			beforeEach( function() {
+				// Fixed, distinct literal ports per test — not randRange().
+				// Confirmed directly (2026-09-09) why that matters: a
+				// random draw landed on port 5000, which macOS's AirPlay
+				// Receiver commonly already holds, and BoxExpress.bx's own
+				// listen() calls exit(1) on a bind failure — not a test
+				// failure, a hard exit of the entire BoxLang process
+				// mid-suite, taking every other spec down with it. Every
+				// other spec file in this project already uses fixed
+				// literal ports for exactly this class of reason.
+				variables.nextPortPair = ( variables.nextPortPair ?: 4990 ) + 2
+				variables.port1 = variables.nextPortPair
+				variables.port2 = variables.port1 + 1
+			} )
+
+			afterEach( function() {
+				variables.app1.close()
+				variables.app2.close()
+			} )
+
+			it( "relays a publish with no local subscribers to a listener on the other node", function() {
+				_twoNodes()
+
+				var received = []
+				var stomp1 = new "../../models/middleware/Stomp"( { cluster: variables.app1.getClusterManager() } )
+				var stomp2 = new "../../models/middleware/Stomp"( {
+					cluster: variables.app2.getClusterManager(),
+					listeners: {
+						"news": ( message ) => {
+							received.append( message.getBodyRaw() )
+						}
+					}
+				} )
+				variables.app1.ws( "/stomp", stomp1.handler() )
+				variables.app2.ws( "/stomp", stomp2.handler() )
+				_startNodes()
+
+				// stomp1.send() relays over *app1's* ClusterManager's own
+				// outbound connections (to reach peer2) — reconciling
+				// app2's side here would be reconciling the wrong
+				// direction entirely. Found by hitting exactly that bug
+				// first: a manual reconcile of the receiver's side
+				// "succeeded" (a real connection was made) while the
+				// message still never arrived, because that connection
+				// was never the one carrying it.
+				_waitUntil( () => variables.app1.getClusterManager().getPeers().len() > 0 )
+				variables.app1.getClusterManager()._reconcilePeerConnections()
+
+				stomp1.send( "news", "hello-from-1" )
+
+				_waitUntil( () => received.len() > 0 )
+				expect( received ).toHaveLength( 1 )
+				expect( received[ 1 ] ).toBe( "hello-from-1" )
+			} )
+
+			it( "does not relay a message back to the node it just arrived from (no infinite loop)", function() {
+				_twoNodes()
+
+				var node1Deliveries = createObject( "java", "java.util.concurrent.atomic.AtomicInteger" ).init( 0 )
+				var node2Deliveries = createObject( "java", "java.util.concurrent.atomic.AtomicInteger" ).init( 0 )
+
+				var stomp1 = new "../../models/middleware/Stomp"( {
+					cluster: variables.app1.getClusterManager(),
+					listeners: { "loop-test": ( message ) => node1Deliveries.incrementAndGet() }
+				} )
+				var stomp2 = new "../../models/middleware/Stomp"( {
+					cluster: variables.app2.getClusterManager(),
+					listeners: { "loop-test": ( message ) => node2Deliveries.incrementAndGet() }
+				} )
+				variables.app1.ws( "/stomp", stomp1.handler() )
+				variables.app2.ws( "/stomp", stomp2.handler() )
+				_startNodes()
+
+				_waitUntil( () => variables.app1.getClusterManager().getPeers().len() > 0 &&
+					variables.app2.getClusterManager().getPeers().len() > 0 )
+				variables.app1.getClusterManager()._reconcilePeerConnections()
+				variables.app2.getClusterManager()._reconcilePeerConnections()
+
+				stomp1.send( "loop-test", "ping" )
+
+				_waitUntil( () => node2Deliveries.get() >= 1 )
+				// Give a would-be loop a real chance to show up before
+				// asserting its absence.
+				sleep( 300 )
+
+				expect( node2Deliveries.get() ).toBe( 1 )
+				// node1 has its own local listener too (stomp.send() always
+				// delivers locally first) — exactly one delivery there as
+				// well, never two from a relayed echo.
+				expect( node1Deliveries.get() ).toBe( 1 )
+			} )
+
+			it( "rejects a peer connection presenting a mismatched cluster secret", function() {
+				// In a real deployment every node shares one secretKey
+				// (see plans/cluster-support.md's deployment example,
+				// sourced from the same env var on every instance) — a
+				// node configured with a different value is exactly the
+				// misconfigured/rogue-node case openRelay()'s handshake
+				// check exists to catch.
+				_twoNodes( "wrong-secret", "correct-secret" )
+
+				var received = []
+				var stomp1 = new "../../models/middleware/Stomp"( { cluster: variables.app1.getClusterManager() } )
+				var stomp2 = new "../../models/middleware/Stomp"( {
+					cluster: variables.app2.getClusterManager(),
+					listeners: { "secure-news": ( message ) => received.append( message.getBodyRaw() ) }
+				} )
+				variables.app1.ws( "/stomp", stomp1.handler() )
+				variables.app2.ws( "/stomp", stomp2.handler() )
+				_startNodes()
+
+				// stomp1.send() relays over *app1's* own outbound
+				// connection to peer2 — same direction as the first test
+				// above. app1 presents its own secret ("wrong-secret") to
+				// peer2's /__cluster handshake check, which compares it
+				// against peer2's own configured secret ("correct-secret").
+				_waitUntil( () => variables.app1.getClusterManager().getPeers().len() > 0 )
+				variables.app1.getClusterManager()._reconcilePeerConnections()
+
+				stomp1.send( "secure-news", "should-not-arrive" )
+				sleep( 500 )
+
+				expect( received ).toBeEmpty()
+			} )
+
+		} )
+
+	}
+
+}

@@ -41,6 +41,20 @@ class {
 		variables.heartbeatMs = options.heartbeatMs ?: 0
 		variables.codec = new "../StompFrameCodec"()
 
+		// options.cluster — an app.getClusterManager() instance, for
+		// cross-process relay (see plans/cluster-support.md's "Consumer
+		// 1: STOMP message relay"). Omitted/null means no relay, same as
+		// today. Wires straight into _deliver() below: a relayed message
+		// runs through the exact same subscriber fan-out / exchange
+		// routing / listener path a real client's own SEND does.
+		variables.clusterManager = options.cluster ?: javacast( "null", "" )
+		if ( !isNull( variables.clusterManager ) ) {
+			var stomp = this
+			variables.clusterManager.openRelay( function( destination, body, headers, originPeer ) {
+				stomp._deliver( destination, body, headers, "", originPeer )
+			} )
+		}
+
 		// destination -> { "connectionId:subId" -> { connection, subId, connectionId, ackMode } }
 		// Keyed on a server-generated connectionId + the client's own subId,
 		// not the client's subId alone — see handler()'s docblock for why.
@@ -687,9 +701,18 @@ class {
 	 * passed along at all — confirmed directly; see StompMessage.bx's
 	 * init() docblock for the full explanation.
 	 */
-	function _deliver( destination, body, extraHeaders, originConnection = "" ) {
+	function _deliver( destination, body, extraHeaders, originConnection = "", originPeer = "" ) {
 		for ( var physicalDestination in _resolveDestinations( destination, body, extraHeaders ) ) {
 			_deliverToDestination( physicalDestination, body, extraHeaders, originConnection )
+		}
+
+		// Relay to every other node in the cluster — unless this message
+		// arrived *from* a peer in the first place (originPeer non-empty),
+		// in which case relaying it back out would flood it right back to
+		// whoever just sent it. Flat one-hop, not a spanning tree — see
+		// plans/cluster-support.md's loop-guard note.
+		if ( !isNull( variables.clusterManager ) && !len( originPeer ) ) {
+			variables.clusterManager.relay( destination, body, extraHeaders )
 		}
 	}
 

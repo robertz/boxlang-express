@@ -1,0 +1,114 @@
+/**
+ * One outbound WebSocket connection from this instance to another peer's
+ * /__cluster endpoint — the client side of the STOMP relay mesh (see
+ * plans/cluster-support.md's "Consumer 1: STOMP message relay"). Confirmed
+ * directly (2026-09-09) that java.net.http.HttpClient's WebSocket builder,
+ * listened to via createDynamicProxy against the plain JDK interface
+ * java.net.http.WebSocket$Listener, round-trips real messages against an
+ * app.ws() route — no compiled Java needed here, unlike the server-side
+ * shim app.ws() itself is built on (see docs/ARCHITECTURE.md for why that
+ * side needed one).
+ *
+ * This class *is* the listener — proxied directly via createDynamicProxy(
+ * this, [...] ) rather than a separate listener class, since onOpen/
+ * onText/onClose/onError are plain (non-private) methods here, same
+ * requirement Stomp.bx's own handler closures ran into once already (see
+ * this project's changelog for 0.2.4).
+ */
+class {
+
+	/**
+	 * onMessage defaults to "" (a sentinel), never a bare javacast("null","")
+	 * default — confirmed directly (2026-09-09) that a parameter actually
+	 * holding a real null can't be referenced by name at all here, not
+	 * even a plain read to assign it onward, the exact landmine
+	 * StompMessage.bx's own init() docblock already documents. Since the
+	 * caller only ever omits this argument (nothing currently passes a
+	 * real callback — see onText()'s docblock), the sentinel default is
+	 * never actually null, so there's nothing unsafe to reference.
+	 */
+	function init( peerName, secretKey = "", onMessage = "" ) {
+		variables.peerName = peerName
+		variables.secretKey = secretKey
+		variables.onMessage = onMessage
+		variables.webSocket = javacast( "null", "" )
+		variables.httpClient = createObject( "java", "java.net.http.HttpClient" ).newHttpClient()
+		return this
+	}
+
+	/**
+	 * peerName is this project's cluster.name convention — a full
+	 * "ws://host:port" identity — so the actual relay endpoint is just
+	 * that plus the fixed /__cluster path this class always connects to.
+	 */
+	function connect() {
+		var uri = createObject( "java", "java.net.URI" ).create( variables.peerName & "/__cluster" )
+		var proxy = createDynamicProxy( this, [ "java.net.http.WebSocket$Listener" ] )
+		var builder = variables.httpClient.newWebSocketBuilder()
+		if ( len( variables.secretKey ) ) {
+			builder = builder.header( "x-boxexpress-cluster-secret", variables.secretKey )
+		}
+		variables.webSocket = builder.buildAsync( uri, proxy ).get()
+	}
+
+	function onOpen( webSocket ) {
+		webSocket.request( 1 )
+	}
+
+	/**
+	 * Currently unused by the relay itself — a relay envelope always
+	 * arrives on the *receiving* side's server-role connection (this
+	 * app's own app.ws("/__cluster") route, see ClusterManager.openRelay()),
+	 * never echoed back over the client-role socket this class opened.
+	 * Kept wired (not left as a no-op) since it's the one place a future
+	 * ack/response over this same link would plug in, and an unused
+	 * onMessage argument costs nothing to support now.
+	 */
+	function onText( webSocket, data, last ) {
+		webSocket.request( 1 )
+		if ( isClosure( variables.onMessage ) ) {
+			try {
+				variables.onMessage( data.toString() )
+			} catch ( any e ) {
+				println( "[ClusterPeer] onMessage for '" & variables.peerName & "' threw: " & e.message )
+			}
+		}
+		return createObject( "java", "java.util.concurrent.CompletableFuture" ).completedFuture( javacast( "null", "" ) )
+	}
+
+	function onClose( webSocket, statusCode, reason ) {
+		variables.webSocket = javacast( "null", "" )
+		return createObject( "java", "java.util.concurrent.CompletableFuture" ).completedFuture( javacast( "null", "" ) )
+	}
+
+	function onError( webSocket, error ) {
+		println( "[ClusterPeer] connection to '" & variables.peerName & "' errored: " & error.getMessage() )
+		variables.webSocket = javacast( "null", "" )
+	}
+
+	function sendText( message ) {
+		if ( isNull( variables.webSocket ) ) {
+			return
+		}
+		variables.webSocket.sendText( message, true )
+	}
+
+	function isConnectionOpen() {
+		return !isNull( variables.webSocket )
+	}
+
+	function close() {
+		if ( isNull( variables.webSocket ) ) {
+			return
+		}
+		try {
+			variables.webSocket.sendClose( 1000, "closing" )
+		} catch ( any e ) {
+			// Best-effort — the socket may already be broken (that's
+			// often exactly why close() is being called), so a failure
+			// here shouldn't stop teardown from proceeding.
+		}
+		variables.webSocket = javacast( "null", "" )
+	}
+
+}

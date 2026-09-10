@@ -34,7 +34,28 @@ class {
 	 * Called by the ModuleService on module registration.
 	 */
 	function configure() {
-		settings = {};
+		settings = {
+			// See plans/cluster-support.md — cross-process peer discovery
+			// (for the STOMP relay and Scheduler leader election), backed
+			// by a durable, shared cache() so nodes never need to know
+			// each other's addresses in advance. enabled: false by
+			// default — installing this module changes nothing until an
+			// app (or its boxlang.json) opts in.
+			cluster: {
+				enabled: false,
+				name: "",
+				cacheProvider: "",
+				// Escape-hatch override on top of BoxLang's own
+				// IObjectStore.isDistributed() check (the primary
+				// durable-store validation — see ClusterManager.bx) —
+				// normally empty, since isDistributed() already covers
+				// JDBCStore/FileSystemStore/any future durable store with
+				// no list to maintain.
+				allowedObjectStores: [],
+				secretKey: "",
+				peerIdleTimeoutSeconds: 30
+			}
+		};
 		objectMappings = {};
 		datasources = {};
 		interceptors = [];

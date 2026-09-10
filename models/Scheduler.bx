@@ -24,8 +24,19 @@
  */
 class {
 
-	function init( settings = {} ) {
+	/**
+	 * app defaults to "" (a sentinel), never a bare javacast("null","")
+	 * default — confirmed directly (2026-09-09) that a parameter actually
+	 * holding a real null can't be referenced by name at all, not even a
+	 * plain read to assign it onward (the exact landmine
+	 * StompMessage.bx's own init() docblock documents — ClusterPeer.bx
+	 * hit the identical bug once already; see its own init() docblock).
+	 * variables.app only ever becomes a genuine null via the direct
+	 * assignment below, never by reading the parameter itself.
+	 */
+	function init( settings = {}, app = "" ) {
 		variables.settings = settings
+		variables.app = isSimpleValue( app ) ? javacast( "null", "" ) : app
 		variables.tickExecutor = createObject( "java", "java.util.concurrent.Executors" ).newSingleThreadScheduledExecutor()
 		variables.taskExecutor = createObject( "java", "java.util.concurrent.Executors" ).newVirtualThreadPerTaskExecutor()
 		variables.jobs = {}
@@ -75,6 +86,7 @@ class {
 		var jobName = options.name ?: jobId
 		var allowOverlap = options.allowOverlap ?: false
 		var immediate = options.immediate ?: false
+		var clustered = options.clustered ?: false
 
 		var scheduler = this
 		var handle = {
@@ -88,6 +100,7 @@ class {
 			name: jobName,
 			callback: callback,
 			allowOverlap: allowOverlap,
+			clustered: clustered,
 			handle: handle,
 			runningFlag: createObject( "java", "java.util.concurrent.atomic.AtomicBoolean" ).init( false )
 		}
@@ -121,6 +134,18 @@ class {
 		var job = variables.jobs[ jobId ] ?: javacast( "null", "" )
 		if ( isNull( job ) ) {
 			return   // cancelled between the tick firing and this running
+		}
+
+		// Clustered jobs only ever run on the elected manager — see
+		// plans/cluster-support.md's "Consumer 2: Scheduler leader
+		// election". A non-leader node does zero work for this tick: it
+		// never touches the overlap AtomicBoolean below, never submits
+		// anything to taskExecutor. If this Scheduler was never handed an
+		// app (a test/script using `new Scheduler(settings)` directly) or
+		// clustering was never configured on it, isManager() is a no-op
+		// that's always true — same behavior as an unclustered job.
+		if ( job.clustered && !isNull( variables.app ) && !variables.app.getClusterManager().isManager() ) {
+			return
 		}
 
 		if ( !job.allowOverlap && !job.runningFlag.compareAndSet( false, true ) ) {
@@ -174,6 +199,7 @@ class {
 			result[ jobId ] = {
 				name: job.name,
 				allowOverlap: job.allowOverlap,
+				clustered: job.clustered,
 				running: job.runningFlag.get()
 			}
 		}

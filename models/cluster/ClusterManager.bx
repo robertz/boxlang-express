@@ -1,0 +1,441 @@
+/**
+ * Cross-process peer discovery and manager election for a BoxExpress app,
+ * backed by a durable, shared cache() — see plans/cluster-support.md for
+ * the full design. One instance per app, lazily created via
+ * app.getClusterManager(), shared by both consumers this exists for:
+ * Scheduler.bx's leader election (getManagerNode()/isManager(), below)
+ * and Stomp.bx's cluster relay (openRelay()/relay(), below — a full mesh
+ * of pairwise WebSocket links: this instance connects outbound to every
+ * live peer via ClusterPeer.bx, while incoming connections from peers
+ * arrive at this app's own app.ws("/__cluster") route, registered by
+ * openRelay() the first time a Stomp broker asks for clustering).
+ *
+ * Peer discovery deliberately doesn't mirror SocketBox's ClusterManager.cfc
+ * exactly: SocketBox maintains an explicit delimited-list-of-peer-names
+ * value in cache, updated via read-modify-write-with-retry, because a
+ * generic CFML cache provider only ever offers get/set/clear. BoxLang's
+ * cache() returns a real ICacheProvider with getKeys() — confirmed
+ * directly — so each node only ever writes its OWN heartbeat key
+ * ("boxexpress-cluster-peer-<name>"); discovery just scans for keys with
+ * that prefix. No shared list to race on, no retry loop needed for
+ * registration at all.
+ *
+ * enabled: false (the module default, see ModuleConfig.bx) makes every
+ * method here a no-op that behaves exactly like no clustering was ever
+ * configured — isManager() always true, no cache reads/writes, no
+ * scheduled reconciliation job. An app that never opts in pays nothing.
+ */
+class {
+
+	variables.PEER_KEY_PREFIX = "boxexpress-cluster-peer-";
+	variables.MANAGER_KEY = "boxexpress-cluster-manager";
+
+	function init( app, appSettings = {} ) {
+		variables.app = app
+		variables.config = _resolveConfig( appSettings )
+		variables.myPeerName = variables.config.name
+		variables.peerIdleTimeoutSeconds = variables.config.peerIdleTimeoutSeconds
+		variables.reconcileJob = javacast( "null", "" )
+
+		variables.relayOpened = false
+		variables.relayMessageHandler = javacast( "null", "" )
+		variables.peerConnections = {}   // peerName -> ClusterPeer, outbound only
+
+		if ( variables.config.enabled ) {
+			_validateConfig()
+			_heartbeat()
+			// Runs on every instance, unconditionally — never clustered
+			// itself, or peer discovery would stop working the moment
+			// there's more than one node (see plans/cluster-support.md's
+			// "Open questions" on this exact point). Also reconciles the
+			// peer connection mesh once openRelay() has been called.
+			variables.reconcileJob = variables.app.schedule(
+				max( 5000, int( variables.peerIdleTimeoutSeconds * 1000 / 3 ) ),
+				function( job ) {
+					_heartbeat()
+					if ( variables.relayOpened ) {
+						_reconcilePeerConnections()
+					}
+				},
+				{ name: "cluster-peer-heartbeat" }
+			)
+		}
+
+		return this
+	}
+
+	/**
+	 * Opens this instance's side of the STOMP relay mesh — called once by
+	 * Stomp.bx when constructed with { cluster: <this ClusterManager> }.
+	 * A no-op if clustering isn't enabled (same posture as every other
+	 * method here) or if already opened (idempotent — a Stomp broker that
+	 * somehow calls this twice doesn't register the route twice).
+	 *
+	 * messageHandler(destination, body, headers, originPeer) runs for
+	 * every relay envelope received from a peer, on this app's own
+	 * app.ws("/__cluster") route — Stomp.bx wires this straight into its
+	 * existing _deliver(), so a relayed message goes through the exact
+	 * same subscriber fan-out / exchange routing / listener path a real
+	 * client's own SEND does, no parallel delivery logic to maintain.
+	 */
+	function openRelay( messageHandler ) {
+		if ( !variables.config.enabled || variables.relayOpened ) {
+			return
+		}
+		variables.relayOpened = true
+		variables.relayMessageHandler = messageHandler
+
+		variables.app.ws( "/__cluster", function( connection ) {
+			if ( len( variables.config.secretKey ) && connection.get( "x-boxexpress-cluster-secret" ) != variables.config.secretKey ) {
+				connection.close()
+				return
+			}
+			connection.onMessage( function( text ) {
+				_handleRelayEnvelope( text )
+			} )
+		} )
+
+		_reconcilePeerConnections()
+	}
+
+	function _handleRelayEnvelope( text ) {
+		var envelope = JSONDeserialize( text )
+		variables.relayMessageHandler( envelope.destination, envelope.body, envelope.headers, envelope.originPeer )
+	}
+
+	/**
+	 * Sends a relay envelope to every currently-connected peer. Stomp.bx
+	 * decides whether a given message should be relayed at all (a message
+	 * that itself arrived from a peer is never relayed back out — see
+	 * plans/cluster-support.md's loop-guard section) — this method is
+	 * deliberately unconditional "send to everyone I'm connected to,"
+	 * fire-and-forget, matching stomp.send()'s own no-persistence stance.
+	 */
+	function relay( destination, body, headers ) {
+		if ( !variables.relayOpened ) {
+			return
+		}
+		var envelope = JSONSerialize( {
+			destination: destination,
+			body: body,
+			headers: headers,
+			originPeer: variables.myPeerName
+		} )
+		for ( var peerName in structCopy( variables.peerConnections ) ) {
+			try {
+				variables.peerConnections[ peerName ].sendText( envelope )
+			} catch ( any e ) {
+				println( "[ClusterManager] relay to '" & peerName & "' failed: " & e.message )
+			}
+		}
+	}
+
+	/**
+	 * Reconciles the outbound peer-connection mesh against the current
+	 * live peer list — connects to any live peer not yet connected, drops
+	 * any connection whose peer is no longer live or whose socket died.
+	 * structCopy(), not duplicate(), when snapshotting for iteration —
+	 * this struct holds live ClusterPeer instances wrapping raw Java
+	 * WebSocket references, the same shape Stomp.bx's own
+	 * _deliverToDestination() already has to work around for the same
+	 * reason (see its docblock).
+	 */
+	function _reconcilePeerConnections() {
+		var livePeers = getPeers()
+
+		for ( var peerName in structCopy( variables.peerConnections ) ) {
+			var peer = variables.peerConnections[ peerName ]
+			if ( !livePeers.contains( peerName ) || !peer.isConnectionOpen() ) {
+				peer.close()
+				structDelete( variables.peerConnections, peerName )
+			}
+		}
+
+		for ( var peerName in livePeers ) {
+			if ( !structKeyExists( variables.peerConnections, peerName ) ) {
+				_connectToPeer( peerName )
+			}
+		}
+	}
+
+	function _connectToPeer( peerName ) {
+		try {
+			var peer = new ClusterPeer( peerName, variables.config.secretKey )
+			peer.connect()
+			variables.peerConnections[ peerName ] = peer
+		} catch ( any e ) {
+			// A peer that's down or unreachable right now is expected,
+			// routine — the next reconciliation tick tries again, same
+			// posture as ClusterManager.cfc's own addPeer() error
+			// handling (timeout/unresolved-host/connect-refused are all
+			// just logged, never left to break the reconciliation loop
+			// for every other peer).
+			println( "[ClusterManager] failed to connect to peer '" & peerName & "': " & e.message )
+		}
+	}
+
+	/**
+	 * Module default (ModuleConfig.bx's configure(), reachable via
+	 * getModuleInfo() even when this module was never registered through
+	 * BoxLang's module service — see the catch below) < explicit
+	 * appSettings.cluster, i.e. whatever app.set("cluster", {...}) stored.
+	 * Same precedence idiom as app.locals < res.locals < render() data.
+	 */
+	function _resolveConfig( appSettings ) {
+		var resolved = {
+			enabled: false,
+			name: "",
+			cacheProvider: "",
+			allowedObjectStores: [],
+			secretKey: "",
+			peerIdleTimeoutSeconds: 30
+		}
+
+		try {
+			var moduleInfo = getModuleInfo( "boxexpress" )
+			if ( structKeyExists( moduleInfo, "settings" ) && structKeyExists( moduleInfo.settings, "cluster" ) ) {
+				structAppend( resolved, moduleInfo.settings.cluster, true )
+			}
+		} catch ( any e ) {
+			// getModuleInfo() throwing (or the module never having been
+			// registered — this project's own tests/examples construct
+			// BoxExpress via a relative-path `new`, which never goes
+			// through BoxLang's module service at all) just means there's
+			// no module-level default to merge in. Not an error — fall
+			// through to the hardcoded defaults above plus whatever
+			// appSettings.cluster provides below.
+		}
+
+		var explicitOverride = appSettings.cluster ?: {}
+		structAppend( resolved, explicitOverride, true )
+
+		return resolved
+	}
+
+	/**
+	 * Loud failure at startup, matching boxExpressCsrf()'s posture when
+	 * req.session isn't set up — a misconfigured cluster should be a
+	 * startup error, not a cluster that silently never finds a peer.
+	 */
+	function _validateConfig() {
+		if ( !len( trim( variables.config.cacheProvider ) ) ) {
+			throw(
+				type: "BoxExpress.ClusterConfigError",
+				message: "cluster.cacheProvider is required when cluster.enabled is true. Set it via boxlang.json's modules.boxexpress.settings.cluster, or app.set( 'cluster', { cacheProvider: '...' } )."
+			)
+		}
+		if ( !len( trim( variables.myPeerName ) ) ) {
+			throw(
+				type: "BoxExpress.ClusterConfigError",
+				message: "cluster.name is required when cluster.enabled is true — this instance needs its own peer identity."
+			)
+		}
+
+		var objectStore = cache( variables.config.cacheProvider ).getObjectStore()
+
+		// Primary check: BoxLang's own IObjectStore.isDistributed() — set
+		// true by every store that persists outside this one JVM
+		// (FileSystemStore, JDBCStore, confirmed directly by reading both
+		// their source), false by default (AbstractStore) for anything
+		// that doesn't override it. Generic and forward-compatible: a
+		// custom durable store gets this right automatically, with no
+		// list to maintain. allowedObjectStores stays as an explicit
+		// override on top — a named escape hatch for a store that
+		// reports isDistributed() == false but is known-fine anyway
+		// (or vice versa, to deliberately reject one that claims true).
+		var storeSimpleName = listLast( getMetadata( objectStore ).name, "." )
+		var isDurable = objectStore.isDistributed() || variables.config.allowedObjectStores.contains( storeSimpleName )
+
+		if ( !isDurable ) {
+			throw(
+				type: "BoxExpress.ClusterConfigError",
+				message: "cluster.cacheProvider '" & variables.config.cacheProvider & "' is backed by objectStore '" &
+					storeSimpleName & "', which reports isDistributed() == false and isn't listed in " &
+					"cluster.allowedObjectStores (" & arrayToList( variables.config.allowedObjectStores ) &
+					"). A non-durable/shared store (BoxLang's in-memory ConcurrentStore, most commonly) means " &
+					"every node only ever sees itself as a peer — see plans/cluster-support.md's " &
+					"'A durable cache is required' section."
+			)
+		}
+	}
+
+	function _cacheProvider() {
+		return cache( variables.config.cacheProvider )
+	}
+
+	/**
+	 * Keyed on a hash of the peer name, not the name itself — confirmed
+	 * directly (2026-09-09) that a peer name shaped like this project's
+	 * own documented cluster.name examples ("ws://10.0.1.4:3000") breaks
+	 * FileSystemStore, which uses the cache key as a literal filename:
+	 * the "/" in "ws://..." gets read as a path separator, so the key
+	 * resolves to a nonexistent nested "directory" and every read/write
+	 * fails. hash() is deterministic (same name always maps to the same
+	 * key, so a restarting node overwrites its own old entry rather than
+	 * accumulating stale ones) and safe as a key/filename against every
+	 * object store, not just the ones without character restrictions.
+	 * The real name travels in the cached *value* instead, where it has
+	 * no such constraint.
+	 */
+	function _peerKey( peerName ) {
+		return variables.PEER_KEY_PREFIX & hash( peerName, "MD5" )
+	}
+
+	function getEpochSeconds() {
+		return int( createObject( "java", "java.lang.System" ).currentTimeMillis() / 1000 )
+	}
+
+	/**
+	 * Writes this instance's own liveness under its own key — never a
+	 * read-modify-write against shared state, so there's nothing here to
+	 * race with another node doing the same thing for its own key.
+	 */
+	function _heartbeat() {
+		_cacheProvider().set(
+			_peerKey( variables.myPeerName ),
+			{ name: variables.myPeerName, heartbeat: getEpochSeconds() },
+			variables.peerIdleTimeoutSeconds * 3
+		)
+	}
+
+	/**
+	 * Every currently-live peer other than this instance — a peer is live
+	 * if its own heartbeat entry exists and was written within
+	 * peerIdleTimeoutSeconds. Scans by key prefix rather than maintaining
+	 * an explicit list (see this class's own docblock for why).
+	 */
+	function getPeers() {
+		if ( !variables.config.enabled ) {
+			return []
+		}
+
+		var provider = _cacheProvider()
+		var prefixLen = len( variables.PEER_KEY_PREFIX )
+		var nowSeconds = getEpochSeconds()
+		var peers = []
+
+		for ( var key in provider.getKeys() ) {
+			if ( left( key, prefixLen ) != variables.PEER_KEY_PREFIX ) {
+				continue
+			}
+			try {
+				var entryResult = provider.get( key )
+				if ( !entryResult.isPresent() ) {
+					continue
+				}
+				var entry = entryResult.get()
+				if ( entry.name == variables.myPeerName ) {
+					continue
+				}
+				if ( ( nowSeconds - entry.heartbeat ) <= variables.peerIdleTimeoutSeconds ) {
+					peers.append( entry.name )
+				}
+			} catch ( any e ) {
+				// A store like FileSystemStore can throw a transient read
+				// error under genuinely concurrent access to the same key
+				// from more than one node/thread at once — confirmed
+				// directly under a same-process multi-instance test
+				// hammering this far harder than real, network-latency-
+				// separated nodes would. Skip this one key for this pass
+				// rather than aborting the whole scan — the next
+				// heartbeat tick tries again.
+				println( "[ClusterManager] transient error reading peer key, skipping this pass: " & e.message )
+			}
+		}
+
+		return peers
+	}
+
+	/**
+	 * The full cluster member list from this instance's own point of
+	 * view — every live peer plus this instance's own name. getPeers()
+	 * deliberately excludes the caller (see its own docblock); this is
+	 * the "who's actually in the cluster, including me" view a status
+	 * endpoint or dashboard wants instead.
+	 */
+	function getClusterMembers() {
+		var members = getPeers()
+		members.append( variables.myPeerName )
+		return members
+	}
+
+	/**
+	 * Best-effort, racy by construction (cache().set() is a plain
+	 * overwrite, no compare-and-set — see plans/cluster-support.md's
+	 * "shared primitive" section) but self-correcting: every node
+	 * re-checks on its own next call, and a stale claim gets overwritten
+	 * once its writer's heartbeat expires. Mirrors ClusterManager.cfc's
+	 * getManagerNode() exactly.
+	 */
+	function getManagerNode() {
+		if ( !variables.config.enabled ) {
+			return variables.myPeerName
+		}
+
+		try {
+			var provider = _cacheProvider()
+			var currentManagerResult = provider.get( variables.MANAGER_KEY )
+			var currentManager = currentManagerResult.isPresent() ? currentManagerResult.get() : ""
+			var managerIsLive = len( currentManager ) &&
+				( currentManager == variables.myPeerName || getPeers().contains( currentManager ) )
+
+			if ( !managerIsLive ) {
+				provider.set( variables.MANAGER_KEY, variables.myPeerName, variables.peerIdleTimeoutSeconds * 3 )
+				return variables.myPeerName
+			}
+
+			return currentManager
+		} catch ( any e ) {
+			// Same transient-store-error concern as getPeers() above,
+			// against the one key every instance in the cluster reads
+			// and writes. Fail safe: a transient error here must never
+			// read as "I'm definitely the manager" — that's exactly the
+			// scenario a clustered job's double-run guarantee depends on
+			// not happening. Returning "" guarantees
+			// isManager()'s `getManagerNode() == myPeerName` comes back
+			// false (myPeerName is validated non-empty at construction),
+			// so the worst case is a clustered job skips one tick, not a
+			// mistaken election.
+			println( "[ClusterManager] transient error reading/writing the manager key, treating as not-manager this round: " & e.message )
+			return ""
+		}
+	}
+
+	/**
+	 * true when clustering isn't configured at all — the deliberate
+	 * no-op that makes an unclustered job (or an app that never called
+	 * app.getClusterManager() with intent) behave exactly like today:
+	 * every instance runs everything.
+	 */
+	function isManager() {
+		if ( !variables.config.enabled ) {
+			return true
+		}
+		return getManagerNode() == variables.myPeerName
+	}
+
+	function isEnabled() {
+		return variables.config.enabled
+	}
+
+	function getMyPeerName() {
+		return variables.myPeerName
+	}
+
+	/**
+	 * Cancels the peer-heartbeat job. Called from BoxExpress.close(), the
+	 * same teardown block that already stops the Scheduler and reload
+	 * watcher.
+	 */
+	function shutdown() {
+		if ( !isNull( variables.reconcileJob ) ) {
+			variables.reconcileJob.cancel()
+			variables.reconcileJob = javacast( "null", "" )
+		}
+		for ( var peerName in structCopy( variables.peerConnections ) ) {
+			variables.peerConnections[ peerName ].close()
+		}
+		variables.peerConnections = {}
+	}
+
+}
