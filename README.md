@@ -150,6 +150,9 @@ which matters for a repo whose own scripts live in subdirectories
 - `app.schedule(intervalMs, callback, options)` / `app.getScheduledJobs()`
   — fixed-interval recurring jobs; see [Scheduler](#scheduler-appschedule)
   below.
+- `app.getClusterManager()` — cross-process peer discovery, manager
+  election, and the STOMP relay mesh; see [Cluster
+  support](#cluster-support-appgetclustermanager) below.
 
 Node keeps a CLI process alive via its event loop; BoxLang's CLI runtime has
 no equivalent, so unlike Express, `listen()` blocks the calling thread by
@@ -463,18 +466,20 @@ full API (`getCommand()`/`getBody()`/`getBodyRaw()`/`getHeaders()`/
 `getHeader()`/`getConnection()`).
 
 This is a real, if intentionally smaller, first version — not the whole
-STOMP ecosystem some brokers support. Deliberately not built:
-**multi-node clustering** (SocketBox's `ClusterManager`/`ClusterPeer` —
-peer WebSocket connections between server processes, cache-backed peer
-discovery — a distributed-systems feature this project has no cache-
-abstraction or multi-node deployment story to build against yet) and
+STOMP ecosystem some brokers support. Multi-node clustering (relaying a
+publish to every other process in the cluster, not just local
+subscribers) is now built — see [Cluster
+support](#cluster-support-appgetclustermanager) below,
+`options.cluster` on `boxExpressStomp()`. Still deliberately not built:
 **binary bodies** (the underlying WebSocket transport here only carries
 text frames, so this is a hard limit of the transport, not a broker
 choice — `content-length` is honored on read/write so a body containing
 an embedded NUL byte still round-trips correctly, but genuinely binary
-octets can't). Destination matching (both the subscriber registry and
-exchange bindings) is exact-string only — `/topic/a` and `/topic/a/` are
-different destinations.
+octets can't) and **general peer-to-peer RPC between cluster nodes**
+(the relay only ever carries a STOMP publish, not arbitrary request/
+response messaging). Destination matching (both the subscriber registry
+and exchange bindings) is exact-string only — `/topic/a` and `/topic/a/`
+are different destinations.
 
 Header values are escaped per the STOMP spec (backslash, newline, colon),
 not just stripped — a destination or login value built from
@@ -534,13 +539,92 @@ build app logic against. `app.close()` cancels every job and shuts the
 scheduler down, the same teardown block that already stops the reload
 watcher and the HTTP server.
 
-Explicit non-goals for this first version: **no cron-expression
-parsing** (fixed-interval only), **no persistence across restarts**
-(in-memory only, single process — a restart forgets every scheduled
-job), **no missed-run catch-up** after downtime, and **no clustering/
-distributed coordination** — an app running multiple instances behind a
-load balancer gets the same job firing once *per instance*, not once
-total. See [Scheduler.bx](models/Scheduler.bx).
+`options.clustered` (default `false`) makes a job cluster-aware — see
+[Cluster support](#cluster-support-appgetclustermanager) just below —
+running on exactly one elected instance instead of every instance
+independently. Explicit non-goals for this first version: **no
+cron-expression parsing** (fixed-interval only), **no persistence
+across restarts** (in-memory only, single process — a restart forgets
+every scheduled job), and **no missed-run catch-up** after downtime.
+See [Scheduler.bx](models/Scheduler.bx).
+
+### Cluster support (`app.getClusterManager`)
+
+`app.getClusterManager()` lazily builds one shared `ClusterManager` for
+the app — cross-process peer discovery and manager election, backed by
+a durable, shared `cache()`, so instances never need to know each
+other's addresses in advance: each one registers its own identity and
+reads everyone else's back from the same cache. Two independent
+consumers are built on top of it:
+
+- **`app.schedule(intervalMs, callback, { clustered: true })`** — see
+  [Scheduler](#scheduler-appschedule) above. Only the elected instance
+  actually runs a clustered job's tick; every other instance does
+  nothing for it, not even the overlap bookkeeping a normal job gets.
+  Failover is passive: if the elected instance goes down, the next
+  instance to check discovers its heartbeat has gone stale and promotes
+  itself, within roughly one heartbeat cycle.
+- **`boxExpressStomp({ cluster: app.getClusterManager() })`** — see
+  [STOMP](#stomp-boxexpressstomp--stomp) above. Opens a mesh of
+  outbound WebSocket connections to every live peer; a `SEND`/
+  `stomp.send()` that would otherwise only reach local subscribers is
+  also relayed to every other instance, which delivers it to *its own*
+  local subscribers through the exact same subscriber/exchange/listener
+  path a real client's `SEND` uses. A message that arrives via the
+  relay is never relayed back out, so it can't loop.
+
+An app that never opts in (`cluster.enabled` stays `false`, the
+default) pays nothing for any of this — every method on
+`ClusterManager` becomes a no-op that matches today's unclustered
+behavior exactly (a clustered job runs on every instance, same as an
+unclustered one).
+
+**Configuration**, in increasing precedence — module default (this
+module ships with clustering off) → `boxlang.json` → `app.set("cluster",
+{...})`:
+
+```json
+{
+	"modules": {
+		"boxexpress": {
+			"settings": {
+				"cluster": {
+					"enabled": true,
+					"name": "ws://10.0.1.4:3000",
+					"cacheProvider": "clusterPeers",
+					"secretKey": "${env.CLUSTER_SECRET}"
+				}
+			}
+		}
+	}
+}
+```
+
+`cacheProvider` is required once `enabled` is `true`, and must name a
+cache backed by a genuinely durable/shared object store — validated at
+startup via BoxLang's own `IObjectStore.isDistributed()` (true for
+`JDBCStore`, false for the in-memory `ConcurrentStore` default), not
+just documented as a footgun. A store that reports `isDistributed() ==
+false` can still be allowed explicitly via `allowedObjectStores`.
+`secretKey`, if set, gates the relay mesh's `/__cluster` endpoint —
+every instance must share the same value, sourced from an environment
+variable, never a literal in source. `peerIdleTimeoutSeconds` (default
+`30`) controls how long a missed heartbeat is tolerated before a peer
+is considered gone.
+
+`app.getClusterManager().getClusterMembers()` returns every live peer
+plus this instance's own name — the "who's actually in the cluster"
+view for a status endpoint or dashboard.
+
+Explicit non-goals for this first version: **no per-job leader
+affinity** (one elected instance runs *every* clustered job in the
+app, not different jobs on different instances), **no general
+peer-to-peer RPC** (the relay only ever carries a STOMP publish), and
+**no binary relay payloads** (the envelope is JSON text, matching
+STOMP's own transport limits here). See
+[ClusterManager.bx](models/cluster/ClusterManager.bx) and
+[plans/cluster-support.md](plans/cluster-support.md) for the full
+design.
 
 ### Router (mountable sub-app)
 
@@ -1413,6 +1497,35 @@ Two more BoxLang-specific things that shaped how these are written:
   rather than `../fixtures/...`.
 
 ## Changelog
+
+**0.2.9**
+- Added `app.getClusterManager()` — cross-process peer discovery and
+  manager election backed by a durable, shared `cache()`, so instances
+  never need to know each other's addresses in advance. Two consumers
+  built on top of it: `app.schedule(intervalMs, callback, { clustered:
+  true })` (only the elected instance runs the tick, with passive
+  failover on a missed heartbeat) and `boxExpressStomp({ cluster:
+  app.getClusterManager() })` (relays a publish to every other instance
+  over a mesh of outbound WebSocket connections, delivered through each
+  instance's own subscriber/exchange/listener path — a message that
+  arrived via the relay is never relayed back out). Configured via
+  `boxlang.json`'s `modules.boxexpress.settings.cluster` (module
+  default: off) or `app.set("cluster", {...})`. `cacheProvider` is
+  required once enabled, and is validated at startup against BoxLang's
+  own `IObjectStore.isDistributed()` — the in-memory default cache is
+  rejected outright rather than silently leaving every instance unable
+  to see any peer, the same durability requirement
+  `boxExpressCacheStore()` already has for sessions. Verified first
+  across real separate `boxlang` OS processes (including a live
+  leader-kill failover and a cross-process STOMP relay), then written
+  up as [tests/specs/ClusterManagerSpec.bx](tests/specs/ClusterManagerSpec.bx),
+  [ClusterSchedulerSpec.bx](tests/specs/ClusterSchedulerSpec.bx), and
+  [ClusterStompRelaySpec.bx](tests/specs/ClusterStompRelaySpec.bx).
+  Deliberately not built: per-job leader affinity (one elected instance
+  runs every clustered job, not different jobs on different instances),
+  general peer-to-peer RPC, and binary relay payloads. See
+  [ClusterManager.bx](models/cluster/ClusterManager.bx) and
+  [plans/cluster-support.md](plans/cluster-support.md).
 
 **0.2.8**
 - Added `app.schedule(intervalMs, callback, options)` / `Scheduler.bx` —
