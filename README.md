@@ -466,20 +466,18 @@ full API (`getCommand()`/`getBody()`/`getBodyRaw()`/`getHeaders()`/
 `getHeader()`/`getConnection()`).
 
 This is a real, if intentionally smaller, first version — not the whole
-STOMP ecosystem some brokers support. Multi-node clustering (relaying a
-publish to every other process in the cluster, not just local
-subscribers) is now built — see [Cluster
-support](#cluster-support-appgetclustermanager) below,
-`options.cluster` on `boxExpressStomp()`. Still deliberately not built:
-**binary bodies** (the underlying WebSocket transport here only carries
-text frames, so this is a hard limit of the transport, not a broker
-choice — `content-length` is honored on read/write so a body containing
-an embedded NUL byte still round-trips correctly, but genuinely binary
-octets can't) and **general peer-to-peer RPC between cluster nodes**
-(the relay only ever carries a STOMP publish, not arbitrary request/
-response messaging). Destination matching (both the subscriber registry
-and exchange bindings) is exact-string only — `/topic/a` and `/topic/a/`
+STOMP ecosystem some brokers support. Deliberately not built: **binary
+bodies** (the underlying WebSocket transport here only carries text
+frames, so this is a hard limit of the transport, not a broker choice —
+`content-length` is honored on read/write so a body containing an
+embedded NUL byte still round-trips correctly, but genuinely binary
+octets can't). Destination matching (both the subscriber registry and
+exchange bindings) is exact-string only — `/topic/a` and `/topic/a/`
 are different destinations.
+
+To relay a publish to every other process in a cluster instead of just
+this one's local subscribers, see `options.cluster` under [Cluster
+support](#cluster-support-appgetclustermanager) below.
 
 Header values are escaped per the STOMP spec (backslash, newline, colon),
 not just stripped — a destination or login value built from
@@ -539,14 +537,15 @@ build app logic against. `app.close()` cancels every job and shuts the
 scheduler down, the same teardown block that already stops the reload
 watcher and the HTTP server.
 
-`options.clustered` (default `false`) makes a job cluster-aware — see
-[Cluster support](#cluster-support-appgetclustermanager) just below —
-running on exactly one elected instance instead of every instance
-independently. Explicit non-goals for this first version: **no
-cron-expression parsing** (fixed-interval only), **no persistence
-across restarts** (in-memory only, single process — a restart forgets
-every scheduled job), and **no missed-run catch-up** after downtime.
-See [Scheduler.bx](models/Scheduler.bx).
+Explicit non-goals for this first version: **no cron-expression
+parsing** (fixed-interval only), **no persistence across restarts**
+(in-memory only, single process — a restart forgets every scheduled
+job), and **no missed-run catch-up** after downtime. See
+[Scheduler.bx](models/Scheduler.bx).
+
+To run a job exactly once across a cluster of instances instead of once
+per instance, see `options.clustered` under [Cluster
+support](#cluster-support-appgetclustermanager) below.
 
 ### Cluster support (`app.getClusterManager`)
 
