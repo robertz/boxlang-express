@@ -38,7 +38,8 @@ import io.undertow.websockets.core.WebSocketChannel;
  * dispatch) closes over plain, unlocked BoxLang structs — mySubscriptions,
  * activeTransactions, the connected/login flags — that assume frames from
  * ONE connection are handled one at a time, in the order they arrived, the
- * same assumption STOMP's own transaction semantics (BEGIN/SEND*/COMMIT)
+ * same assumption STOMP's own transaction semantics (BEGIN, one or more
+ * SENDs, then COMMIT)
  * depend on. A client sending several frames in a burst (rapid-fire
  * SUBSCRIBE+SEND, or several SENDs inside one transaction) could have them
  * picked up by different concurrent virtual threads and processed out of

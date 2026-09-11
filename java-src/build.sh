@@ -11,7 +11,7 @@ BUILD_DIR="java-src/build"
 rm -rf "$BUILD_DIR"
 mkdir -p "$BUILD_DIR"
 
-javac -cp "libs/undertow-core-2.4.2.Final.jar:libs/xnio-api-3.8.16.Final.jar" \
+javac -encoding UTF-8 -cp "libs/undertow-core-2.4.3.Final.jar:libs/xnio-api-3.8.16.Final.jar" \
 	-d "$BUILD_DIR" \
 	java-src/boxexpress/ws/*.java
 
