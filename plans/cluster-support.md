@@ -179,7 +179,7 @@ a default.
   posture `boxExpressCsrf()` already takes when `req.session` isn't set up
   (see the main README's CSRF section), rather than a cluster that silently
   never discovers any peers.
-- **The in-memory-cache footgun *is* validatable — confirmed directly
+- **The in-memory-cache trap *is* validatable — confirmed directly
   (2026-09-09), correcting an earlier draft of this doc that assumed
   otherwise.** `cache(cacheProvider).getConfig().properties.objectStore`
   (equally, `cache(cacheProvider).getObjectStore()`'s Java class name)
@@ -190,8 +190,8 @@ a default.
   `cluster.allowedObjectStores` (default `["JDBCStore"]`) and throws if
   `cacheProvider` resolves to anything not on that list, instead of only
   documenting the risk. This turns "each node silently only ever sees
-  itself" from an undetectable footgun into a startup error pointing
-  straight at the misconfigured `boxlang.json`.
+  itself" from an undetectable silent-failure mode into a startup error
+  pointing straight at the misconfigured `boxlang.json`.
 - **The allow-list is deliberately about trust, not capability.**
   `cache()` itself is already fully pluggable — any `IObjectStore`
   implementation works through the same `BoxCacheProvider` interface
@@ -456,7 +456,7 @@ project once in a similar shape:
   `ClusterManager.bx`.** It calls the `cache()` BIF constantly
   (`cache(cacheProvider).set(...)`, the durable-store check, etc.) — a
   same-named local would shadow the BIF silently rather than erroring,
-  the same class of footgun the main README's reserved-scope-names list
+  the same class of pitfall the main README's reserved-scope-names list
   documents for `server`/`session`/`request`/etc., just against a
   built-in function instead of a scope.
 - **`left()`/`right()` with a computed count of zero throws `"Count

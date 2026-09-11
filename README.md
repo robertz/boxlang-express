@@ -603,7 +603,7 @@ module ships with clustering off) → `boxlang.json` → `app.set("cluster",
 cache backed by a genuinely durable/shared object store — validated at
 startup via BoxLang's own `IObjectStore.isDistributed()` (true for
 `JDBCStore`, false for the in-memory `ConcurrentStore` default), not
-just documented as a footgun. A store that reports `isDistributed() ==
+just documented as a risk. A store that reports `isDistributed() ==
 false` can still be allowed explicitly via `allowedObjectStores`.
 `secretKey`, if set, gates the relay mesh's `/__cluster` endpoint —
 every instance must share the same value, sourced from an environment
