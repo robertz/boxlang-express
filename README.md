@@ -1497,6 +1497,23 @@ Two more BoxLang-specific things that shaped how these are written:
 
 ## Changelog
 
+**0.2.10**
+- **Security fix:** bumped the vendored `libs/undertow-core-*.jar` from
+  2.4.2.Final to 2.4.3.Final, fixing five CVEs — three on code paths
+  this project actually exercises: `CVE-2026-15565` (unauthenticated OOM
+  DoS on any WebSocket endpoint with an `@OnMessage` handler),
+  `CVE-2026-5680` (OOM DoS via WebSocket `permessage-deflate`
+  exponential buffer growth), and `CVE-2026-15561` (missing size/count
+  limits on HTTP/1.1 chunked-transfer decoding, unauthenticated OOM
+  DoS). Also fixed: `CVE-2026-14180` (a crafted chunk size overlapping
+  `ChunkReader`'s own state-flag storage, enabling request smuggling).
+  `CVE-2026-15554` (a forged-certificate bypass in Undertow's AJP
+  listener) doesn't apply here — this project never uses Undertow's AJP
+  listener, only its core HTTP/WebSocket server. New jar's SHA-1
+  verified directly against Maven Central's own published checksum
+  before vendoring it. `libs/boxexpress-ws-shim-1.0.0.jar` rebuilt
+  against the new jar. Full test suite: 268/268.
+
 **0.2.9**
 - Added `app.getClusterManager()` — cross-process peer discovery and
   manager election backed by a durable, shared `cache()`, so instances
