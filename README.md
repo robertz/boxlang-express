@@ -1497,6 +1497,14 @@ Two more BoxLang-specific things that shaped how these are written:
 
 ## Changelog
 
+**0.2.11**
+- Bumped the `testbox` devDependency range to `^7.1.0+20` and adopted its
+  new assertion features (`assertAll()`, `toBeSameInstanceAs()`,
+  `toIncludeAll()`, `withContext()`) in the cluster support test specs —
+  grouped failure reporting and labeled context for the timing-sensitive
+  assertions that were hardest to debug while building that feature. No
+  production code changes; full suite: 268/268.
+
 **0.2.10**
 - **Security fix:** bumped the vendored `libs/undertow-core-*.jar` from
   2.4.2.Final to 2.4.3.Final, fixing five CVEs — three on code paths
