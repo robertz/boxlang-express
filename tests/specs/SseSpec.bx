@@ -229,12 +229,21 @@ class extends="testbox.system.BaseSpec" {
 
 				expect( dataLines.len() ).toBe( 125 )
 
+				// assertAll() (TestBox 7.1+) instead of asserting inline per line —
+				// a torn/interleaved write from ONE thread shouldn't hide corruption
+				// from the other four; this reports every bad line in one run.
 				var seen = {}
+				var checks = []
 				for ( var dataLine in dataLines ) {
-					expect( reFind( "^writer-\d+-msg-\d+$", dataLine ) ).toBeTrue( "malformed/interleaved line: #dataLine#" )
-					expect( structKeyExists( seen, dataLine ) ).toBeFalse( "duplicate line (a torn write got double-counted): #dataLine#" )
-					seen[ dataLine ] = true
+					checks.append( ( function( line ) {
+						return function() {
+							expect( reFind( "^writer-\d+-msg-\d+$", line ) ).toBeTrue( "malformed/interleaved line: #line#" )
+							expect( structKeyExists( seen, line ) ).toBeFalse( "duplicate line (a torn write got double-counted): #line#" )
+							seen[ line ] = true
+						}
+					} )( dataLine ) )
 				}
+				assertAll( checks, "SSE concurrent-write interleaving" )
 			} )
 
 		} )

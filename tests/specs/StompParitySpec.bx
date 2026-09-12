@@ -200,26 +200,16 @@ class extends="testbox.system.BaseSpec" {
 				variables.codec.parse( client.readTextFrame() )
 				sleep( 100 )
 
-				var connections = variables.metaStomp.getConnections()
-				var found = false
-				for ( var connectionId in connections ) {
-					if ( connections[ connectionId ].login == "admin" ) {
-						found = true
-						expect( connections[ connectionId ].connectionMetadata.role ).toBe( "admin" )
-					}
-				}
-				expect( found ).toBeTrue()
+				expectAny( variables.metaStomp.getConnections() ).toSatisfy( function( c ) {
+					return c.login == "admin" && c.connectionMetadata.role == "admin"
+				} )
 
 				client.close()
 				sleep( 200 )
 
-				var stillFound = false
-				for ( var connectionId in variables.metaStomp.getConnections() ) {
-					if ( variables.metaStomp.getConnections()[ connectionId ].login == "admin" ) {
-						stillFound = true
-					}
-				}
-				expect( stillFound ).toBeFalse()
+				expectNone( variables.metaStomp.getConnections() ).toSatisfy( function( c ) {
+					return c.login == "admin"
+				} )
 			} )
 
 			it( "connectionMetadata populated by authenticate() is visible to authorize()", function() {
