@@ -252,10 +252,14 @@ class extends="testbox.system.BaseSpec" {
 				cm2.relay( "news", "hello-from-2", { "x-test": "1" } )
 
 				_waitUntil( () => received.len() > 0, 3000 )
-				expect( received.len() ).toBe( 1 )
-				expect( received[ 1 ].destination ).toBe( "news" )
-				expect( received[ 1 ].body ).toBe( "hello-from-2" )
-				expect( received[ 1 ].originPeer ).toBe( peer2 )
+				expect( received.len() ).withContext( "envelopes received on cm1's openRelay() handler" ).toBe( 1 )
+				// Three independent properties of the one envelope — grouped so a
+				// mismatch on one doesn't hide a mismatch on the others.
+				assertAll( [
+					() => expect( received[ 1 ].destination ).toBe( "news" ),
+					() => expect( received[ 1 ].body ).toBe( "hello-from-2" ),
+					() => expect( received[ 1 ].originPeer ).toBe( peer2 )
+				] )
 
 				cm1.shutdown()
 				cm2.shutdown()
@@ -344,18 +348,16 @@ class extends="testbox.system.BaseSpec" {
 				var httpClient = new "../helpers/HttpClient"()
 
 				var response1 = httpClient.get( "http://localhost:#port1#/cluster/members" )
-				expect( response1.statusCode ).toBe( 200 )
+				expect( response1.statusCode ).withContext( "GET /cluster/members on node1" ).toBe( 200 )
 				var members1 = JSONDeserialize( response1.body ).members
-				expect( members1 ).toHaveLength( 2 )
-				expect( members1 ).toInclude( peer1 )
-				expect( members1 ).toInclude( peer2 )
+				expect( members1 ).withContext( "node1's own view of the cluster member list" ).toHaveLength( 2 )
+				expect( members1 ).toIncludeAll( [ peer1, peer2 ] )
 
 				var response2 = httpClient.get( "http://localhost:#port2#/cluster/members" )
-				expect( response2.statusCode ).toBe( 200 )
+				expect( response2.statusCode ).withContext( "GET /cluster/members on node2" ).toBe( 200 )
 				var members2 = JSONDeserialize( response2.body ).members
-				expect( members2 ).toHaveLength( 2 )
-				expect( members2 ).toInclude( peer1 )
-				expect( members2 ).toInclude( peer2 )
+				expect( members2 ).withContext( "node2's own view of the cluster member list" ).toHaveLength( 2 )
+				expect( members2 ).toIncludeAll( [ peer1, peer2 ] )
 			} )
 
 		} )

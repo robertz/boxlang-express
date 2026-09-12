@@ -45,7 +45,10 @@ class extends="testbox.system.BaseSpec" {
 				variables.app = new "../../models/BoxExpress"()
 				var cm1 = variables.app.getClusterManager()
 				var cm2 = variables.app.getClusterManager()
-				expect( cm1 ).toBe( cm2 )
+				// toBeSameInstanceAs(), not toBe() — this asserts the exact same
+				// object reference came back both times, not just that the two
+				// happen to compare equal.
+				expect( cm1 ).toBeSameInstanceAs( cm2 )
 			} )
 
 			it( "defaults to disabled when the app never configures cluster settings", function() {
@@ -112,8 +115,8 @@ class extends="testbox.system.BaseSpec" {
 				}, { clustered: true, name: "clustered-job" } )
 
 				_waitUntil( () => ticksOnManager.get() >= 3, 1000 )
-				expect( ticksOnManager.get() ).toBeGTE( 3 )
-				expect( ticksOnNonManager.get() ).toBe( 0 )
+				expect( ticksOnManager.get() ).withContext( "elected-manager instance's own clustered-job tick count" ).toBeGTE( 3 )
+				expect( ticksOnNonManager.get() ).withContext( "non-manager instance must never run the clustered job" ).toBe( 0 )
 			} )
 
 			it( "still runs an unclustered job on every instance even when cluster is enabled", function() {
@@ -145,7 +148,7 @@ class extends="testbox.system.BaseSpec" {
 				}, { clustered: true, name: "failover-job" } )
 
 				sleep( 150 )
-				expect( survivorTicks.get() ).toBe( 0 )   // not manager yet — shouldn't have run
+				expect( survivorTicks.get() ).withContext( "survivor isn't manager yet — shouldn't have run" ).toBe( 0 )
 
 				managerApp.close()   // simulates a crashed leader — no graceful cache cleanup
 				if ( managerApp == variables.app1 ) {
@@ -156,7 +159,7 @@ class extends="testbox.system.BaseSpec" {
 
 				_waitUntil( () => survivorApp.getClusterManager().isManager(), 6000 )
 				_waitUntil( () => survivorTicks.get() >= 1, 1000 )
-				expect( survivorTicks.get() ).toBeGTE( 1 )
+				expect( survivorTicks.get() ).withContext( "survivor should be running the clustered job after failover" ).toBeGTE( 1 )
 			} )
 
 		} )

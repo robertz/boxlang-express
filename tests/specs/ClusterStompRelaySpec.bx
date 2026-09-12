@@ -140,7 +140,7 @@ class extends="testbox.system.BaseSpec" {
 				stomp1.send( "news", "hello-from-1" )
 
 				_waitUntil( () => received.len() > 0 )
-				expect( received ).toHaveLength( 1 )
+				expect( received ).withContext( "node2's listener deliveries via the cluster relay" ).toHaveLength( 1 )
 				expect( received[ 1 ] ).toBe( "hello-from-1" )
 			} )
 
@@ -174,11 +174,17 @@ class extends="testbox.system.BaseSpec" {
 				// asserting its absence.
 				sleep( 300 )
 
-				expect( node2Deliveries.get() ).toBe( 1 )
-				// node1 has its own local listener too (stomp.send() always
-				// delivers locally first) — exactly one delivery there as
-				// well, never two from a relayed echo.
-				expect( node1Deliveries.get() ).toBe( 1 )
+				// Grouped — node1's count matters just as much as node2's
+				// (a bounce-back loop would show up as node1 > 1), so a
+				// mismatch on either one should be visible, not just
+				// whichever assertion happens to run first.
+				assertAll( [
+					() => expect( node2Deliveries.get() ).withContext( "node2's relayed delivery count" ).toBe( 1 ),
+					// node1 has its own local listener too (stomp.send() always
+					// delivers locally first) — exactly one delivery there as
+					// well, never two from a relayed echo.
+					() => expect( node1Deliveries.get() ).withContext( "node1's local delivery count — >1 would mean the relay looped back" ).toBe( 1 )
+				] )
 			} )
 
 			it( "rejects a peer connection presenting a mismatched cluster secret", function() {
