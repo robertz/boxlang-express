@@ -264,7 +264,13 @@ somewhere shared to push to it from a completely different route later
 `send()`/`close()` are safe to call from another thread than the one that
 opened the connection, funneled through a per-connection lock so
 concurrent writers can't interleave and corrupt a frame — same fix, same
-reasoning as `SseEmitter`'s.
+reasoning as `SseEmitter`'s. `send()` bounds its underlying blocking
+write with a hard 5s timeout — a peer that vanishes mid-write (network
+drop, abrupt client close) can't hang the caller, or pin the lock out
+from under any other thread also trying to send on that connection, for
+longer than that. The `app.ws()` callback itself also runs on its own
+virtual thread rather than Undertow's shared I/O pool, so a connect
+handler that blocks can't stall other connections' handshakes.
 
 Path matching is exact only for now — no `:params`, no mounting under a
 `Router`. An upgrade request to a path with no registered `app.ws()`
@@ -536,6 +542,12 @@ job state (`name`, `allowOverlap`, `running`), not a stable data API to
 build app logic against. `app.close()` cancels every job and shuts the
 scheduler down, the same teardown block that already stops the reload
 watcher and the HTTP server.
+
+A job body that never returns at all (blocks forever with no timeout of
+its own) would otherwise leave that job's overlap flag stuck permanently,
+silently skipping every future tick — a watchdog forces the flag open
+again once a run has been "still active" for longer than 10x that job's
+own interval (30s floor), so one wedged run can't stall a job forever.
 
 Explicit non-goals for this first version: **no cron-expression
 parsing** (fixed-interval only), **no persistence across restarts**
@@ -1496,6 +1508,26 @@ Two more BoxLang-specific things that shaped how these are written:
   rather than `../fixtures/...`.
 
 ## Changelog
+
+**0.2.12**
+- **Bug fix:** a burst of WebSocket clients that connect and then vanish
+  mid-write could freeze the entire server, not just those connections —
+  root-caused via live reproduction and a thread dump. `app.ws()`'s
+  connect callback ran synchronously on Undertow's small, shared I/O
+  thread pool (unlike HTTP requests, which already get their own virtual
+  thread); a blocking send in that callback against a peer that vanished
+  could hang the I/O thread forever, and enough simultaneous zombies
+  pinned the whole pool. Fixed by dispatching `onConnect` onto its own
+  virtual thread and bounding `connection.send()`'s blocking write with a
+  hard 5s timeout. Also fixed a related `Scheduler` bug the same failure
+  mode exposed: a hung job body left its overlap flag stuck true forever
+  (silently skipping every future tick), and an uncaught exception from
+  `taskExecutor.submit()` itself (not just from a job's callback) could
+  silently cancel every future tick of that job — see [Scheduler
+  support](#scheduler-appschedule) above for the new watchdog. Verified
+  with three consecutive 20-connection burst-and-abandon attacks against
+  a live server (zero stalls, continuous ticking throughout, vs. a
+  permanent freeze before this fix) plus the full TestBox suite: 268/268.
 
 **0.2.11**
 - Bumped the `testbox` devDependency range to `^7.1.0+20` and adopted its
