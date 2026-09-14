@@ -102,7 +102,17 @@ class {
 			allowOverlap: allowOverlap,
 			clustered: clustered,
 			handle: handle,
-			runningFlag: createObject( "java", "java.util.concurrent.atomic.AtomicBoolean" ).init( false )
+			runningFlag: createObject( "java", "java.util.concurrent.atomic.AtomicBoolean" ).init( false ),
+			startedAt: 0,
+			// A job body that never returns (blocks forever on some call with
+			// no timeout of its own — the exact way a stalled WebSocket send
+			// has actually been observed to hang, see _runTick's watchdog
+			// below) would otherwise leave runningFlag stuck true forever,
+			// silently skipping every future tick permanently. Scaled off
+			// this job's own interval (so an hourly job isn't declared
+			// stuck after 30s of genuine work) with a floor so a
+			// sub-second job still gets a reasonable grace window.
+			stallThresholdMs: max( intervalMs * 10, 30000 )
 		}
 
 		var tickRunnable = createDynamicProxy(
@@ -149,31 +159,67 @@ class {
 		}
 
 		if ( !job.allowOverlap && !job.runningFlag.compareAndSet( false, true ) ) {
-			return   // previous run of this job hasn't finished yet — skip
+			// The previous run is still marked active. Normally that just
+			// means it's still working — skip this tick, same as always.
+			// But a run whose body never returns at all (proven to happen
+			// in practice: a WebSocket send blocking forever on a peer that
+			// vanished mid-write, with no timeout of its own — see
+			// WebSocketConnection.bx's send()) never reaches its own
+			// finally block below, so runningFlag would otherwise stay
+			// stuck true PERMANENTLY, silently skipping every future tick
+			// forever. A run that's been "still active" for longer than
+			// this job's own stall threshold is indistinguishable from one
+			// that's never coming back, so treat it the same way: force
+			// the flag open so the job isn't wedged forever. If the old
+			// run does eventually finish, its own finally still fires and
+			// harmlessly resets a flag that's already been reset.
+			var runningForMs = getTickCount() - job.startedAt
+			if ( runningForMs < job.stallThresholdMs ) {
+				return
+			}
+			println( "[Scheduler] job '" & job.name & "' has been running for " & runningForMs & "ms (stall threshold " & job.stallThresholdMs & "ms) — forcing it open so future ticks aren't blocked forever" )
+			job.runningFlag.set( true )
 		}
 		if ( job.allowOverlap ) {
 			job.runningFlag.set( true )
 		}
+		job.startedAt = getTickCount()
 
-		variables.taskExecutor.submit( createDynamicProxy(
-			new ThreadRunnable( function() {
-				try {
-					job.callback( job.handle )
-				} catch ( any e ) {
-					// Caught and logged, never left to kill future ticks —
-					// same posture as HttpBridge.bx's dispatch guard and
-					// Stomp.bx's server-side listener guard (see
-					// Stomp.bx's "listener for" log line). Unconditional,
-					// not gated behind app.set("log", false), matching
-					// both of those: that setting only quiets routine
-					// traffic logging, never an actual caught failure.
-					println( "[Scheduler] job '" & job.name & "' threw: " & e.message )
-				} finally {
-					job.runningFlag.set( false )
-				}
-			} ),
-			[ "java.lang.Runnable" ]
-		) )
+		// Everything from here down runs on the single shared tick-executor
+		// thread, driven by scheduleAtFixedRate() — if ANY exception escapes
+		// this Runnable (not just ones inside the job callback above), the
+		// JDK silently and permanently cancels every future tick of this job,
+		// with nothing logged anywhere. createDynamicProxy()/ThreadRunnable
+		// construction and taskExecutor.submit() itself are just as capable
+		// of throwing as the job callback is, so they need the same net.
+		try {
+			variables.taskExecutor.submit( createDynamicProxy(
+				new ThreadRunnable( function() {
+					try {
+						job.callback( job.handle )
+					} catch ( any e ) {
+						// Caught and logged, never left to kill future ticks —
+						// same posture as HttpBridge.bx's dispatch guard and
+						// Stomp.bx's server-side listener guard (see
+						// Stomp.bx's "listener for" log line). Unconditional,
+						// not gated behind app.set("log", false), matching
+						// both of those: that setting only quiets routine
+						// traffic logging, never an actual caught failure.
+						println( "[Scheduler] job '" & job.name & "' threw: " & e.message )
+					} finally {
+						job.runningFlag.set( false )
+					}
+				} ),
+				[ "java.lang.Runnable" ]
+			) )
+		} catch ( any e ) {
+			// Submission itself failed before the inner finally above ever
+			// got a chance to run — reset the flag here or this job would
+			// otherwise "skip forever" thinking a previous run is still in
+			// flight.
+			job.runningFlag.set( false )
+			println( "[Scheduler] job '" & job.name & "' failed to submit: " & e.message )
+		}
 	}
 
 	function _cancelJob( jobId ) {

@@ -20,6 +20,16 @@ class {
 		variables.messageCallback = javacast( "null", "" )
 		variables.closeCallback = javacast( "null", "" )
 		variables.lockName = "WebSocketConnection-" & createUUID()
+		// send()'s actual blocking write has no timeout of its own —
+		// confirmed directly that a peer which vanishes mid-write can hang
+		// sendTextBlocking() forever, with nothing bounding it but the
+		// lock's own 5s ACQUISITION timeout below (which only protects a
+		// second caller waiting to get in, not the first caller already
+		// inside doing the write). Running the write on its own thread and
+		// bounding the WAIT for it lets a caller give up and move on even
+		// when the underlying write itself never will — see send()'s own
+		// docblock for the full reasoning.
+		variables.sendExecutor = createObject( "java", "java.util.concurrent.Executors" ).newVirtualThreadPerTaskExecutor()
 		this.headers = headers
 		this.cookies = _parseCookies( headers[ "Cookie" ] ?: "" )
 		return this
@@ -61,6 +71,16 @@ class {
 	 * is closed rather than throwing — same posture as SseEmitter, since a
 	 * caller broadcasting to many connections shouldn't have one already-
 	 * closed one blow up the whole loop.
+	 *
+	 * The actual write runs on variables.sendExecutor (its own thread), and
+	 * this waits on it with a hard 5s timeout — undertow's
+	 * sendTextBlocking() has no timeout of its own, and has been observed
+	 * directly to hang indefinitely against a peer that vanishes mid-write
+	 * (the socket write never completes and never errors). Bounding only
+	 * the WAIT (not the write itself — a blocked native I/O call can't be
+	 * force-killed) means a caller can never be stuck here forever, even
+	 * though the abandoned write keeps its own thread alive in the
+	 * background until the OS eventually notices the peer is gone.
 	 */
 	function send( data ) {
 		if ( variables.closed ) {
@@ -70,7 +90,13 @@ class {
 		lock name="#variables.lockName#" type="exclusive" timeout="5" {
 			if ( !variables.closed ) {
 				try {
-					createObject( "java", "io.undertow.websockets.core.WebSockets" ).sendTextBlocking( payload, variables.channel )
+					var future = variables.sendExecutor.submit( createDynamicProxy(
+						new ThreadRunnable( function() {
+							createObject( "java", "io.undertow.websockets.core.WebSockets" ).sendTextBlocking( payload, variables.channel )
+						} ),
+						[ "java.lang.Runnable" ]
+					) )
+					future.get( javacast( "long", 5 ), createObject( "java", "java.util.concurrent.TimeUnit" ).SECONDS )
 				} catch ( any e ) {
 					variables.closed = true
 				}
@@ -84,6 +110,7 @@ class {
 			lock name="#variables.lockName#" type="exclusive" timeout="5" {
 				if ( !variables.closed ) {
 					variables.closed = true
+					variables.sendExecutor.shutdown()
 					try {
 						variables.channel.sendClose()
 					} catch ( any e ) {
@@ -121,6 +148,7 @@ class {
 			return
 		}
 		variables.closed = true
+		variables.sendExecutor.shutdown()
 		if ( !isNull( variables.closeCallback ) ) {
 			variables.closeCallback( code, reason )
 		}

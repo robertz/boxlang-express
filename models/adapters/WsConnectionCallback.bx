@@ -47,6 +47,21 @@ class {
 	function init( wsRoutes ) {
 		variables.wsRoutes = wsRoutes
 		variables.listenerClass = createObject( "java", "boxexpress.ws.BoxWebSocketListener" )
+		// onConnect() below runs on Undertow's own XNIO I/O thread — Undertow
+		// invokes WebSocketConnectionCallback directly from the handshake
+		// completion path, unlike a plain HttpHandler, which this project
+		// already dispatches onto its own virtual thread via
+		// UndertowVirtualThreadHandler.bx. Without the same treatment here,
+		// handlerFn(connection) below — the app's own app.ws() callback,
+		// free to do blocking work like sending a synchronous "welcome"
+		// message — runs directly on one of only a handful of shared XNIO
+		// I/O threads. Confirmed directly: a burst of clients that connect
+		// and abruptly vanish mid-write can each pin one of those threads
+		// forever (the underlying socket write never completes and never
+		// errors), and since the pool is small and shared by every
+		// connection on the server, exhausting it freezes all WebSocket and
+		// HTTP traffic, not just the connections responsible.
+		variables.executor = createObject( "java", "java.util.concurrent.Executors" ).newVirtualThreadPerTaskExecutor()
 		_warmMessageHandlerInterface()
 		return this
 	}
@@ -71,9 +86,24 @@ class {
 		var listener = variables.listenerClass.init( handlerProxy )
 		channel.getReceiveSetter().set( listener )
 
-		handlerFn( connection )
-
-		channel.resumeReceives()
+		// handlerFn (and therefore resumeReceives(), which has to stay
+		// ordered after it — registering the app's own onMessage()/
+		// onClose() has to happen before receives resume, or a fast
+		// client's first message could arrive with nothing listening for
+		// it yet) both run together on their own virtual thread, off this
+		// XNIO I/O thread entirely — see the docblock on variables.executor
+		// above for why.
+		variables.executor.submit( createDynamicProxy(
+			new "../ThreadRunnable"( function() {
+				try {
+					handlerFn( connection )
+				} catch ( any e ) {
+					println( "[WsConnectionCallback] onConnect handler threw: " & e.message )
+				}
+				channel.resumeReceives()
+			} ),
+			[ "java.lang.Runnable" ]
+		) )
 	}
 
 	/**
