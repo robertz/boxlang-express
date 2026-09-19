@@ -249,8 +249,12 @@ app.ws( "/chat", ( connection ) => {
 already a simple value, same convention as `res.sse()`'s `emitter.send()`.
 `connection.onMessage(callback)` — `callback(text)` runs for every message
 this connection receives. `connection.onClose(callback)` —
-`callback(code, reason)` runs once, whether the client disconnected or
-`connection.close()` was called locally. `connection.isClosed()`.
+`callback(code, reason)` runs once, whether the client disconnected,
+the connection dropped, or `connection.close()` was called locally (a
+locally-initiated close did not fire it before 0.2.15).
+`connection.onBinary(callback)` — `callback(bytes)` (a Java `byte[]`) for
+binary messages, which are dropped if none is registered; outbound
+messages are always text. `connection.isClosed()`.
 `connection.headers`/`connection.cookies` carry the handshake request's
 headers/cookies (mirroring `req.headers`/`req.cookies`) — read a session
 cookie here to authenticate a connection, since `app.ws()` routes sit
@@ -268,7 +272,8 @@ reasoning as `SseEmitter`'s. `send()` bounds its underlying blocking
 write with a hard 5s timeout — a peer that vanishes mid-write (network
 drop, abrupt client close) can't hang the caller, or pin the lock out
 from under any other thread also trying to send on that connection, for
-longer than that. The `app.ws()` callback itself also runs on its own
+longer than that. A write that fails or times out closes the connection
+and fires its `onClose` callback, so the app's cleanup runs. The `app.ws()` callback itself also runs on its own
 virtual thread rather than Undertow's shared I/O pool, so a connect
 handler that blocks can't stall other connections' handshakes.
 
@@ -298,7 +303,7 @@ for why.
 
 #### STOMP (`boxExpressStomp()` / `Stomp`)
 
-A [STOMP](https://stomp.github.io/) 1.2 pub/sub broker built entirely on
+A [STOMP](https://stomp.github.io/) 1.0/1.1/1.2 pub/sub broker built entirely on
 top of `app.ws()` — destination-based messaging (`SUBSCRIBE`/`SEND`) over
 a WebSocket connection, the shape most chat/notification/live-update use
 cases actually need:
@@ -425,6 +430,61 @@ the client gets a generic `ERROR` (authenticate and authorize fail
 closed). A destination's registry entry is dropped once its last
 subscriber leaves.
 
+**Protocol versions.** `CONNECT`'s `accept-version` is negotiated and the
+connection is served in the highest version both sides offer (no header
+means 1.0). Per version: 1.2 escapes `\\`, newline, CR and `:` in
+header values, 1.1 the same minus CR, 1.0 not at all (and `CONNECT`/
+`CONNECTED` frames are never escaped); 1.0/1.1 clients acknowledge by
+`message-id` instead of 1.2's separate `ack` header; 1.0 clients may
+`SUBSCRIBE` without an `id` and `UNSUBSCRIBE` by `destination`; and
+heart-beating only exists from 1.1. Only `MESSAGE` frames follow the
+connection's version for escaping; `ERROR`/`RECEIPT` use 1.2's. An
+unsupported version gets an `ERROR` listing `1.0,1.1,1.2`. A second
+`CONNECT` on an already-connected socket is an `ERROR`.
+
+**Lifecycle hooks.** All optional observers — a hook that throws is
+logged and ignored, and can't affect the connection:
+
+```js
+stomp = boxExpressStomp( {
+	onConnect:     ( login, connection, connectionMetadata, connectionId ) => { ... },
+	onDisconnect:  ( login, connectionMetadata, connectionId ) => { ... },
+	onSubscribe:   ( login, destination, subscriptionId, connection, connectionMetadata ) => { ... },
+	onUnsubscribe: ( login, destination, subscriptionId, connectionMetadata ) => { ... }
+} )
+```
+
+`onDisconnect` fires for every connection that completed `CONNECT`,
+however it ended (client close, dropped socket, server close, a failed
+write); just before it, `onUnsubscribe` fires for each subscription the
+connection still held. `stomp.disconnect(connectionId, message)` closes a
+connection from the server side — with an `ERROR` frame carrying `message`
+first, if given — and returns `false` if that connection isn't on this
+node.
+
+**Targeted delivery.** `stomp.sendToUser(login, destination, data,
+headers)` publishes to `destination` (through the exchanges, like any
+publish) but only to subscriptions whose connection authenticated with
+that `login` — every connection the user has open, no one else's.
+`stomp.sendToConnection(connectionId, destination, data, headers)` does
+the same for one connection (a key of `getConnections()`). Both return
+how many subscriptions on this node received it, don't invoke
+server-side `listeners`, and, with `options.cluster`, are relayed so the
+recipient is reached on whichever node holds their connection.
+
+**Presence.** `stomp.getClusterPresence()` returns `{ logins, byNode }` —
+the distinct logins connected across the cluster and each node's own
+list. Nodes publish their list on the cluster heartbeat, so a peer's
+entry can lag by up to one heartbeat interval: fine for "who's online,"
+not for anything that must be exact. Without clustering it's just this
+node. `getConnections()` remains local to the node.
+
+**Delivery.** A publish writes to its subscribers concurrently, so
+unresponsive subscribers cost one slow write in total rather than one
+each in sequence; a subscriber whose connection turns out to be closed is
+dropped from the registry immediately. Heartbeats run on virtual threads,
+not one platform thread per connection.
+
 `Sec-WebSocket-Protocol` negotiation (`v12.stomp`/`v11.stomp`/
 `v10.stomp`) is handled automatically by `app.ws()`'s handshake, for
 client libraries (stomp.js and others) that send and expect it echoed —
@@ -512,11 +572,13 @@ full API (`getCommand()`/`getBody()`/`getBodyRaw()`/`getHeaders()`/
 
 This is a real, if intentionally smaller, first version — not the whole
 STOMP ecosystem some brokers support. Deliberately not built: **binary
-bodies** (the underlying WebSocket transport here only carries text
-frames, so this is a hard limit of the transport, not a broker choice —
+bodies** — inbound frames may arrive as binary WebSocket messages
+(decoded as UTF-8), but outbound frames are always text, and
 `content-length` is honored on read/write so a body containing an
-embedded NUL byte still round-trips correctly, but genuinely binary
-octets can't). Destination matching (both the subscriber registry and
+embedded NUL byte round-trips correctly while genuinely non-UTF-8 octets
+can't. Also not built: message **redelivery** (`NACK` and unacknowledged
+messages just clear bookkeeping — there is no queue to redeliver into).
+Destination matching (both the subscriber registry and
 exchange bindings) is exact-string only — `/topic/a` and `/topic/a/`
 are different destinations.
 
@@ -1547,6 +1609,25 @@ Two more BoxLang-specific things that shaped how these are written:
   rather than `../fixtures/...`.
 
 ## Changelog
+
+**0.2.15**
+- **STOMP:** protocol versions 1.0 and 1.1 are now served alongside 1.2
+  (negotiated at `CONNECT`); binary WebSocket frames are accepted inbound;
+  new lifecycle hooks `onConnect`/`onDisconnect`/`onSubscribe`/
+  `onUnsubscribe`; new `stomp.sendToUser()`, `sendToConnection()` (both
+  cluster-aware), `disconnect()` and `getClusterPresence()`; a publish
+  now writes to its subscribers concurrently and drops any whose
+  connection is found closed; heartbeats run on virtual threads instead of
+  one platform thread per connection; and a second `CONNECT` on a
+  connected socket is rejected.
+- **Bug fix:** `connection.onClose()` never fired when the *server* closed
+  the connection (`connection.close()`, including STOMP's fatal `ERROR`s
+  and a client `DISCONNECT`), so the STOMP registry entries for those
+  connections were never cleaned up. It now fires exactly once per
+  connection however it closes. A write that fails or times out now also
+  closes the connection and fires it, instead of leaving a zombie.
+- New `connection.onBinary(callback)` on `app.ws()` connections.
+  `libs/boxexpress-ws-shim-1.0.0.jar` rebuilt. Full suite: 310/310.
 
 **0.2.14**
 - **STOMP fixes:** `content-length` is now an octet count, not a

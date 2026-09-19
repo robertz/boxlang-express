@@ -1,0 +1,331 @@
+/**
+ * Coverage for the STOMP feature pass: protocol versions 1.0/1.1/1.2,
+ * binary inbound frames, lifecycle hooks, server-side disconnect,
+ * user-/connection-targeted delivery, cluster-free presence, concurrent
+ * fan-out with eviction of dead subscribers, and virtual-thread heartbeats.
+ * Drives the broker through fake connection objects — no sockets needed.
+ */
+class extends="testbox.system.BaseSpec" {
+
+	variables.NL = char( 10 )
+
+	private function _fake() {
+		var c = { closed: false, sent: [] }
+		c.send = ( data ) => { c.sent.append( data ) }
+		c.close = () => { c.closed = true }
+		c.isClosed = () => c.closed
+		c.onMessage = ( fn ) => { c.msg = fn }
+		c.onBinary = ( fn ) => { c.bin = fn }
+		c.onClose = ( fn ) => { c.cls = fn }
+		return c
+	}
+
+	private function _frame( cmd, hdrs = {}, body = "" ) {
+		var out = cmd & variables.NL
+		for ( var k in hdrs ) {
+			out &= k & ":" & hdrs[ k ] & variables.NL
+		}
+		return out & variables.NL & body & char( 0 )
+	}
+
+	private function _connect( stomp, login = "", version = "1.2" ) {
+		var conn = _fake()
+		stomp.handler()( conn )
+		var headers = { "accept-version": version }
+		if ( len( login ) ) {
+			headers.login = login
+		}
+		conn.msg( _frame( "CONNECT", headers ) )
+		return conn
+	}
+
+	private function _last( conn ) {
+		return conn.sent.len() ? conn.sent[ conn.sent.len() ] : ""
+	}
+
+	function run() {
+
+		describe( "STOMP protocol versions", function() {
+
+			it( "serves the highest version both sides offer", function() {
+				var stomp = new "../../models/middleware/Stomp"()
+				assertAll( [
+					() => expect( _last( _connect( stomp, "", "1.0,1.1,1.2" ) ) ).toInclude( "version:1.2" ),
+					() => expect( _last( _connect( stomp, "", "1.0,1.1" ) ) ).toInclude( "version:1.1" ),
+					() => expect( _last( _connect( stomp, "", "1.0" ) ) ).toInclude( "version:1.0" )
+				] )
+			} )
+
+			it( "treats a CONNECT with no accept-version as 1.0", function() {
+				var stomp = new "../../models/middleware/Stomp"()
+				var conn = _fake()
+				stomp.handler()( conn )
+				conn.msg( _frame( "CONNECT" ) )
+				expect( _last( conn ) ).toInclude( "version:1.0" )
+			} )
+
+			it( "refuses an unsupported version with an ERROR advertising what is supported", function() {
+				var stomp = new "../../models/middleware/Stomp"()
+				var conn = _connect( stomp, "", "2.0" )
+				assertAll( [
+					() => expect( _last( conn ) ).toInclude( "ERROR" ),
+					() => expect( _last( conn ) ).toInclude( "version:1.0,1.1,1.2" ),
+					() => expect( conn.closed ).toBeTrue()
+				] )
+			} )
+
+			it( "rejects a second CONNECT on an already-connected socket", function() {
+				var stomp = new "../../models/middleware/Stomp"()
+				var conn = _connect( stomp )
+				conn.msg( _frame( "CONNECT", { "accept-version": "1.2" } ) )
+				expect( _last( conn ) ).toInclude( "Already connected" )
+			} )
+
+			it( "lets a 1.0 client SUBSCRIBE without an id and UNSUBSCRIBE by destination", function() {
+				var stomp = new "../../models/middleware/Stomp"()
+				var old = _connect( stomp, "", "1.0" )
+				old.msg( _frame( "SUBSCRIBE", { destination: "/q" } ) )
+				expect( stomp.getSubscriptions().count() ).toBe( 1 )
+				old.sent.clear()
+				stomp.send( "/q", "hi" )
+				expect( _last( old ) ).toInclude( "hi" )
+
+				old.msg( _frame( "UNSUBSCRIBE", { destination: "/q" } ) )
+				expect( stomp.getSubscriptions() ).toBeEmpty()
+			} )
+
+			it( "acknowledges by message-id for a 1.1 client, with no separate ack header", function() {
+				var stomp = new "../../models/middleware/Stomp"()
+				var conn = _connect( stomp, "", "1.1" )
+				conn.msg( _frame( "SUBSCRIBE", { id: "s", destination: "/q", ack: "client" } ) )
+				conn.sent.clear()
+				stomp.send( "/q", "m1" )
+				var msg = _last( conn )
+				expect( msg ).notToInclude( "ack:" )
+
+				var messageId = reMatch( "message-id:([^" & variables.NL & "]+)", msg )[ 1 ].replace( "message-id:", "" )
+				conn.sent.clear()
+				conn.msg( _frame( "ACK", { "message-id": messageId, subscription: "s", receipt: "r1" } ) )
+				expect( _last( conn ) ).toInclude( "RECEIPT" )
+			} )
+
+			it( "escapes headers per the connection's version", function() {
+				var stomp = new "../../models/middleware/Stomp"()
+				var modern = _connect( stomp, "", "1.2" )
+				var legacy = _connect( stomp, "", "1.0" )
+				modern.msg( _frame( "SUBSCRIBE", { id: "s", destination: "/q" } ) )
+				legacy.msg( _frame( "SUBSCRIBE", { destination: "/q" } ) )
+				modern.sent.clear()
+				legacy.sent.clear()
+
+				stomp.send( "/q", "b", { "x-note": "a:b" } )
+				assertAll( [
+					() => expect( _last( modern ) ).withContext( "1.2 escapes the colon" ).toInclude( "x-note:a\cb" ),
+					() => expect( _last( legacy ) ).withContext( "1.0 does not" ).toInclude( "x-note:a:b" )
+				] )
+			} )
+
+			it( "accepts a frame sent as a binary WebSocket message", function() {
+				var stomp = new "../../models/middleware/Stomp"()
+				var conn = _fake()
+				stomp.handler()( conn )
+				conn.bin( _frame( "CONNECT", { "accept-version": "1.2" } ).getBytes( "UTF-8" ) )
+				expect( _last( conn ) ).toInclude( "CONNECTED" )
+			} )
+
+		} )
+
+		describe( "STOMP lifecycle hooks and server-side control", function() {
+
+			it( "fires onConnect, onSubscribe, onUnsubscribe and onDisconnect in order with the right arguments", function() {
+				var events = []
+				var stomp = new "../../models/middleware/Stomp"( {
+					onConnect: ( login, connection, metadata, connectionId ) => { events.append( "connect:" & login & ":" & len( connectionId ) ) },
+					onSubscribe: ( login, destination, subId, connection, metadata ) => { events.append( "subscribe:" & login & ":" & destination & ":" & subId ) },
+					onUnsubscribe: ( login, destination, subId, metadata ) => { events.append( "unsubscribe:" & login & ":" & destination & ":" & subId ) },
+					onDisconnect: ( login, metadata, connectionId ) => { events.append( "disconnect:" & login ) }
+				} )
+				var conn = _connect( stomp, "alice" )
+				conn.msg( _frame( "SUBSCRIBE", { id: "s1", destination: "/a" } ) )
+				conn.msg( _frame( "SUBSCRIBE", { id: "s2", destination: "/b" } ) )
+				conn.msg( _frame( "UNSUBSCRIBE", { id: "s1" } ) )
+				conn.cls( 1000, "" )
+
+				expect( events ).toBe( [
+					"connect:alice:35",
+					"subscribe:alice:/a:s1",
+					"subscribe:alice:/b:s2",
+					"unsubscribe:alice:/a:s1",
+					"unsubscribe:alice:/b:s2",
+					"disconnect:alice"
+				] )
+			} )
+
+			it( "does not fire onDisconnect for a socket that never completed CONNECT", function() {
+				var events = []
+				var stomp = new "../../models/middleware/Stomp"( { onDisconnect: () => { events.append( "d" ) } } )
+				var conn = _fake()
+				stomp.handler()( conn )
+				conn.cls( 1000, "" )
+				expect( events ).toBeEmpty()
+			} )
+
+			it( "ignores a hook that throws", function() {
+				var stomp = new "../../models/middleware/Stomp"( {
+					onConnect: () => { throw( "hook bug" ) },
+					onSubscribe: () => { throw( "hook bug" ) }
+				} )
+				var conn = _connect( stomp, "alice" )
+				conn.msg( _frame( "SUBSCRIBE", { id: "s", destination: "/a" } ) )
+				assertAll( [
+					() => expect( conn.closed ).toBeFalse(),
+					() => expect( stomp.getSubscriptions().count() ).toBe( 1 )
+				] )
+			} )
+
+			it( "disconnect() closes a connection, optionally with an ERROR, and reports whether it existed", function() {
+				var stomp = new "../../models/middleware/Stomp"()
+				var one = _connect( stomp, "alice" )
+				var two = _connect( stomp, "bob" )
+				var idOf = ( conn ) => stomp.getConnections().keyArray().filter( ( id ) => stomp.getConnections()[ id ].connection == conn )[ 1 ]
+
+				assertAll( [
+					() => expect( stomp.disconnect( idOf( one ), "You have been removed" ) ).toBeTrue(),
+					() => expect( stomp.disconnect( idOf( two ) ) ).toBeTrue(),
+					() => expect( stomp.disconnect( "no-such-connection" ) ).toBeFalse(),
+					() => expect( one.closed ).toBeTrue(),
+					() => expect( two.closed ).toBeTrue(),
+					() => expect( _last( one ) ).toInclude( "You have been removed" )
+				] )
+			} )
+
+		} )
+
+		describe( "STOMP targeted delivery", function() {
+
+			it( "sendToUser reaches only that login's subscriptions, on every connection they hold", function() {
+				var stomp = new "../../models/middleware/Stomp"()
+				var aliceTab1 = _connect( stomp, "alice" )
+				var aliceTab2 = _connect( stomp, "alice" )
+				var bob = _connect( stomp, "bob" )
+				for ( var c in [ aliceTab1, aliceTab2, bob ] ) {
+					c.msg( _frame( "SUBSCRIBE", { id: "s", destination: "/queue/inbox" } ) )
+					c.sent.clear()
+				}
+
+				var delivered = stomp.sendToUser( "alice", "/queue/inbox", "for alice" )
+				assertAll( [
+					() => expect( delivered ).toBe( 2 ),
+					() => expect( _last( aliceTab1 ) ).toInclude( "for alice" ),
+					() => expect( _last( aliceTab2 ) ).toInclude( "for alice" ),
+					() => expect( bob.sent ).toBeEmpty()
+				] )
+			} )
+
+			it( "sendToConnection reaches exactly one connection", function() {
+				var stomp = new "../../models/middleware/Stomp"()
+				var first = _connect( stomp, "alice" )
+				var second = _connect( stomp, "alice" )
+				for ( var c in [ first, second ] ) {
+					c.msg( _frame( "SUBSCRIBE", { id: "s", destination: "/queue/x" } ) )
+					c.sent.clear()
+				}
+				var secondId = stomp.getConnections().keyArray().filter( ( id ) => stomp.getConnections()[ id ].connection == second )[ 1 ]
+
+				expect( stomp.sendToConnection( secondId, "/queue/x", "just you" ) ).toBe( 1 )
+				assertAll( [
+					() => expect( _last( second ) ).toInclude( "just you" ),
+					() => expect( first.sent ).toBeEmpty()
+				] )
+			} )
+
+			it( "does not invoke server-side listeners for a targeted send", function() {
+				var heard = []
+				var stomp = new "../../models/middleware/Stomp"( { listeners: { "/queue/x": ( m ) => heard.append( m.getBodyRaw() ) } } )
+				var conn = _connect( stomp, "alice" )
+				conn.msg( _frame( "SUBSCRIBE", { id: "s", destination: "/queue/x" } ) )
+				stomp.sendToUser( "alice", "/queue/x", "private" )
+				expect( heard ).toBeEmpty()
+			} )
+
+			it( "returns 0 for a user with no matching subscription, and refuses a blank target", function() {
+				var stomp = new "../../models/middleware/Stomp"()
+				expect( stomp.sendToUser( "nobody", "/queue/x", "hi" ) ).toBe( 0 )
+				expect( () => stomp.sendToUser( "", "/queue/x", "hi" ) ).toThrow( "BoxExpress.InvalidArgument" )
+				expect( () => stomp.sendToConnection( "", "/queue/x", "hi" ) ).toThrow( "BoxExpress.InvalidArgument" )
+			} )
+
+			it( "reports who is connected without clustering", function() {
+				var stomp = new "../../models/middleware/Stomp"()
+				_connect( stomp, "alice" )
+				_connect( stomp, "alice" )
+				_connect( stomp, "bob" )
+				_connect( stomp )
+				expect( stomp.getClusterPresence().logins ).toBe( [ "alice", "bob" ] )
+			} )
+
+		} )
+
+		describe( "STOMP fan-out and heartbeats", function() {
+
+			it( "writes to slow subscribers concurrently, so one publish costs the slowest, not the sum", function() {
+				var stomp = new "../../models/middleware/Stomp"()
+				var subs = []
+				for ( var i = 1; i <= 4; i++ ) {
+					var conn = _connect( stomp )
+					conn.msg( _frame( "SUBSCRIBE", { id: "s", destination: "/slow" } ) )
+					conn.send = ( data ) => { sleep( 300 ) }
+					subs.append( conn )
+				}
+
+				var started = getTickCount()
+				stomp.send( "/slow", "x" )
+				var elapsed = getTickCount() - started
+				expect( elapsed ).withContext( "4 x 300ms subscribers; serial would be 1200ms" ).toBeLT( 800 )
+			} )
+
+			it( "evicts a subscriber whose connection is found closed, and still delivers to the others", function() {
+				var stomp = new "../../models/middleware/Stomp"()
+				var dead = _connect( stomp, "dead" )
+				var alive = _connect( stomp, "alive" )
+				for ( var c in [ dead, alive ] ) {
+					c.msg( _frame( "SUBSCRIBE", { id: "s", destination: "/d" } ) )
+				}
+				dead.send = ( data ) => { dead.closed = true }
+				alive.sent.clear()
+
+				stomp.send( "/d", "hello" )
+				assertAll( [
+					() => expect( _last( alive ) ).toInclude( "hello" ),
+					() => expect( stomp.getSubscriptions()[ "/d" ].count() ).toBe( 1 ),
+					() => expect( stomp.getConnections().count() ).toBe( 1 )
+				] )
+			} )
+
+			it( "sends outgoing heartbeats", function() {
+				var stomp = new "../../models/middleware/Stomp"( { heartbeatMs: 100 } )
+				var conn = _fake()
+				stomp.handler()( conn )
+				conn.msg( _frame( "CONNECT", { "accept-version": "1.2", "heart-beat": "0,100" } ) )
+				sleep( 450 )
+				var beats = conn.sent.filter( ( s ) => s == variables.NL ).len()
+				conn.closed = true
+				expect( beats ).toBeGTE( 2 )
+			} )
+
+			it( "does not heartbeat a 1.0 connection", function() {
+				var stomp = new "../../models/middleware/Stomp"( { heartbeatMs: 100 } )
+				var conn = _fake()
+				stomp.handler()( conn )
+				conn.msg( _frame( "CONNECT", { "heart-beat": "0,100" } ) )
+				sleep( 350 )
+				var beats = conn.sent.filter( ( s ) => s == variables.NL ).len()
+				conn.closed = true
+				expect( beats ).toBe( 0 )
+			} )
+
+		} )
+
+	}
+
+}

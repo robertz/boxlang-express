@@ -19,6 +19,22 @@ class extends="testbox.system.BaseSpec" {
 		}
 	}
 
+	private function _fakeClient( stomp, login, destination ) {
+	var c = { closed: false, sent: [] }
+	c.send = ( data ) => { c.sent.append( data ) }
+	c.close = () => { c.closed = true }
+	c.isClosed = () => c.closed
+	c.onMessage = ( fn ) => { c.msg = fn }
+	c.onBinary = ( fn ) => { c.bin = fn }
+	c.onClose = ( fn ) => { c.cls = fn }
+	stomp.handler()( c )
+	var nl = char( 10 )
+	c.msg( "CONNECT" & nl & "accept-version:1.2" & nl & "login:" & login & nl & nl & char( 0 ) )
+	c.msg( "SUBSCRIBE" & nl & "id:s" & nl & "destination:" & destination & nl & nl & char( 0 ) )
+	c.sent.clear()
+	return c
+	}
+
 	function beforeAll() {
 		variables.cacheDir = expandPath( "./tmp-cluster-stomp-spec-cache-" & createUUID() )
 		variables.cacheName = "clusterStompSpecCache" & createUUID().replace( "-", "", "all" )
@@ -99,7 +115,7 @@ class extends="testbox.system.BaseSpec" {
 				// mid-suite, taking every other spec down with it. Every
 				// other spec file in this project already uses fixed
 				// literal ports for exactly this class of reason.
-				variables.nextPortPair = ( variables.nextPortPair ?: 4990 ) + 2
+				variables.nextPortPair = ( variables.nextPortPair ?: 5100 ) + 2
 				variables.port1 = variables.nextPortPair
 				variables.port2 = variables.port1 + 1
 			} )
@@ -185,6 +201,57 @@ class extends="testbox.system.BaseSpec" {
 					// well, never two from a relayed echo.
 					() => expect( node1Deliveries.get() ).withContext( "node1's local delivery count — >1 would mean the relay looped back" ).toBe( 1 )
 				] )
+			} )
+
+			it( "relays sendToUser so the user is reached on whichever node holds their connection", function() {
+			_twoNodes()
+
+			var stomp1 = new "../../models/middleware/Stomp"( { cluster: variables.app1.getClusterManager() } )
+			var stomp2 = new "../../models/middleware/Stomp"( { cluster: variables.app2.getClusterManager() } )
+			variables.app1.ws( "/stomp", stomp1.handler() )
+			variables.app2.ws( "/stomp", stomp2.handler() )
+			_startNodes()
+
+			var bob = _fakeClient( stomp2, "bob", "/queue/inbox" )
+			var carol = _fakeClient( stomp2, "carol", "/queue/inbox" )
+
+			_waitUntil( () => variables.app1.getClusterManager().getPeers().len() > 0 )
+			variables.app1.getClusterManager()._reconcilePeerConnections()
+
+			// node1 has no bob connection at all — a local-only send would return 0.
+			expect( stomp1.sendToUser( "bob", "/queue/inbox", "psst" ) ).withContext( "delivered on node1 itself" ).toBe( 0 )
+
+			_waitUntil( () => bob.sent.len() > 0 )
+			assertAll( [
+			() => expect( bob.sent ).withContext( "bob, connected to node2" ).toHaveLength( 1 ),
+			() => expect( bob.sent[ 1 ] ).toInclude( "psst" ),
+			() => expect( carol.sent ).withContext( "carol, same node, same destination" ).toBeEmpty()
+			] )
+			} )
+
+			it( "shows peers' connected users through getClusterPresence()", function() {
+			var peers = _twoNodes()
+
+			var stomp1 = new "../../models/middleware/Stomp"( { cluster: variables.app1.getClusterManager() } )
+			var stomp2 = new "../../models/middleware/Stomp"( { cluster: variables.app2.getClusterManager() } )
+			variables.app1.ws( "/stomp", stomp1.handler() )
+			variables.app2.ws( "/stomp", stomp2.handler() )
+			_startNodes()
+
+			_fakeClient( stomp1, "alice", "/x" )
+			_fakeClient( stomp2, "bob", "/x" )
+			_fakeClient( stomp2, "bob", "/y" )
+
+			// Presence rides the heartbeat; force one instead of waiting out the interval.
+			variables.app1.getClusterManager()._heartbeat()
+			variables.app2.getClusterManager()._heartbeat()
+
+			var presence = stomp1.getClusterPresence()
+			assertAll( [
+			() => expect( presence.logins ).toBe( [ "alice", "bob" ] ),
+			() => expect( presence.byNode[ peers.peer1 ] ).toBe( [ "alice" ] ),
+			() => expect( presence.byNode[ peers.peer2 ] ).toBe( [ "bob" ] )
+			] )
 			} )
 
 			it( "rejects a peer connection presenting a mismatched cluster secret", function() {

@@ -39,7 +39,8 @@ class {
 
 		variables.relayOpened = false
 		variables.relayMessageHandler = javacast( "null", "" )
-		variables.peerConnections = {}   // peerName -> ClusterPeer, outbound only
+		variables.presenceProvider = javacast( "null", "" )
+variables.peerConnections = {}   // peerName -> ClusterPeer, outbound only
 
 		if ( variables.config.enabled ) {
 			_validateConfig()
@@ -100,7 +101,15 @@ class {
 
 	function _handleRelayEnvelope( text ) {
 		var envelope = JSONDeserialize( text )
-		variables.relayMessageHandler( envelope.destination, envelope.body, envelope.headers, envelope.originPeer )
+		// A targeted envelope (sendToUser/sendToConnection) carries its real
+		// destination and recipient under "target"; envelope.destination is a
+		// placeholder no subscriber uses, so a node that predates this field
+		// drops the message instead of broadcasting it to everyone.
+		if ( structKeyExists( envelope, "target" ) ) {
+			variables.relayMessageHandler( envelope.target.destination, envelope.body, envelope.headers, envelope.originPeer, envelope.target )
+		} else {
+			variables.relayMessageHandler( envelope.destination, envelope.body, envelope.headers, envelope.originPeer )
+		}
 	}
 
 	/**
@@ -111,16 +120,25 @@ class {
 	 * deliberately unconditional "send to everyone I'm connected to,"
 	 * fire-and-forget, matching stomp.send()'s own no-persistence stance.
 	 */
-	function relay( destination, body, headers ) {
+	function relay( destination, body, headers, target = {} ) {
 		if ( !variables.relayOpened ) {
 			return
 		}
-		var envelope = JSONSerialize( {
+		var envelopeData = {
 			destination: destination,
 			body: body,
 			headers: headers,
 			originPeer: variables.myPeerName
-		} )
+		}
+		if ( !structIsEmpty( target ) ) {
+			envelopeData.destination = "/__boxexpress/targeted"
+			envelopeData.target = {
+				destination: destination,
+				login: target.login ?: "",
+				connectionId: target.connectionId ?: ""
+			}
+		}
+		var envelope = JSONSerialize( envelopeData )
 		for ( var peerName in structCopy( variables.peerConnections ) ) {
 			try {
 				variables.peerConnections[ peerName ].sendText( envelope )
@@ -291,11 +309,64 @@ class {
 	 * race with another node doing the same thing for its own key.
 	 */
 	function _heartbeat() {
+		var entry = { name: variables.myPeerName, heartbeat: getEpochSeconds() }
+		if ( !isNull( variables.presenceProvider ) ) {
+			try {
+				entry.presence = variables.presenceProvider()
+			} catch ( any e ) {
+				println( "[ClusterManager] presence provider threw: " & e.message )
+			}
+		}
 		_cacheProvider().set(
 			_peerKey( variables.myPeerName ),
-			{ name: variables.myPeerName, heartbeat: getEpochSeconds() },
+			entry,
 			variables.peerIdleTimeoutSeconds * 3
 		)
+	}
+
+	/**
+	 * provider() returns whatever this node wants its peers to see about it
+	 * (Stomp.bx: the logins currently connected) — stored on the heartbeat
+	 * entry, so it costs no extra cache writes and is only as fresh as the
+	 * last heartbeat.
+	 */
+	function setPresenceProvider( provider ) {
+		variables.presenceProvider = provider
+		if ( variables.config.enabled ) {
+			_heartbeat()
+		}
+	}
+
+	/**
+	 * peerName -> the presence data that peer last published, for every live
+	 * peer other than this instance.
+	 */
+	function getPeerPresence() {
+		var result = {}
+		if ( !variables.config.enabled ) {
+			return result
+		}
+		var provider = _cacheProvider()
+		var prefixLen = len( variables.PEER_KEY_PREFIX )
+		var nowSeconds = getEpochSeconds()
+		for ( var key in provider.getKeys() ) {
+			if ( left( key, prefixLen ) != variables.PEER_KEY_PREFIX ) {
+				continue
+			}
+			try {
+				var entryResult = provider.get( key )
+				if ( !entryResult.isPresent() ) {
+					continue
+				}
+				var entry = entryResult.get()
+				if ( entry.name != variables.myPeerName && ( nowSeconds - entry.heartbeat ) <= variables.peerIdleTimeoutSeconds ) {
+					result[ entry.name ] = entry.presence ?: []
+				}
+			} catch ( any e ) {
+				println( "[ClusterManager] transient error reading peer presence, skipping: " & e.message )
+			}
+		}
+		return result
 	}
 
 	/**

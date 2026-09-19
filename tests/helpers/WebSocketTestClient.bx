@@ -58,10 +58,17 @@ class {
 	}
 
 	function sendText( text ) {
-		var payload = text.getBytes( "UTF-8" )
+		_sendFrame( 129, text.getBytes( "UTF-8" ) )   // FIN + text opcode (0x81)
+	}
+
+	function sendBinary( payload ) {
+		_sendFrame( 130, payload )   // FIN + binary opcode (0x82)
+	}
+
+	private function _sendFrame( firstByte, payload ) {
 		var maskKey = [ 1, 2, 3, 4 ]
 		var frame = createObject( "java", "java.io.ByteArrayOutputStream" ).init()
-		frame.write( javacast( "int", 129 ) )   // FIN + text opcode (0x81)
+		frame.write( javacast( "int", firstByte ) )
 
 		var len = payload.len()
 		if ( len <= 125 ) {

@@ -14,7 +14,12 @@
  */
 class {
 
-	function parse( rawText ) {
+	/**
+	 * version picks the header escaping rules: 1.2 escapes \\, \n, \r and
+	 * ":"; 1.1 the same minus \r; 1.0 does no escaping at all. CONNECT/STOMP/
+	 * CONNECTED frames are never escaped in any version (per spec).
+	 */
+	function parse( rawText, version = "1.2" ) {
 		// mid(), not left()/right(), throughout this method — confirmed
 		// directly (the hard way, in this method's first draft) that
 		// left()/right() throw "Count cannot be zero" on a legitimately
@@ -40,18 +45,19 @@ class {
 		var headerLines = headerBlock.listToArray( char( 10 ) )
 		var command = _stripCR( headerLines[ 1 ] )
 		var headers = {}
+		var escapeVersion = listFindNoCase( "CONNECT,STOMP,CONNECTED", command ) ? "1.0" : version
 
 		var i = 2
 		while ( i <= headerLines.len() ) {
 			var line = _stripCR( headerLines[ i ] )
 			var colonPos = line.find( ":" )
 			if ( colonPos ) {
-				var key = _unescape( line.mid( 1, colonPos - 1 ) )
+				var key = _unescape( line.mid( 1, colonPos - 1 ), escapeVersion )
 				// STOMP spec: when a header repeats, the FIRST occurrence
 				// wins — a client can't override an earlier value by
 				// repeating the header name later in the same frame.
 				if ( !structKeyExists( headers, key ) ) {
-					headers[ key ] = _unescape( line.mid( colonPos + 1, line.len() - colonPos ) )
+					headers[ key ] = _unescape( line.mid( colonPos + 1, line.len() - colonPos ), escapeVersion )
 				}
 			}
 			i++
@@ -104,16 +110,17 @@ class {
 	 * content-length already present on the frame's headers is dropped in
 	 * favor of this one.
 	 */
-	function serialize( frame ) {
-		var body = frame.getBody()
+	function serialize( frame, version = "1.2" ) {
+	var escapeVersion = listFindNoCase( "CONNECT,STOMP,CONNECTED", frame.getCommand() ) ? "1.0" : version
+	var body = frame.getBody()
 		var out = frame.getCommand() & char( 10 )
 		for ( var key in frame.getHeaders() ) {
 			if ( key == "content-length" ) {
 				continue
 			}
-			out &= _escape( key ) & ":" & _escape( frame.getHeaders()[ key ] ) & char( 10 )
+			out &= _escape( key, escapeVersion ) & ":" & _escape( frame.getHeaders()[ key ], escapeVersion ) & char( 10 )
 		}
-		out &= _escape( "content-length" ) & ":" & toString( body ).getBytes( "UTF-8" ).length & char( 10 )
+		out &= "content-length:" & toString( body ).getBytes( "UTF-8" ).length & char( 10 )
 		out &= char( 10 ) & body & char( 0 )
 		return out
 	}
@@ -122,19 +129,27 @@ class {
 		return ( line.len() && line.right( 1 ) == char( 13 ) ) ? line.mid( 1, line.len() - 1 ) : line
 	}
 
-	private function _escape( str ) {
-		// Order matters: backslash first, so the backslashes introduced by
+	private function _escape( str, version = "1.2" ) {
+	if ( version == "1.0" ) {
+	return toString( str )
+	}
+	// Order matters: backslash first, so the backslashes introduced by
 		// the newline/colon/CR escaping below don't themselves get escaped
 		// a second time.
 		var result = toString( str ).replace( "\", "\\", "all" )
 		result = result.replace( char( 10 ), "\n", "all" )
+		if ( version == "1.2" ) {
 		result = result.replace( char( 13 ), "\r", "all" )
+		}
 		result = result.replace( ":", "\c", "all" )
 		return result
 	}
 
-	private function _unescape( str ) {
-		var result = ""
+	private function _unescape( str, version = "1.2" ) {
+	if ( version == "1.0" ) {
+	return str
+	}
+	var result = ""
 		var i = 1
 		var len = str.len()
 		while ( i <= len ) {
@@ -147,7 +162,7 @@ class {
 				} else if ( next == "c" ) {
 					result &= ":"
 					i += 2
-				} else if ( next == "r" ) {
+				} else if ( next == "r" && version == "1.2" ) {
 					result &= char( 13 )
 					i += 2
 				} else if ( next == "\" ) {

@@ -16,6 +16,10 @@ class {
 		variables.connection._dispatchMessage( text )
 	}
 
+	function onBinaryMessage( channel, data ) {
+		variables.connection._dispatchBinary( data )
+	}
+
 	function onClose( channel, code, reason ) {
 		variables.connection._dispatchClose( code, reason )
 	}

@@ -19,6 +19,8 @@ class {
 		variables.closed = false
 		variables.messageCallback = javacast( "null", "" )
 		variables.closeCallback = javacast( "null", "" )
+		variables.binaryCallback = javacast( "null", "" )
+		variables.closeNotified = false
 		variables.lockName = "WebSocketConnection-" & createUUID()
 		// send()'s actual blocking write has no timeout of its own —
 		// confirmed directly that a peer which vanishes mid-write can hang
@@ -56,6 +58,15 @@ class {
 	}
 
 	/**
+	 * Registers the callback for binary messages — callback( bytes ), a Java
+	 * byte[]. Without one, binary messages are dropped, as before.
+	 */
+	function onBinary( callback ) {
+		variables.binaryCallback = callback
+		return this
+	}
+
+	/**
 	 * Registers the callback that runs when this connection closes —
 	 * callback( code, reason ) — whether the client disconnected or
 	 * close() was called locally.
@@ -87,6 +98,7 @@ class {
 			return this
 		}
 		var payload = isSimpleValue( data ) ? toString( data ) : JSONSerialize( data )
+		var sendFailed = false
 		lock name="#variables.lockName#" type="exclusive" timeout="5" {
 			if ( !variables.closed ) {
 				try {
@@ -98,12 +110,19 @@ class {
 					) )
 					future.get( javacast( "long", 5 ), createObject( "java", "java.util.concurrent.TimeUnit" ).SECONDS )
 				} catch ( any e ) {
-					variables.closed = true
+					sendFailed = true
 				}
-			}
-		}
-		return this
-	}
+				}
+				}
+				// A write that failed or timed out means the peer is gone or wedged.
+				// Tear the connection down properly (outside the lock) so the app's
+				// onClose cleanup runs, instead of leaving a zombie that every later
+				// send() has to wait out or skip.
+				if ( sendFailed ) {
+					_abort( "send failed or timed out" )
+				}
+				return this
+				}
 
 	function close() {
 		if ( !variables.closed ) {
@@ -114,14 +133,47 @@ class {
 					try {
 						variables.channel.sendClose()
 					} catch ( any e ) {
+								}
+							}
+						}
 					}
-				}
-			}
-		}
-		return this
-	}
+					// A locally initiated close never gets an onCloseMessage back that
+					// _dispatchClose() would act on (it sees closed == true and returns), so
+					// without this the app's onClose callback — and whatever cleanup hangs off
+					// it, like Stomp.bx's registry teardown — silently never ran for a
+					// server-side close.
+					_notifyClose( 1000, "closed locally" )
+					return this
+					}
 
-	function isClosed() {
+					/**
+					 * Forcibly drops a connection whose peer stopped responding, then runs
+					 * the normal close notification.
+					 */
+					function _abort( reason ) {
+						if ( variables.closed ) {
+							return
+						}
+						variables.closed = true
+						variables.sendExecutor.shutdown()
+						try {
+							variables.channel.close()
+						} catch ( any e ) {
+						}
+						_notifyClose( 1006, reason )
+					}
+
+					function _notifyClose( code, reason ) {
+						if ( variables.closeNotified ) {
+							return
+						}
+						variables.closeNotified = true
+						if ( !isNull( variables.closeCallback ) ) {
+							variables.closeCallback( code, reason )
+						}
+					}
+
+					function isClosed() {
 		return variables.closed
 	}
 
@@ -130,6 +182,12 @@ class {
 	 * boundary between the Java-shim event and the app's own registered
 	 * callback.
 	 */
+	function _dispatchBinary( bytes ) {
+		if ( !isNull( variables.binaryCallback ) ) {
+			variables.binaryCallback( bytes )
+		}
+	}
+
 	function _dispatchMessage( text ) {
 		if ( !isNull( variables.messageCallback ) ) {
 			variables.messageCallback( text )
@@ -144,14 +202,9 @@ class {
 	 * cleanup it does, e.g. Stomp.bx's per-connection registry teardown) more than once.
 	 */
 	function _dispatchClose( code, reason ) {
-		if ( variables.closed ) {
-			return
-		}
 		variables.closed = true
 		variables.sendExecutor.shutdown()
-		if ( !isNull( variables.closeCallback ) ) {
-			variables.closeCallback( code, reason )
-		}
+		_notifyClose( code, reason )
 	}
 
 	/**

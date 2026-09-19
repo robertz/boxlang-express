@@ -15,6 +15,7 @@ class extends="testbox.system.BaseSpec" {
 		c.close = () => { c.closed = true }
 		c.isClosed = () => c.closed
 		c.onMessage = ( fn ) => { c.msg = fn }
+		c.onBinary = ( fn ) => { c.bin = fn }
 		c.onClose = ( fn ) => { c.cls = fn }
 		return c
 	}

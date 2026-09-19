@@ -17,6 +17,8 @@ public interface WebSocketMessageHandler {
 
 	void onMessage( WebSocketChannel channel, String text );
 
+	void onBinaryMessage( WebSocketChannel channel, byte[] data );
+
 	void onClose( WebSocketChannel channel, int code, String reason );
 
 	void onError( WebSocketChannel channel, Throwable error );

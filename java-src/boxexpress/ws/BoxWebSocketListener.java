@@ -4,9 +4,13 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
 import io.undertow.websockets.core.AbstractReceiveListener;
+import io.undertow.websockets.core.BufferedBinaryMessage;
 import io.undertow.websockets.core.BufferedTextMessage;
 import io.undertow.websockets.core.CloseMessage;
 import io.undertow.websockets.core.WebSocketChannel;
+import io.undertow.websockets.core.WebSockets;
+
+import java.nio.ByteBuffer;
 
 /**
  * The one piece of this project that has to be real, compiled Java rather
@@ -84,6 +88,15 @@ public class BoxWebSocketListener extends AbstractReceiveListener {
 	protected void onFullTextMessage( WebSocketChannel channel, BufferedTextMessage message ) {
 		String data = message.getData();
 		executor.submit( _guard( () -> handler.onMessage( channel, data ) ) );
+	}
+
+	@Override
+	protected void onFullBinaryMessage( WebSocketChannel channel, BufferedBinaryMessage message ) {
+		ByteBuffer merged = WebSockets.mergeBuffers( message.getData().getResource() );
+		byte[] data = new byte[ merged.remaining() ];
+		merged.get( data );
+		message.getData().free();
+		executor.submit( _guard( () -> handler.onBinaryMessage( channel, data ) ) );
 	}
 
 	@Override
