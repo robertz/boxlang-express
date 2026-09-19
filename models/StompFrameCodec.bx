@@ -24,17 +24,26 @@ class {
 		// see docs/ARCHITECTURE.md's BoxLang landmines section). mid()
 		// with a zero count is safe (confirmed directly), unlike
 		// left()/right(), so no zero-guard is needed around it.
-		var separatorPos = rawText.find( char( 10 ) & char( 10 ) )
+		// The blank line ending the header block is "\n\n", or "\n\r\n" for a
+		// client using CRLF line endings (STOMP 1.2 allows either).
+		var lfPos = rawText.find( char( 10 ) & char( 10 ) )
+		var crlfPos = rawText.find( char( 10 ) & char( 13 ) & char( 10 ) )
+		var separatorPos = lfPos
+		var separatorLen = 2
+		if ( crlfPos && ( !lfPos || crlfPos < lfPos ) ) {
+			separatorPos = crlfPos
+			separatorLen = 3
+		}
 		var headerBlock = separatorPos ? rawText.mid( 1, separatorPos - 1 ) : rawText
-		var rawBody = separatorPos ? rawText.mid( separatorPos + 2, rawText.len() - separatorPos - 1 ) : ""
+		var rawBody = separatorPos ? rawText.mid( separatorPos + separatorLen, rawText.len() - separatorPos - separatorLen + 1 ) : ""
 
 		var headerLines = headerBlock.listToArray( char( 10 ) )
-		var command = headerLines[ 1 ]
+		var command = _stripCR( headerLines[ 1 ] )
 		var headers = {}
 
 		var i = 2
 		while ( i <= headerLines.len() ) {
-			var line = headerLines[ i ]
+			var line = _stripCR( headerLines[ i ] )
 			var colonPos = line.find( ":" )
 			if ( colonPos ) {
 				var key = _unescape( line.mid( 1, colonPos - 1 ) )
@@ -61,7 +70,15 @@ class {
 		var body = ""
 		var contentLength = headers[ "content-length" ] ?: ""
 		if ( len( contentLength ) && isNumeric( contentLength ) ) {
-			body = rawBody.mid( 1, int( contentLength ) )
+			// content-length is an octet count, not a character count — the two
+			// diverge on any multi-byte UTF-8 character, and counting characters
+			// would pull the frame's trailing NUL into the body.
+			var bodyBytes = rawBody.getBytes( "UTF-8" )
+			var byteCount = min( max( int( contentLength ), 0 ), bodyBytes.len() )
+			body = createObject( "java", "java.lang.String" ).init(
+				createObject( "java", "java.util.Arrays" ).copyOfRange( bodyBytes, javacast( "int", 0 ), javacast( "int", byteCount ) ),
+				"UTF-8"
+			)
 		} else {
 			body = rawBody
 			var nulPos = body.find( char( 0 ) )
@@ -70,6 +87,9 @@ class {
 			}
 			if ( body.len() && body.right( 1 ) == char( 10 ) ) {
 				body = body.mid( 1, body.len() - 1 )
+				if ( body.len() && body.right( 1 ) == char( 13 ) ) {
+					body = body.mid( 1, body.len() - 1 )
+				}
 			}
 		}
 
@@ -96,6 +116,10 @@ class {
 		out &= _escape( "content-length" ) & ":" & toString( body ).getBytes( "UTF-8" ).length & char( 10 )
 		out &= char( 10 ) & body & char( 0 )
 		return out
+	}
+
+	private function _stripCR( line ) {
+		return ( line.len() && line.right( 1 ) == char( 13 ) ) ? line.mid( 1, line.len() - 1 ) : line
 	}
 
 	private function _escape( str ) {

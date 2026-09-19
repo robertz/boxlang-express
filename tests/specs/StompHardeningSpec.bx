@@ -1,0 +1,233 @@
+/**
+ * Regression coverage for the STOMP codec/broker hardening pass: byte-based
+ * content-length, CRLF frames, application header forwarding, duplicate
+ * subscription ids, empty-destination pruning, per-connection resource caps,
+ * the CONNECT deadline, the frame rate limit, and throwing hooks. Drives the
+ * broker directly through fake connection objects — no sockets needed.
+ */
+class extends="testbox.system.BaseSpec" {
+
+	variables.NL = char( 10 )
+
+	private function _fake() {
+		var c = { closed: false, sent: [] }
+		c.send = ( data ) => { c.sent.append( data ) }
+		c.close = () => { c.closed = true }
+		c.isClosed = () => c.closed
+		c.onMessage = ( fn ) => { c.msg = fn }
+		c.onClose = ( fn ) => { c.cls = fn }
+		return c
+	}
+
+	private function _frame( cmd, hdrs = {}, body = "" ) {
+		var out = cmd & variables.NL
+		for ( var k in hdrs ) {
+			out &= k & ":" & hdrs[ k ] & variables.NL
+		}
+		return out & variables.NL & body & char( 0 )
+	}
+
+	private function _connect( stomp, options = {} ) {
+		var conn = _fake()
+		stomp.handler()( conn )
+		conn.msg( _frame( "CONNECT", { "accept-version": "1.2" } ) )
+		return conn
+	}
+
+	private function _lastSent( conn ) {
+		return conn.sent.len() ? conn.sent[ conn.sent.len() ] : ""
+	}
+
+	function run() {
+
+		describe( "StompFrameCodec", function() {
+
+			it( "treats content-length as a byte count, so a multi-byte body keeps no trailing NUL", function() {
+				var codec = new "../../models/StompFrameCodec"()
+				var frame = codec.parse( "SEND" & variables.NL & "destination:/a" & variables.NL & "content-length:2" & variables.NL & variables.NL & "é" & char( 0 ) )
+				assertAll( [
+					() => expect( frame.getBody() ).toBe( "é" ),
+					() => expect( find( char( 0 ), frame.getBody() ) ).toBe( 0 )
+				] )
+			} )
+
+			it( "still honors content-length for an ASCII body containing an embedded NUL", function() {
+				var codec = new "../../models/StompFrameCodec"()
+				var frame = codec.parse( "SEND" & variables.NL & "content-length:3" & variables.NL & variables.NL & "a" & char( 0 ) & "b" & char( 0 ) )
+				expect( len( frame.getBody() ) ).toBe( 3 )
+			} )
+
+			it( "parses a CRLF-terminated frame", function() {
+				var codec = new "../../models/StompFrameCodec"()
+				var cr = char( 13 )
+				var frame = codec.parse( "SEND" & cr & variables.NL & "destination:/a" & cr & variables.NL & "x-h:v" & cr & variables.NL & cr & variables.NL & "hi" & char( 0 ) )
+				assertAll( [
+					() => expect( frame.getCommand() ).toBe( "SEND" ),
+					() => expect( frame.getHeader( "destination", "" ) ).toBe( "/a" ),
+					() => expect( frame.getHeader( "x-h", "" ) ).toBe( "v" ),
+					() => expect( frame.getBody() ).toBe( "hi" )
+				] )
+			} )
+
+		} )
+
+		describe( "Stomp broker hardening", function() {
+
+			it( "forwards application headers from SEND to subscribers but not protocol-owned or spoofed ones", function() {
+				var stomp = new "../../models/middleware/Stomp"()
+				var sub = _connect( stomp )
+				sub.msg( _frame( "SUBSCRIBE", { id: "s1", destination: "/q" } ) )
+				var pub = _connect( stomp )
+				sub.sent.clear()
+
+				pub.msg( _frame( "SEND", { destination: "/q", "reply-to": "/r", "correlation-id": "abc", "message-id": "forged", receipt: "r1" }, "b" ) )
+
+				var msg = _lastSent( sub )
+				assertAll( [
+					() => expect( msg ).toInclude( "reply-to:/r" ),
+					() => expect( msg ).toInclude( "correlation-id:abc" ),
+					() => expect( msg ).notToInclude( "forged" ),
+					() => expect( msg ).notToInclude( "receipt" )
+				] )
+			} )
+
+			it( "rejects a duplicate subscription id instead of orphaning the first", function() {
+				var stomp = new "../../models/middleware/Stomp"()
+				var conn = _connect( stomp )
+				conn.msg( _frame( "SUBSCRIBE", { id: "s1", destination: "/x" } ) )
+				conn.msg( _frame( "SUBSCRIBE", { id: "s1", destination: "/y" } ) )
+
+				expect( _lastSent( conn ) ).toInclude( "Duplicate subscription id" )
+				conn.cls( 1000, "" )
+				expect( stomp.getSubscriptions() ).toBeEmpty()
+			} )
+
+			it( "prunes a destination's registry entry once its last subscriber leaves", function() {
+				var stomp = new "../../models/middleware/Stomp"()
+				var conn = _connect( stomp )
+				for ( var i = 1; i <= 25; i++ ) {
+					conn.msg( _frame( "SUBSCRIBE", { id: "s" & i, destination: "/tmp/" & i } ) )
+				}
+				conn.msg( _frame( "UNSUBSCRIBE", { id: "s1" } ) )
+				expect( stomp.getSubscriptions().count() ).toBe( 24 )
+
+				conn.cls( 1000, "" )
+				expect( stomp.getSubscriptions() ).toBeEmpty()
+			} )
+
+			it( "caps subscriptions per connection", function() {
+				var stomp = new "../../models/middleware/Stomp"( { maxSubscriptions: 3 } )
+				var conn = _connect( stomp )
+				for ( var i = 1; i <= 4; i++ ) {
+					conn.msg( _frame( "SUBSCRIBE", { id: "s" & i, destination: "/d" & i } ) )
+				}
+				assertAll( [
+					() => expect( _lastSent( conn ) ).toInclude( "Too many subscriptions" ),
+					() => expect( stomp.getSubscriptions().count() ).toBe( 3 ),
+					() => expect( conn.closed ).withContext( "non-fatal" ).toBeFalse()
+				] )
+			} )
+
+			it( "caps open transactions and buffered frames per transaction", function() {
+				var stomp = new "../../models/middleware/Stomp"( { maxTransactions: 2, maxTransactionFrames: 3 } )
+				var conn = _connect( stomp )
+				conn.msg( _frame( "BEGIN", { transaction: "t1" } ) )
+				conn.msg( _frame( "BEGIN", { transaction: "t2" } ) )
+				conn.msg( _frame( "BEGIN", { transaction: "t3" } ) )
+				expect( _lastSent( conn ) ).toInclude( "Too many open transactions" )
+
+				for ( var i = 1; i <= 4; i++ ) {
+					conn.msg( _frame( "SEND", { destination: "/z", transaction: "t1" }, "x" ) )
+				}
+				expect( _lastSent( conn ) ).toInclude( "Too many frames in transaction" )
+			} )
+
+			it( "closes a connection whose unacknowledged messages pass the cap", function() {
+				var stomp = new "../../models/middleware/Stomp"( { maxPendingAcks: 2 } )
+				var slow = _connect( stomp )
+				slow.msg( _frame( "SUBSCRIBE", { id: "s", destination: "/q", ack: "client" } ) )
+				for ( var i = 1; i <= 3; i++ ) {
+					stomp.send( "/q", "m" & i )
+				}
+				assertAll( [
+					() => expect( _lastSent( slow ) ).toInclude( "Too many unacknowledged messages" ),
+					() => expect( slow.closed ).toBeTrue()
+				] )
+			} )
+
+			it( "refuses an over-long destination", function() {
+				var stomp = new "../../models/middleware/Stomp"( { maxDestinationLength: 10 } )
+				var conn = _connect( stomp )
+				conn.msg( _frame( "SUBSCRIBE", { id: "s", destination: repeatString( "d", 11 ) } ) )
+				expect( _lastSent( conn ) ).toInclude( "Destination too long" )
+				conn.msg( _frame( "SEND", { destination: repeatString( "d", 11 ) }, "x" ) )
+				expect( _lastSent( conn ) ).toInclude( "Destination too long" )
+			} )
+
+			it( "closes a socket that never completes CONNECT", function() {
+				var stomp = new "../../models/middleware/Stomp"( { connectTimeoutMs: 150 } )
+				var idle = _fake()
+				stomp.handler()( idle )
+				var ok = _fake()
+				stomp.handler()( ok )
+				ok.msg( _frame( "CONNECT", { "accept-version": "1.2" } ) )
+
+				sleep( 500 )
+				assertAll( [
+					() => expect( idle.closed ).withContext( "never sent CONNECT" ).toBeTrue(),
+					() => expect( _lastSent( idle ) ).toInclude( "CONNECT timeout" ),
+					() => expect( ok.closed ).withContext( "connected in time" ).toBeFalse()
+				] )
+			} )
+
+			it( "closes a connection exceeding maxFramesPerSecond", function() {
+				var stomp = new "../../models/middleware/Stomp"( { maxFramesPerSecond: 5 } )
+				var conn = _connect( stomp )
+				for ( var i = 1; i <= 8; i++ ) {
+					conn.msg( _frame( "SEND", { destination: "/d" }, "x" ) )
+				}
+				assertAll( [
+					() => expect( _lastSent( conn ) ).toInclude( "Rate limit exceeded" ),
+					() => expect( conn.closed ).toBeTrue()
+				] )
+			} )
+
+			it( "answers with an ERROR instead of silence when authenticate() throws", function() {
+				var stomp = new "../../models/middleware/Stomp"( { authenticate: () => { throw( "boom" ) } } )
+				var conn = _fake()
+				stomp.handler()( conn )
+				conn.msg( _frame( "CONNECT", { "accept-version": "1.2" } ) )
+				assertAll( [
+					() => expect( _lastSent( conn ) ).toInclude( "Authentication failed" ),
+					() => expect( _lastSent( conn ) ).notToInclude( "boom" ),
+					() => expect( conn.closed ).toBeTrue()
+				] )
+			} )
+
+			it( "denies (fails closed) when authorize() throws, without leaking the exception", function() {
+				var stomp = new "../../models/middleware/Stomp"( { authorize: () => { throw( "kaboom" ) } } )
+				var conn = _connect( stomp )
+				conn.msg( _frame( "SUBSCRIBE", { id: "s", destination: "/d" } ) )
+				assertAll( [
+					() => expect( _lastSent( conn ) ).toInclude( "Not authorized" ),
+					() => expect( _lastSent( conn ) ).notToInclude( "kaboom" ),
+					() => expect( stomp.getSubscriptions() ).toBeEmpty()
+				] )
+			} )
+
+			it( "answers with an ERROR when onSend() throws, and the connection stays usable", function() {
+				var stomp = new "../../models/middleware/Stomp"( { onSend: () => { throw( "hook bug" ) } } )
+				var conn = _connect( stomp )
+				conn.msg( _frame( "SEND", { destination: "/d" }, "x" ) )
+				assertAll( [
+					() => expect( _lastSent( conn ) ).toInclude( "Internal server error" ),
+					() => expect( _lastSent( conn ) ).notToInclude( "hook bug" ),
+					() => expect( conn.closed ).toBeFalse()
+				] )
+			} )
+
+		} )
+
+	}
+
+}

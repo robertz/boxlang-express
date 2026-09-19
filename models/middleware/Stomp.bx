@@ -39,7 +39,22 @@ class {
 		variables.authorizeFn = options.authorize ?: javacast( "null", "" )
 		variables.onSendFn = options.onSend ?: javacast( "null", "" )
 		variables.heartbeatMs = options.heartbeatMs ?: 0
-		variables.codec = new "../StompFrameCodec"()
+
+		// Resource limits — each bounds memory or time a single client could
+		// otherwise consume without limit. 0 disables a limit.
+		// connectTimeoutMs: how long a socket may sit without completing CONNECT.
+		// maxFramesPerSecond: per-connection inbound frame rate (off by default,
+		// since the right value depends entirely on the app). The rest are
+		// per-connection caps.
+		variables.connectTimeoutMs = options.connectTimeoutMs ?: 10000
+		variables.maxFramesPerSecond = options.maxFramesPerSecond ?: 0
+		variables.maxSubscriptions = options.maxSubscriptions ?: 100
+		variables.maxTransactions = options.maxTransactions ?: 16
+		variables.maxTransactionFrames = options.maxTransactionFrames ?: 1000
+		variables.maxPendingAcks = options.maxPendingAcks ?: 1000
+		variables.maxDestinationLength = options.maxDestinationLength ?: 255
+		variables.timerExecutor = createObject( "java", "java.util.concurrent.Executors" ).newVirtualThreadPerTaskExecutor()
+variables.codec = new "../StompFrameCodec"()
 
 		// options.cluster — an app.getClusterManager() instance, for
 		// cross-process relay (see plans/cluster-support.md's "Consumer
@@ -126,6 +141,31 @@ class {
 	}
 
 	/**
+	 * Drops a destination's registry entry once its last subscriber is gone —
+	 * without this, every distinct destination ever subscribed to (per-user
+	 * temporary queues, say) stays in memory forever. Callers already hold
+	 * that destination's lock.
+	 */
+	function _pruneDestination( destination ) {
+		if ( structKeyExists( variables.subscribersByDestination, destination )
+			&& structIsEmpty( variables.subscribersByDestination[ destination ] ) ) {
+			structDelete( variables.subscribersByDestination, destination )
+		}
+	}
+
+	/**
+	 * A throwing authorize() denies rather than escaping — failing closed.
+	 */
+	function _authorize( login, destination, access, connection, connectionId ) {
+		try {
+			return variables.authorizeFn( login, destination, access, connection, _metadataFor( connectionId ) ) ? true : false
+		} catch ( any e ) {
+			println( "[Stomp] authorize() threw for '" & destination & "': " & e.message )
+			return false
+		}
+	}
+
+	/**
 	 * name is either a built-in exchange type ("direct"/"topic"/"fanout"/
 	 * "distribution") or an app-chosen name for a custom exchange, in
 	 * which case config.class is the dotted path to a class implementing
@@ -203,6 +243,13 @@ class {
 			var activeTransactions = {}    // transactionId -> array of deferred actions, for this connection only
 			var lastActivityMs = stomp._nowMs()
 			var getLastActivityMs = () => lastActivityMs
+			var rateWindowStartMs = lastActivityMs
+			var rateWindowFrames = 0
+			var isConnected = () => connected
+
+			if ( variables.connectTimeoutMs > 0 ) {
+				stomp._startConnectDeadline( connection, variables.connectTimeoutMs, isConnected )
+			}
 
 			connection.onMessage( ( raw ) => {
 				lastActivityMs = stomp._nowMs()
@@ -212,6 +259,18 @@ class {
 				// point of receiving it, nothing else to do.
 				if ( !len( raw.trim() ) ) {
 					return
+				}
+
+				if ( variables.maxFramesPerSecond > 0 ) {
+					if ( lastActivityMs - rateWindowStartMs >= 1000 ) {
+						rateWindowStartMs = lastActivityMs
+						rateWindowFrames = 0
+					}
+					rateWindowFrames++
+					if ( rateWindowFrames > variables.maxFramesPerSecond ) {
+						stomp._sendError( connection, "Rate limit exceeded", "", true )
+						return
+					}
 				}
 
 				var frame = ""
@@ -224,6 +283,11 @@ class {
 
 				var receiptId = frame.getHeader( "receipt", "" )
 
+				// A throwing authenticate/authorize/onSend hook (or any other bug behind
+				// this switch) would otherwise escape the message handler and leave the
+				// client with no reply at all. Logged server-side; the client gets a
+				// generic ERROR with no exception detail.
+				try {
 				switch ( frame.getCommand() ) {
 					case "CONNECT":
 					case "STOMP": {
@@ -271,6 +335,10 @@ class {
 								stomp._sendError( connection, "Unknown transaction: " & sendTx, receiptId )
 								break
 							}
+							if ( variables.maxTransactionFrames > 0 && activeTransactions[ sendTx ].len() >= variables.maxTransactionFrames ) {
+								stomp._sendError( connection, "Too many frames in transaction " & sendTx, receiptId )
+								break
+							}
 							// Deferred to COMMIT — see _handleSend's docblock
 							// for what that does and doesn't guarantee.
 							activeTransactions[ sendTx ].append( () => stomp._handleSend( connection, connectionId, frame, login ) )
@@ -292,6 +360,10 @@ class {
 								stomp._sendError( connection, "Unknown transaction: " & ackTx, receiptId )
 								break
 							}
+							if ( variables.maxTransactionFrames > 0 && activeTransactions[ ackTx ].len() >= variables.maxTransactionFrames ) {
+								stomp._sendError( connection, "Too many frames in transaction " & ackTx, receiptId )
+								break
+							}
 							activeTransactions[ ackTx ].append( () => stomp._handleAcknowledge( connectionId, frame ) )
 							stomp._maybeReceipt( connection, receiptId )
 						} else if ( stomp._handleAcknowledge( connectionId, frame ) ) {
@@ -311,6 +383,10 @@ class {
 							stomp._sendError( connection, "Invalid or duplicate transaction id", receiptId )
 							break
 						}
+						if ( variables.maxTransactions > 0 && activeTransactions.count() >= variables.maxTransactions ) {
+							stomp._sendError( connection, "Too many open transactions", receiptId )
+							break
+						}
 						activeTransactions[ beginTx ] = []
 						stomp._maybeReceipt( connection, receiptId )
 						break
@@ -325,10 +401,16 @@ class {
 							stomp._sendError( connection, "Unknown transaction: " & commitTx, receiptId )
 							break
 						}
-						for ( var action in activeTransactions[ commitTx ] ) {
-							action()
-						}
+						var actions = activeTransactions[ commitTx ]
 						structDelete( activeTransactions, commitTx )
+						for ( var action in actions ) {
+							try {
+								action()
+							} catch ( any e ) {
+								println( "[Stomp] error running a buffered transaction frame: " & e.message )
+								stomp._sendError( connection, "Internal server error", receiptId )
+							}
+						}
 						stomp._maybeReceipt( connection, receiptId )
 						break
 					}
@@ -351,11 +433,15 @@ class {
 						connection.close()
 						break
 					}
-					default: {
-						stomp._sendError( connection, "Unknown command: " & frame.getCommand(), receiptId, true )
+						default: {
+							stomp._sendError( connection, "Unknown command: " & frame.getCommand(), receiptId, true )
+						}
 					}
-				}
-			} )
+					} catch ( any e ) {
+						println( "[Stomp] error handling " & frame.getCommand() & " frame: " & e.message )
+						stomp._sendError( connection, "Internal server error", receiptId )
+					}
+					} )
 
 			connection.onClose( ( code, reason ) => {
 				stomp._removeAllSubscriptions( connectionId, mySubscriptions )
@@ -399,7 +485,12 @@ class {
 		var host = frame.getHeader( "host", "" )
 
 		if ( !isNull( variables.authenticateFn ) ) {
-			var authenticated = variables.authenticateFn( login, passcode, host, connection, connectionMetadata )
+			var authenticated = false
+			try {
+				authenticated = variables.authenticateFn( login, passcode, host, connection, connectionMetadata )
+			} catch ( any e ) {
+				println( "[Stomp] authenticate() threw: " & e.message )
+			}
 			if ( !authenticated ) {
 				_sendError( connection, "Authentication failed", frame.getHeader( "receipt", "" ), true )
 				return { ok: false, login: "", outgoingHeartbeatMs: 0, incomingHeartbeatMs: 0 }
@@ -488,6 +579,23 @@ class {
 			return false
 		}
 
+		if ( variables.maxDestinationLength > 0 && len( destination ) > variables.maxDestinationLength ) {
+			_sendError( connection, "Destination too long", frame.getHeader( "receipt", "" ) )
+			return false
+		}
+
+		// Subscription ids must be unique per connection (spec). Silently
+		// replacing one would orphan the earlier registry entry — it'd keep
+		// receiving for a destination this connection can no longer unsubscribe.
+		if ( structKeyExists( mySubscriptions, subId ) ) {
+			_sendError( connection, "Duplicate subscription id: " & subId, frame.getHeader( "receipt", "" ) )
+			return false
+		}
+		if ( variables.maxSubscriptions > 0 && mySubscriptions.count() >= variables.maxSubscriptions ) {
+			_sendError( connection, "Too many subscriptions", frame.getHeader( "receipt", "" ) )
+			return false
+		}
+
 		var ackMode = frame.getHeader( "ack", "auto" )
 		if ( !listFindNoCase( "auto,client,client-individual", ackMode ) ) {
 			_sendError( connection, "Invalid ack mode: " & ackMode, frame.getHeader( "receipt", "" ), true )
@@ -495,7 +603,7 @@ class {
 		}
 
 		if ( !isNull( variables.authorizeFn ) ) {
-			var allowed = variables.authorizeFn( login, destination, "subscribe", connection, _metadataFor( connectionId ) )
+			var allowed = _authorize( login, destination, "subscribe", connection, connectionId )
 			if ( !allowed ) {
 				_sendError( connection, "Not authorized to subscribe to " & destination )
 				return false
@@ -526,9 +634,10 @@ class {
 		lock name="#_destLockName( destination )#" type="exclusive" timeout="5" {
 			if ( structKeyExists( variables.subscribersByDestination, destination ) ) {
 				structDelete( variables.subscribersByDestination[ destination ], connectionId & ":" & subId )
-			}
-		}
-		// Any messages still pending ack on this subscription can never be
+						_pruneDestination( destination )
+					}
+				}
+				// Any messages still pending ack on this subscription can never be
 		// acked now — drop them too, or they'd sit in the registry forever (a
 		// real, if small, leak: nothing else ever clears an entry whose
 		// subscription was torn down out from under it). A separate,
@@ -571,7 +680,7 @@ class {
 			// breaking the documented authorize(login, destination, access,
 			// connection) contract for publish checks specifically (only
 			// SUBSCRIBE's own authorize() call passed the real connection).
-			var allowed = variables.authorizeFn( login, destination, "publish", connection, _metadataFor( connectionId ) )
+			var allowed = _authorize( login, destination, "publish", connection, connectionId )
 			if ( !allowed ) {
 				// Matches _handleSubscribe's equivalent denial above — a denied SEND used to just
 				// vanish with no signal in either direction (no ERROR frame, no delivery), unlike
@@ -581,10 +690,20 @@ class {
 				return false
 			}
 		}
+		if ( variables.maxDestinationLength > 0 && len( destination ) > variables.maxDestinationLength ) {
+			_sendError( connection, "Destination too long", frame.getHeader( "receipt", "" ) )
+			return false
+		}
+
+		// Application headers (reply-to, correlation-id, ...) travel with the
+		// message; headers the protocol itself owns are dropped, and the ones the
+		// broker stamps on delivery are set afterwards, so a client can't spoof them.
 		var extraHeaders = {}
-		var contentType = frame.getHeader( "content-type", "" )
-		if ( len( contentType ) ) {
-			extraHeaders[ "content-type" ] = contentType
+		var frameHeaders = frame.getHeaders()
+		for ( var headerName in frameHeaders ) {
+			if ( !listFindNoCase( "destination,transaction,receipt,content-length,message-id,subscription,ack", headerName ) ) {
+				extraHeaders[ headerName ] = frameHeaders[ headerName ]
+			}
 		}
 		var body = frame.getBody()
 
@@ -610,7 +729,14 @@ class {
 		//     pass-through: deliver the frame exactly as authorizeFn above
 		//     already would have, unchanged.
 		if ( !isNull( variables.onSendFn ) ) {
-			var hookResult = variables.onSendFn( destination, body, extraHeaders, connection, _metadataFor( connectionId ) )
+			var hookResult = ""
+			try {
+				hookResult = variables.onSendFn( destination, body, extraHeaders, connection, _metadataFor( connectionId ) )
+			} catch ( any e ) {
+				println( "[Stomp] onSend() threw for '" & destination & "': " & e.message )
+				_sendError( connection, "Internal server error", frame.getHeader( "receipt", "" ) )
+				return false
+			}
 			if ( isNull( hookResult ) || hookResult == false ) {
 				return true
 			}
@@ -761,6 +887,16 @@ class {
 			if ( subscriber.ackMode != "auto" ) {
 				var ackId = createUUID()
 				headers[ "ack" ] = ackId
+				var overLimit = false
+				lock name="#_connLockName( subscriber.connectionId )#" type="exclusive" timeout="5" {
+					overLimit = variables.maxPendingAcks > 0
+						&& structCount( variables.pendingAcksByConnection[ subscriber.connectionId ] ?: {} ) >= variables.maxPendingAcks
+				}
+				if ( overLimit ) {
+					// A client that never acks would otherwise grow this registry forever.
+					_sendError( subscriber.connection, "Too many unacknowledged messages", "", true )
+					continue
+				}
 				lock name="#_connLockName( subscriber.connectionId )#" type="exclusive" timeout="5" {
 					var nextSeq = ( variables.ackSeqByConnection[ subscriber.connectionId ] ?: 0 ) + 1
 					variables.ackSeqByConnection[ subscriber.connectionId ] = nextSeq
@@ -803,11 +939,12 @@ class {
 			lock name="#_destLockName( destination )#" type="exclusive" timeout="5" {
 				if ( structKeyExists( variables.subscribersByDestination, destination ) ) {
 					structDelete( variables.subscribersByDestination[ destination ], connectionId & ":" & subId )
-				}
-			}
-		}
-		lock name="#_connLockName( connectionId )#" type="exclusive" timeout="5" {
-			structDelete( variables.pendingAcksByConnection, connectionId )
+								_pruneDestination( destination )
+							}
+						}
+					}
+					lock name="#_connLockName( connectionId )#" type="exclusive" timeout="5" {
+						structDelete( variables.pendingAcksByConnection, connectionId )
 			structDelete( variables.ackSeqByConnection, connectionId )
 			structDelete( variables.connectionsById, connectionId )
 		}
@@ -838,7 +975,16 @@ class {
 	}
 
 	function getConfig() {
-		return { heartbeatMs: variables.heartbeatMs }
+		return {
+			heartbeatMs: variables.heartbeatMs,
+			connectTimeoutMs: variables.connectTimeoutMs,
+			maxFramesPerSecond: variables.maxFramesPerSecond,
+			maxSubscriptions: variables.maxSubscriptions,
+			maxTransactions: variables.maxTransactions,
+			maxTransactionFrames: variables.maxTransactionFrames,
+			maxPendingAcks: variables.maxPendingAcks,
+			maxDestinationLength: variables.maxDestinationLength
+		}
 	}
 
 	/**
@@ -872,6 +1018,24 @@ class {
 
 	function _nowMs() {
 		return createObject( "java", "java.lang.System" ).currentTimeMillis()
+	}
+
+	/**
+	 * Closes a socket that hasn't completed CONNECT within timeoutMs — an
+	 * unauthenticated connection otherwise costs the server a socket
+	 * indefinitely for free. Runs on a virtual thread, not a platform one.
+	 */
+	function _startConnectDeadline( connection, timeoutMs, isConnected ) {
+		var stomp = this
+		variables.timerExecutor.submit( createDynamicProxy(
+			new "../ThreadRunnable"( function() {
+				sleep( timeoutMs )
+				if ( !connection.isClosed() && !isConnected() ) {
+					stomp._sendError( connection, "CONNECT timeout", "", true )
+				}
+			} ),
+			[ "java.lang.Runnable" ]
+		) )
 	}
 
 	function _startOutgoingHeartbeat( connection, intervalMs ) {

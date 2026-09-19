@@ -395,6 +395,36 @@ interval is negotiated, the server also monitors it: if nothing arrives
 (a real frame or a bare heartbeat) within roughly 2x that interval, it
 sends an `ERROR` and closes the connection.
 
+**Message headers.** Application headers on a client `SEND` (`reply-to`,
+`correlation-id`, anything custom) are forwarded on the `MESSAGE` frame;
+the headers the protocol or broker owns (`destination`, `transaction`,
+`receipt`, `content-length`, `message-id`, `subscription`, `ack`) are not
+copied, so a client can't forge them. Frames may use `\n` or `\r\n` line
+endings, and `content-length` is an octet count, so multi-byte bodies
+round-trip.
+
+**Limits.** Each bounds what a single client can make the broker hold or
+wait on; pass `0` to disable one. Exceeding a per-connection cap gets an
+`ERROR` and leaves the connection open, except where noted:
+
+| Option | Default | Effect |
+|---|---|---|
+| `connectTimeoutMs` | `10000` | a socket that hasn't completed `CONNECT` in time is closed |
+| `maxFramesPerSecond` | `0` (off) | more inbound frames per second closes the connection — the right value is app-specific, so it's opt-in |
+| `maxSubscriptions` | `100` | subscriptions per connection |
+| `maxTransactions` | `16` | open transactions per connection |
+| `maxTransactionFrames` | `1000` | frames buffered per transaction |
+| `maxPendingAcks` | `1000` | unacknowledged messages per connection — past it the connection is closed, since a client that never acks would otherwise grow this forever |
+| `maxDestinationLength` | `255` | characters in a `SUBSCRIBE`/`SEND` destination |
+
+A subscription `id` already in use on the same connection is rejected
+with an `ERROR` (ids must be unique per connection, per spec). An
+`authenticate`, `authorize` or `onSend` callback that throws no longer
+leaves the client with no reply: the exception is logged server-side, and
+the client gets a generic `ERROR` (authenticate and authorize fail
+closed). A destination's registry entry is dropped once its last
+subscriber leaves.
+
 `Sec-WebSocket-Protocol` negotiation (`v12.stomp`/`v11.stomp`/
 `v10.stomp`) is handled automatically by `app.ws()`'s handshake, for
 client libraries (stomp.js and others) that send and expect it echoed —
@@ -1517,6 +1547,24 @@ Two more BoxLang-specific things that shaped how these are written:
   rather than `../fixtures/...`.
 
 ## Changelog
+
+**0.2.14**
+- **STOMP fixes:** `content-length` is now an octet count, not a
+  character count (a multi-byte body used to keep the frame's trailing
+  NUL); CRLF-terminated frames now parse (they arrived as command
+  `SEND\r` with an empty body); application headers on `SEND` are
+  forwarded to subscribers; re-using a subscription `id` on a connection
+  is rejected instead of orphaning the first subscription (which kept
+  receiving for a destination its owner could no longer unsubscribe); and
+  a destination's registry entry is pruned once its last subscriber
+  leaves.
+- **STOMP limits:** new `connectTimeoutMs`, `maxFramesPerSecond` (opt-in),
+  `maxSubscriptions`, `maxTransactions`, `maxTransactionFrames`,
+  `maxPendingAcks` and `maxDestinationLength` options, so one client can
+  no longer make the broker buffer or wait without bound — see the
+  **Limits** table under STOMP. A throwing `authenticate`/`authorize`/
+  `onSend` callback now produces an `ERROR` frame instead of silence.
+  Full suite: 285/285.
 
 **0.2.13**
 - **Security fix:** WebSocket message size is now capped (default 1 MB,
