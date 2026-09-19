@@ -64,6 +64,11 @@ class {
 		variables.maxTransactionFrames = options.maxTransactionFrames ?: 1000
 		variables.maxPendingAcks = options.maxPendingAcks ?: 1000
 		variables.maxDestinationLength = options.maxDestinationLength ?: 255
+		// Broker-wide (per node) caps, unlike the per-connection ones above:
+		// maxConnections counts connections that completed CONNECT;
+		// maxSubscribersPerDestination counts subscriptions on one destination.
+		variables.maxConnections = options.maxConnections ?: 10000
+		variables.maxSubscribersPerDestination = options.maxSubscribersPerDestination ?: 10000
 		variables.virtualExecutor = createObject( "java", "java.util.concurrent.Executors" ).newVirtualThreadPerTaskExecutor()
 
 		// Lifecycle hooks — see the class docblock. All optional, all observers:
@@ -524,6 +529,14 @@ variables.codec = new "../StompFrameCodec"()
 	 * the client via the headers of the CONNECTED frame").
 	 */
 	function _handleConnect( connection, frame, connectionMetadata ) {
+		// Checked before authenticate() so a full broker doesn't spend auth work on
+		// clients it can't take. Not atomic with registration, so a burst of
+		// simultaneous CONNECTs can overshoot by roughly the burst size.
+		if ( variables.maxConnections > 0 && structCount( variables.connectionsById ) >= variables.maxConnections ) {
+			_sendError( connection, "Server at capacity", frame.getHeader( "receipt", "" ), true )
+			return { ok: false, login: "", version: "", outgoingHeartbeatMs: 0, incomingHeartbeatMs: 0 }
+		}
+
 		// No accept-version header means a 1.0 client (the header arrived in 1.1).
 		// Serve the highest version both sides offer.
 		var acceptedVersions = frame.getHeader( "accept-version", "1.0" )
@@ -678,22 +691,31 @@ variables.codec = new "../StompFrameCodec"()
 			}
 		}
 
+		var destinationFull = false
 		lock name="#_destLockName( destination )#" type="exclusive" timeout="5" {
-			if ( !structKeyExists( variables.subscribersByDestination, destination ) ) {
-				variables.subscribersByDestination[ destination ] = {}
+			destinationFull = variables.maxSubscribersPerDestination > 0
+				&& structCount( variables.subscribersByDestination[ destination ] ?: {} ) >= variables.maxSubscribersPerDestination
+			if ( !destinationFull ) {
+				if ( !structKeyExists( variables.subscribersByDestination, destination ) ) {
+					variables.subscribersByDestination[ destination ] = {}
+				}
+				variables.subscribersByDestination[ destination ][ connectionId & ":" & subId ] = {
+					connection: connection,
+					subId: subId,
+					connectionId: connectionId,
+					login: login,
+					version: version,
+					ackMode: ackMode
+				}
 			}
-			variables.subscribersByDestination[ destination ][ connectionId & ":" & subId ] = {
-				connection: connection,
-				subId: subId,
-				connectionId: connectionId,
-				login: login,
-				version: version,
-				ackMode: ackMode
-				}
-				}
-				mySubscriptions[ subId ] = destination
-				_fireOnSubscribe( login, destination, subId, connection, _metadataFor( connectionId ) )
-				return true
+		}
+		if ( destinationFull ) {
+			_sendError( connection, "Too many subscribers for " & destination, frame.getHeader( "receipt", "" ) )
+			return false
+		}
+		mySubscriptions[ subId ] = destination
+		_fireOnSubscribe( login, destination, subId, connection, _metadataFor( connectionId ) )
+		return true
 	}
 
 	function _handleUnsubscribe( connectionId, frame, mySubscriptions, login = "", version = "1.2" ) {
@@ -1283,7 +1305,9 @@ function _removeAllSubscriptions( connectionId, mySubscriptions ) {
 			maxTransactions: variables.maxTransactions,
 			maxTransactionFrames: variables.maxTransactionFrames,
 			maxPendingAcks: variables.maxPendingAcks,
-			maxDestinationLength: variables.maxDestinationLength
+			maxDestinationLength: variables.maxDestinationLength,
+			maxConnections: variables.maxConnections,
+			maxSubscribersPerDestination: variables.maxSubscribersPerDestination
 		}
 	}
 

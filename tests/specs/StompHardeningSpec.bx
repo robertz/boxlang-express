@@ -156,6 +156,53 @@ class extends="testbox.system.BaseSpec" {
 				] )
 			} )
 
+			it( "refuses a CONNECT once maxConnections is reached, and admits again after one leaves", function() {
+				var stomp = new "../../models/middleware/Stomp"( { maxConnections: 2 } )
+				var first = _connect( stomp )
+				var second = _connect( stomp )
+				var third = _fake()
+				stomp.handler()( third )
+				third.msg( _frame( "CONNECT", { "accept-version": "1.2" } ) )
+				assertAll( [
+					() => expect( _lastSent( third ) ).toInclude( "Server at capacity" ),
+					() => expect( third.closed ).toBeTrue(),
+					() => expect( stomp.getConnections().count() ).toBe( 2 )
+				] )
+
+				first.cls( 1000, "" )
+				var fourth = _connect( stomp )
+				expect( _lastSent( fourth ) ).toInclude( "CONNECTED" )
+			} )
+
+			it( "does not run authenticate() for a CONNECT the broker is too full to take", function() {
+				var authCalls = []
+				var stomp = new "../../models/middleware/Stomp"( { maxConnections: 1, authenticate: () => { authCalls.append( 1 ); return true } } )
+				_connect( stomp )
+				_connect( stomp )
+				expect( authCalls ).toHaveLength( 1 )
+			} )
+
+			it( "caps subscribers per destination without affecting other destinations", function() {
+				var stomp = new "../../models/middleware/Stomp"( { maxSubscribersPerDestination: 2 } )
+				var conns = [ _connect( stomp ), _connect( stomp ), _connect( stomp ) ]
+				for ( var c in conns ) {
+					c.msg( _frame( "SUBSCRIBE", { id: "s", destination: "/room" } ) )
+				}
+				conns[ 3 ].msg( _frame( "SUBSCRIBE", { id: "t", destination: "/other" } ) )
+				assertAll( [
+					() => expect( _lastSent( conns[ 2 ] ) ).withContext( "second subscriber still fits" ).notToInclude( "Too many" ),
+					() => expect( stomp.getSubscriptions()[ "/room" ].count() ).toBe( 2 ),
+					() => expect( stomp.getSubscriptions()[ "/other" ].count() ).toBe( 1 )
+				] )
+
+				conns[ 3 ].msg( _frame( "SUBSCRIBE", { id: "u", destination: "/room" } ) )
+				expect( _lastSent( conns[ 3 ] ) ).toInclude( "Too many subscribers for /room" )
+
+				conns[ 1 ].msg( _frame( "UNSUBSCRIBE", { id: "s" } ) )
+				conns[ 3 ].msg( _frame( "SUBSCRIBE", { id: "u", destination: "/room" } ) )
+				expect( stomp.getSubscriptions()[ "/room" ].count() ).withContext( "room freed up" ).toBe( 2 )
+			} )
+
 			it( "refuses an over-long destination", function() {
 				var stomp = new "../../models/middleware/Stomp"( { maxDestinationLength: 10 } )
 				var conn = _connect( stomp )

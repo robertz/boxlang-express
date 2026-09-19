@@ -408,9 +408,10 @@ copied, so a client can't forge them. Frames may use `\n` or `\r\n` line
 endings, and `content-length` is an octet count, so multi-byte bodies
 round-trip.
 
-**Limits.** Each bounds what a single client can make the broker hold or
-wait on; pass `0` to disable one. Exceeding a per-connection cap gets an
-`ERROR` and leaves the connection open, except where noted:
+**Limits.** Each bounds what clients can make the broker hold or wait on; pass `0`
+to disable one. The first seven are per connection, the last two are
+per node. Exceeding a cap gets an `ERROR` and leaves the connection
+open, except where noted:
 
 | Option | Default | Effect |
 |---|---|---|
@@ -421,6 +422,8 @@ wait on; pass `0` to disable one. Exceeding a per-connection cap gets an
 | `maxTransactionFrames` | `1000` | frames buffered per transaction |
 | `maxPendingAcks` | `1000` | unacknowledged messages per connection — past it the connection is closed, since a client that never acks would otherwise grow this forever |
 | `maxDestinationLength` | `255` | characters in a `SUBSCRIBE`/`SEND` destination |
+| `maxConnections` | `10000` | connections per node that have completed `CONNECT`; further `CONNECT`s get an `ERROR` and are closed, before `authenticate()` runs. Not atomic, so a burst of simultaneous `CONNECT`s can overshoot slightly |
+| `maxSubscribersPerDestination` | `10000` | subscriptions on one destination (per node); the `SUBSCRIBE` gets an `ERROR` and the connection stays open |
 
 A subscription `id` already in use on the same connection is rejected
 with an `ERROR` (ids must be unique per connection, per spec). An
@@ -1609,6 +1612,13 @@ Two more BoxLang-specific things that shaped how these are written:
   rather than `../fixtures/...`.
 
 ## Changelog
+
+**0.2.16**
+- **STOMP limits:** new `maxConnections` (default 10000, per node) and
+  `maxSubscribersPerDestination` (default 10000) options, the
+  broker-wide counterparts to the per-connection caps added in 0.2.14 —
+  see the **Limits** table under STOMP. A full broker refuses a `CONNECT`
+  before running `authenticate()`. Full suite: 313/313.
 
 **0.2.15**
 - **STOMP:** protocol versions 1.0 and 1.1 are now served alongside 1.2
