@@ -65,6 +65,12 @@ class extends="testbox.system.BaseSpec" {
 			res.send( "Hello from BoxExpress!" )
 		} )
 
+		variables.app.get( "/bad-header/:kind", ( req, res ) => {
+			var evil = req.params.kind == "unicode" ? "a" & chr( 266 ) & "Injected: 1" : "a" & chr( 13 ) & chr( 10 ) & "Injected: 1"
+			res.set( "X-Test", evil )
+			res.send( "ok" )
+		} )
+
 		variables.app.get( "/users/:id", ( req, res ) => {
 			res.json( { id: req.params.id } )
 		} )
@@ -267,6 +273,13 @@ class extends="testbox.system.BaseSpec" {
 				var result = variables.client.get( variables.baseUrl & "/" )
 				expect( result.statusCode ).toBe( 200 )
 				expect( result.body ).toBe( "Hello from BoxExpress!" )
+			} )
+
+			it( "refuses a response header value with CR/LF or a char Undertow would narrow to one", function() {
+				assertAll( [
+					() => expect( variables.client.get( variables.baseUrl & "/bad-header/crlf" ).statusCode ).toBe( 500 ),
+					() => expect( variables.client.get( variables.baseUrl & "/bad-header/unicode" ).statusCode ).toBe( 500 )
+				] )
 			} )
 
 			it( "captures a route param", function() {

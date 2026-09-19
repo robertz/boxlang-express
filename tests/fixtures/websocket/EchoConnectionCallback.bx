@@ -15,7 +15,7 @@ class {
 	function onConnect( exchange, channel ) {
 		var handlerImpl = new "EchoMessageHandler"( variables.recorder )
 		var handlerProxy = createDynamicProxy( handlerImpl, [ "boxexpress.ws.WebSocketMessageHandler" ] )
-		var listener = createObject( "java", "boxexpress.ws.BoxWebSocketListener" ).init( handlerProxy )
+		var listener = createObject( "java", "boxexpress.ws.BoxWebSocketListener" ).init( handlerProxy, javacast( "long", 1048576 ) )
 		channel.getReceiveSetter().set( listener )
 		channel.resumeReceives()
 	}

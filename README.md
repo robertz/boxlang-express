@@ -272,6 +272,15 @@ longer than that. The `app.ws()` callback itself also runs on its own
 virtual thread rather than Undertow's shared I/O pool, so a connect
 handler that blocks can't stall other connections' handshakes.
 
+Incoming messages are capped at 1 MB by default — a larger one is
+refused and the connection closed with a `1009` (message too big) — so an
+unauthenticated client can't make the server buffer an unbounded message.
+Change it with `app.set( "wsMaxMessageSize", bytes )` before `listen()`.
+Response header values (`res.set()`, `res.cookie()`) containing CR/LF,
+other control characters, or characters above Latin-1 are refused with a
+500 rather than sent, since Undertow would silently narrow those to
+8 bits.
+
 Path matching is exact only for now — no `:params`, no mounting under a
 `Router`. An upgrade request to a path with no registered `app.ws()`
 route falls through to the normal HTTP dispatch chain untouched, so it
@@ -1508,6 +1517,23 @@ Two more BoxLang-specific things that shaped how these are written:
   rather than `../fixtures/...`.
 
 ## Changelog
+
+**0.2.13**
+- **Security fix:** WebSocket message size is now capped (default 1 MB,
+  `app.set( "wsMaxMessageSize", bytes )`). Undertow's own default is
+  unlimited, so any `app.ws()` route (including STOMP and the cluster
+  relay) would buffer an arbitrarily large message from an
+  unauthenticated client (CVE-2026-81624, no upstream fix yet).
+  `libs/boxexpress-ws-shim-1.0.0.jar` rebuilt.
+- **Security hardening:** response header values are now validated —
+  CR/LF, control characters, and characters above Latin-1 are refused,
+  because Undertow narrows each character to 8 bits when writing headers
+  (CVE-2026-19879, no upstream fix yet), which could turn e.g. U+010A
+  into a bare line feed.
+- Reviewed the vendored jars: `handlebars-4.3.1.jar` has an advisory
+  (GHSA-r4gv-qr8j-p3pg) in `FileTemplateLoader` only, which this project
+  never uses (`compileInline` only), so it was left as is. Full suite:
+  270/270.
 
 **0.2.12**
 - **Bug fix:** a burst of WebSocket clients that connect and then vanish

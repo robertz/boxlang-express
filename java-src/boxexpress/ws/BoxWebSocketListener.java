@@ -61,8 +61,23 @@ public class BoxWebSocketListener extends AbstractReceiveListener {
 	private final WebSocketMessageHandler handler;
 	private final ExecutorService executor = Executors.newSingleThreadExecutor( Thread.ofVirtual().name( "ws-conn-", 0 ).factory() );
 
-	public BoxWebSocketListener( WebSocketMessageHandler handler ) {
+	private final long maxMessageSize;
+
+	public BoxWebSocketListener( WebSocketMessageHandler handler, long maxMessageSize ) {
 		this.handler = handler;
+		this.maxMessageSize = maxMessageSize;
+	}
+
+	// Undertow's own default is unlimited (-1), so an unauthenticated client
+	// could make the server buffer an arbitrarily large message (CVE-2026-81624).
+	@Override
+	protected long getMaxTextBufferSize() {
+		return maxMessageSize;
+	}
+
+	@Override
+	protected long getMaxBinaryBufferSize() {
+		return maxMessageSize;
 	}
 
 	@Override

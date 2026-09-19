@@ -44,8 +44,9 @@ class {
 	 * already defined and this single-threaded resolution is the only one
 	 * that will ever happen.
 	 */
-	function init( wsRoutes ) {
+	function init( wsRoutes, maxMessageSize = 1048576 ) {
 		variables.wsRoutes = wsRoutes
+		variables.maxMessageSize = javacast( "long", maxMessageSize )
 		variables.listenerClass = createObject( "java", "boxexpress.ws.BoxWebSocketListener" )
 		// onConnect() below runs on Undertow's own XNIO I/O thread — Undertow
 		// invokes WebSocketConnectionCallback directly from the handshake
@@ -83,7 +84,7 @@ class {
 		var connection = new "../WebSocketConnection"( channel, _extractHeaders( exchange ) )
 		var handlerAdapter = new "WsMessageHandlerAdapter"( connection )
 		var handlerProxy = createDynamicProxy( handlerAdapter, [ "boxexpress.ws.WebSocketMessageHandler" ] )
-		var listener = variables.listenerClass.init( handlerProxy )
+		var listener = variables.listenerClass.init( handlerProxy, variables.maxMessageSize )
 		channel.getReceiveSetter().set( listener )
 
 		// handlerFn (and therefore resumeReceives(), which has to stay

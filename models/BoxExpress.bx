@@ -243,7 +243,7 @@ class {
 		// completely unchanged, for everything else.
 		var rootProxy = proxy
 		if ( !structIsEmpty( variables.wsRoutes ) ) {
-			var wsConnectionCallback = new adapters.WsConnectionCallback( variables.wsRoutes )
+			var wsConnectionCallback = new adapters.WsConnectionCallback( variables.wsRoutes, this.settings.wsMaxMessageSize ?: 1048576 )
 			var wsCallbackProxy = createDynamicProxy( wsConnectionCallback, [ "io.undertow.websockets.WebSocketConnectionCallback" ] )
 
 			// Registering the STOMP-over-WebSocket subprotocol names here

@@ -36,6 +36,7 @@ class extends="testbox.system.BaseSpec" {
 			variables.capturedCookies = connection.cookies
 		} )
 
+		variables.app.set( "wsMaxMessageSize", 1000 )
 		variables.app.listen( port = variables.testPort, options = { block: false } )
 		sleep( 300 )
 	}
@@ -71,6 +72,23 @@ class extends="testbox.system.BaseSpec" {
 				expect( client.readTextFrame() ).toBe( "echo:world" )
 
 				client.close()
+			} )
+
+			it( "drops a message over wsMaxMessageSize instead of buffering and delivering it", function() {
+				var client = new "../helpers/WebSocketTestClient"()
+				client.connect( "localhost", variables.testPort, "/chat" )
+
+				client.sendText( repeatString( "a", 5000 ) )
+				var reply = client.readTextFrameWithTimeout( 1000 )
+				expect( reply ).notToInclude( "echo:" )
+				expect( reply ).toInclude( "exceeded max message size" )
+				client.close()
+
+				var ok = new "../helpers/WebSocketTestClient"()
+				ok.connect( "localhost", variables.testPort, "/chat" )
+				ok.sendText( "small" )
+				expect( ok.readTextFrame() ).toBe( "echo:small" )
+				ok.close()
 			} )
 
 			it( "fires the connection's onClose() callback when the client disconnects", function() {
