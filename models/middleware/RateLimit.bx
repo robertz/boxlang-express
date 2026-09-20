@@ -18,10 +18,13 @@
  * => ... }` to key on something else (an API key, `req.session.userId`,
  * etc).
  *
- * The store is in-memory on this instance (so it doesn't survive a
- * restart and isn't shared across processes) — same trade-off as
- * Session.bx's default MemoryStore, for the same reason: fine for a
- * single-process app, not for a cluster.
+* The default store is in-memory on this instance (so it doesn't survive a
+* restart and isn't shared across processes) — same trade-off as
+* Session.bx's default MemoryStore, for the same reason: fine for a
+* single-process app, not for a cluster. For a cluster, pass
+* { cache: "name" } (a registered BoxLang cache — see CacheRateLimitStore.bx,
+* which also covers what happens when that cache isn't durable or goes
+* away) or { store: myStore } for your own.
  */
 class {
 
@@ -39,9 +42,22 @@ class {
 		var standardHeaders = options.standardHeaders ?: true
 		var keyGenerator = options.keyGenerator ?: ( ( req ) => req.ip )
 
+		// options.store (anything with hit( key, windowMs ) -> { count, resetAt })
+		// or options.cache (a named BoxLang cache) share the count across
+		// instances; without either, counts live in this process. "" rather than
+		// null for "none" — see StompMessage.bx's init() on why.
+		var sharedStore = options.store ?: ""
+		if ( isSimpleValue( sharedStore ) && len( options.cache ?: "" ) ) {
+		sharedStore = new "../stores/CacheRateLimitStore"( options.cache, {
+		fallback: options.fallback ?: true,
+		requireDurable: options.requireDurable ?: false
+		} )
+		}
+		var useSharedStore = !isSimpleValue( sharedStore )
+
 		return function( req, res, next ) {
 			var key = keyGenerator( req )
-			var entry = _hit( key, windowMs )
+			var entry = useSharedStore ? sharedStore.hit( key, windowMs ) : _hit( key, windowMs )
 			var remaining = max( 0, maxRequests - entry.count )
 			var resetSeconds = int( ( entry.resetAt - _now() ) / 1000 )
 

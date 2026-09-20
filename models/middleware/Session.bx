@@ -65,6 +65,13 @@ class {
 		var maxAge = options.maxAge ?: 86400
 		var cookiePath = options.path ?: "/"
 		var store = options.store ?: this
+		// options.cache is shorthand for { store: boxExpressCacheStore( name ) }
+		if ( !structKeyExists( options, "store" ) && len( options.cache ?: "" ) ) {
+		store = new "../stores/CacheStore"( options.cache, {
+		fallback: options.fallback ?: true,
+		requireDurable: options.requireDurable ?: false
+		} )
+		}
 		var resave = options.resave ?: true
 		var saveUninitialized = options.saveUninitialized ?: true
 

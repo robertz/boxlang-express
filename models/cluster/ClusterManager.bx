@@ -40,7 +40,7 @@ class {
 		variables.relayOpened = false
 		variables.relayMessageHandler = javacast( "null", "" )
 		variables.presenceProvider = javacast( "null", "" )
-variables.peerConnections = {}   // peerName -> ClusterPeer, outbound only
+		variables.peerConnections = {}   // peerName -> ClusterPeer, outbound only
 
 		if ( variables.config.enabled ) {
 			_validateConfig()
@@ -215,13 +215,13 @@ variables.peerConnections = {}   // peerName -> ClusterPeer, outbound only
 				structAppend( resolved, moduleInfo.settings.cluster, true )
 			}
 		} catch ( any e ) {
-			// getModuleInfo() throwing (or the module never having been
-			// registered — this project's own tests/examples construct
-			// BoxExpress via a relative-path `new`, which never goes
-			// through BoxLang's module service at all) just means there's
-			// no module-level default to merge in. Not an error — fall
-			// through to the hardcoded defaults above plus whatever
-			// appSettings.cluster provides below.
+		// getModuleInfo() throwing (or the module never having been
+		// registered — this project's own tests/examples construct
+		// BoxExpress via a relative-path `new`, which never goes
+		// through BoxLang's module service at all) just means there's
+		// no module-level default to merge in. Not an error — fall
+		// through to the hardcoded defaults above plus whatever
+		// appSettings.cluster provides below.
 		}
 
 		var explicitOverride = appSettings.cluster ?: {}
@@ -268,11 +268,11 @@ variables.peerConnections = {}   // peerName -> ClusterPeer, outbound only
 			throw(
 				type: "BoxExpress.ClusterConfigError",
 				message: "cluster.cacheProvider '" & variables.config.cacheProvider & "' is backed by objectStore '" &
-					storeSimpleName & "', which reports isDistributed() == false and isn't listed in " &
-					"cluster.allowedObjectStores (" & arrayToList( variables.config.allowedObjectStores ) &
-					"). A non-durable/shared store (BoxLang's in-memory ConcurrentStore, most commonly) means " &
-					"every node only ever sees itself as a peer — see plans/cluster-support.md's " &
-					"'A durable cache is required' section."
+				storeSimpleName & "', which reports isDistributed() == false and isn't listed in " &
+				"cluster.allowedObjectStores (" & arrayToList( variables.config.allowedObjectStores ) &
+				"). A non-durable/shared store (BoxLang's in-memory ConcurrentStore, most commonly) means " &
+				"every node only ever sees itself as a peer — see plans/cluster-support.md's " &
+				"'A durable cache is required' section."
 			)
 		}
 	}
@@ -448,7 +448,7 @@ variables.peerConnections = {}   // peerName -> ClusterPeer, outbound only
 			var currentManagerResult = provider.get( variables.MANAGER_KEY )
 			var currentManager = currentManagerResult.isPresent() ? currentManagerResult.get() : ""
 			var managerIsLive = len( currentManager ) &&
-				( currentManager == variables.myPeerName || getPeers().contains( currentManager ) )
+			( currentManager == variables.myPeerName || getPeers().contains( currentManager ) )
 
 			if ( !managerIsLive ) {
 				provider.set( variables.MANAGER_KEY, variables.myPeerName, variables.peerIdleTimeoutSeconds * 3 )

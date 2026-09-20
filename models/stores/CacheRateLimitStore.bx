@@ -1,0 +1,56 @@
+/**
+ * A RateLimit store backed by BoxLang's cache() service, so a limit holds
+ * across every instance sharing the cache instead of each keeping its own
+ * count. Falls back to per-process counting when no durable cache is
+ * available — same behavior and options as CacheStore (see CacheAccess.bx).
+ *
+ *   app.use( "/login", boxExpressRateLimit( { max: 5, windowMs: 15 * 60000, cache: "shared" } ) )
+ *
+ * Fixed-window counting, like RateLimit's built-in store. The
+ * read-then-write against the cache isn't atomic, so two instances hitting
+ * the same key in the same instant can each count once and both write the
+ * same total — a limit enforced this way can run a few requests over under
+ * heavy concurrency, never far under. Every request costs a cache round
+ * trip, which for a JDBCStore is a database call: worth it for a login or
+ * signup route, usually not for a blanket limit on every request.
+ */
+class {
+
+	function init( cacheName, options = {} ) {
+		variables.access = new CacheAccess( cacheName, {
+			label: "rate limit store",
+			fallback: options.fallback ?: true,
+			requireDurable: options.requireDurable ?: false
+		} )
+		return this
+	}
+
+	/**
+	 * Counts one hit against key and returns { count, resetAt } for its
+	 * current window. Keyed on a hash, since a key can be anything a
+	 * keyGenerator returns (an IPv6 address, a path) and some object stores
+	 * use the key as a filename.
+	 */
+	function hit( key, windowMs ) {
+		var storeKey = "ratelimit:" & hash( toString( key ), "MD5" )
+		var now = createObject( "java", "java.lang.System" ).currentTimeMillis()
+		var entry = variables.access.get( storeKey )
+
+		if ( isNull( entry ) || entry.resetAt <= now ) {
+			entry = { count: 0, resetAt: now + windowMs }
+		}
+		entry = { count: entry.count + 1, resetAt: entry.resetAt }
+
+		variables.access.set( storeKey, entry, max( 1, ceiling( ( entry.resetAt - now ) / 1000 ) ) )
+		return entry
+	}
+
+	function getMode() {
+		return variables.access.getMode()
+	}
+
+	function isDurable() {
+		return variables.access.isDurable()
+	}
+
+}

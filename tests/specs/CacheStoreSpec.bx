@@ -54,11 +54,120 @@ class extends="testbox.system.BaseSpec" {
 				expect( isNull( store.get( id ) ) ).toBeTrue()
 			} )
 
-			it( "throws when the named cache doesn't exist", function() {
+			it( "falls back to per-process memory when the named cache doesn't exist", function() {
 				var store = new "../../models/stores/CacheStore"( "not-a-real-cache" )
+				store.set( "x", { views: 2 }, 60 )
+
+				assertAll( [
+					() => expect( store.getMode() ).toBe( "local" ),
+					() => expect( store.isDurable() ).toBeFalse(),
+					() => expect( store.get( "x" ).views ).toBe( 2 )
+				] )
+				store.destroy( "x" )
+				expect( isNull( store.get( "x" ) ) ).toBeTrue()
+			} )
+
+			it( "still expires entries in the fallback", function() {
+				var store = new "../../models/stores/CacheStore"( "not-a-real-cache" )
+				store.set( "x", { v: 1 }, 1 )
+				expect( isNull( store.get( "x" ) ) ).toBeFalse()
+				sleep( 1300 )
+				expect( isNull( store.get( "x" ) ) ).toBeTrue()
+			} )
+
+			it( "throws at construction for a missing cache when fallback is false", function() {
 				expect( function() {
-					store.set( "x", {}, 60 )
-				} ).toThrow()
+					new "../../models/stores/CacheStore"( "not-a-real-cache", { fallback: false } )
+				} ).toThrow( "BoxExpress.CacheStoreError" )
+			} )
+
+			it( "throws at construction for a non-durable cache when requireDurable is true", function() {
+				expect( function() {
+					new "../../models/stores/CacheStore"( "default", { requireDurable: true } )
+				} ).toThrow( "BoxExpress.CacheStoreError" )
+			} )
+
+			it( "uses an in-memory cache as-is, reporting it as non-durable", function() {
+				var store = new "../../models/stores/CacheStore"( "default" )
+				assertAll( [
+					() => expect( store.getMode() ).toBe( "cache" ),
+					() => expect( store.isDurable() ).toBeFalse()
+				] )
+			} )
+
+			describe( "with a durable (FileSystemStore) cache", function() {
+
+				beforeEach( function() {
+					variables.dir = expandPath( "./tmp-cachestore-spec-" & createUUID() )
+					variables.name = "cacheStoreSpec" & createUUID().replace( "-", "", "all" )
+					cacheService().createCache( variables.name, "BoxCacheProvider", { objectStore: "FileSystemStore", directory: variables.dir } )
+				} )
+
+				afterEach( function() {
+					try { cacheService().shutdownCache( variables.name ) } catch ( any e ) {}
+					try { directoryDelete( variables.dir, true ) } catch ( any e ) {}
+				} )
+
+				it( "is detected as durable and shares entries between two store instances", function() {
+					var nodeA = new "../../models/stores/CacheStore"( variables.name )
+					var nodeB = new "../../models/stores/CacheStore"( variables.name )
+					nodeA.set( "sess1", { user: "ada" }, 60 )
+
+					assertAll( [
+						() => expect( nodeA.isDurable() ).toBeTrue(),
+						() => expect( nodeA.getMode() ).toBe( "cache" ),
+						() => expect( nodeB.get( "sess1" ).user ).withContext( "read by a second instance" ).toBe( "ada" )
+					] )
+
+					nodeB.destroy( "sess1" )
+					expect( isNull( nodeA.get( "sess1" ) ) ).toBeTrue()
+				} )
+
+				it( "accepts requireDurable", function() {
+					var store = new "../../models/stores/CacheStore"( variables.name, { requireDurable: true } )
+					expect( store.isDurable() ).toBeTrue()
+				} )
+
+				it( "degrades to memory when the cache disappears mid-run, and recovers when it returns", function() {
+					var store = new "../../models/stores/CacheStore"( variables.name )
+					store.set( "before", { n: 1 }, 60 )
+
+					cacheService().shutdownCache( variables.name )
+					store.set( "during", { n: 2 }, 60 )
+					assertAll( [
+						() => expect( store.get( "during" ).n ).withContext( "written while the cache was gone" ).toBe( 2 ),
+						() => expect( isNull( store.get( "before" ) ) ).withContext( "the durable entry is unreachable until it returns" ).toBeTrue()
+					] )
+
+					cacheService().createCache( variables.name, "BoxCacheProvider", { objectStore: "FileSystemStore", directory: variables.dir } )
+					assertAll( [
+						() => expect( store.get( "before" ).n ).withContext( "durable entries come back" ).toBe( 1 ),
+						() => expect( store.get( "during" ).n ).withContext( "and the outage-time entry is still readable" ).toBe( 2 )
+					] )
+					store.set( "after", { n: 3 }, 60 )
+					expect( cache( variables.name ).get( "after" ).isPresent() ).withContext( "writes reach the cache again" ).toBeTrue()
+				} )
+
+				it( "propagates runtime failures when fallback is false", function() {
+					var store = new "../../models/stores/CacheStore"( variables.name, { fallback: false } )
+					cacheService().shutdownCache( variables.name )
+					expect( function() {
+						store.set( "x", {}, 60 )
+					} ).toThrow()
+				} )
+
+			} )
+
+			it( "Session's cache option builds a fallback-safe store, so a missing cache never breaks a request", function() {
+				var handler = new "../../models/middleware/Session"().session( { cache: "no-such-cache-" & createUUID() } )
+
+				var req1 = { cookies: {} }
+				handler( req1, _fakeRes(), function() {} )
+				req1.session.views = 1
+				var req2 = { cookies: { "connect.sid": req1.sessionID } }
+				handler( req2, _fakeRes(), function() {} )
+
+				expect( req2.session.views ).toBe( 1 )
 			} )
 
 			it( "works as Session's store option end-to-end", function() {

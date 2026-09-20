@@ -1,0 +1,177 @@
+/**
+ * app.health() (liveness/readiness endpoints) and app.shutdown() (drain
+ * in-flight requests, then stop). Every shutdown test needs its own app,
+ * since shutting one down is the thing under test.
+ */
+class extends="testbox.system.BaseSpec" {
+
+	variables.nextPort = 4961
+
+	private function _newApp() {
+		variables.port = variables.nextPort++
+		variables.base = "http://localhost:" & variables.port
+		variables.client = new "../helpers/HttpClient"()
+		return new "../../models/BoxExpress"()
+	}
+
+	private function _start( app ) {
+		app.listen( port = variables.port, options = { block: false } )
+		sleep( 300 )
+	}
+
+	private function _inBackground( fn ) {
+		var t = createObject( "java", "java.lang.Thread" ).init( createDynamicProxy(
+			new "../../models/ThreadRunnable"( fn ),
+			[ "java.lang.Runnable" ]
+		) )
+		t.start()
+		return t
+	}
+
+	function run() {
+
+		describe( "app.health()", function() {
+
+			it( "serves liveness and readiness", function() {
+				var app = _newApp()
+				app.health()
+				_start( app )
+				var live = variables.client.get( variables.base & "/health/live" )
+				var ready = variables.client.get( variables.base & "/health/ready" )
+				app.close()
+				assertAll( [
+					() => expect( live.statusCode ).toBe( 200 ),
+					() => expect( JSONDeserialize( live.body ).status ).toBe( "ok" ),
+					() => expect( ready.statusCode ).toBe( 200 ),
+					() => expect( JSONDeserialize( ready.body ).status ).toBe( "ready" )
+				] )
+			} )
+
+			it( "reports 503 naming the failing checks, without leaking exception text", function() {
+				var app = _newApp()
+				app.health( { checks: {
+					db: () => false,
+					cache: () => { throw( "secret connection string" ) },
+					fine: () => true,
+					noReturn: () => {}
+				} } )
+				_start( app )
+				var ready = variables.client.get( variables.base & "/health/ready" )
+				var live = variables.client.get( variables.base & "/health/live" )
+				app.close()
+
+				var body = JSONDeserialize( ready.body )
+				assertAll( [
+					() => expect( ready.statusCode ).toBe( 503 ),
+					() => expect( body.status ).toBe( "unhealthy" ),
+					() => expect( body.failing.sort( "text" ) ).toBe( [ "cache", "db" ] ),
+					() => expect( ready.body ).notToInclude( "secret" ),
+					() => expect( live.statusCode ).withContext( "liveness ignores dependency checks" ).toBe( 200 )
+				] )
+			} )
+
+			it( "honors a custom path", function() {
+				var app = _newApp()
+				app.health( { path: "/healthz" } )
+				_start( app )
+				var ready = variables.client.get( variables.base & "/healthz/ready" )
+				app.close()
+				expect( ready.statusCode ).toBe( 200 )
+			} )
+
+		} )
+
+		describe( "app.shutdown()", function() {
+
+			it( "lets an in-flight request finish, then stops accepting connections", function() {
+				var app = _newApp()
+				app.get( "/slow", ( req, res ) => { sleep( 800 ); res.send( "finished" ) } )
+				_start( app )
+
+				var slow = {}
+				var worker = _inBackground( () => { slow.result = variables.client.get( variables.base & "/slow" ) } )
+				sleep( 250 )
+
+				var started = getTickCount()
+				var outcome = app.shutdown( { timeoutMs: 5000 } )
+				var took = getTickCount() - started
+				worker.join()
+
+				assertAll( [
+					() => expect( outcome.drained ).toBeTrue(),
+					() => expect( slow.result.statusCode ).withContext( "the request already running when shutdown began" ).toBe( 200 ),
+					() => expect( slow.result.body ).toBe( "finished" ),
+					() => expect( took ).withContext( "waited for it" ).toBeGTE( 400 ),
+					() => expect( () => variables.client.get( variables.base & "/slow" ) ).withContext( "server is stopped" ).toThrow()
+				] )
+			} )
+
+			it( "gives up after timeoutMs when a request will not finish", function() {
+				var app = _newApp()
+				app.get( "/stuck", ( req, res ) => { sleep( 4000 ); res.send( "late" ) } )
+				_start( app )
+				var worker = _inBackground( () => {
+					try { variables.client.get( variables.base & "/stuck" ) } catch ( any e ) {}
+				} )
+				sleep( 250 )
+
+				var started = getTickCount()
+				var outcome = app.shutdown( { timeoutMs: 400 } )
+				var took = getTickCount() - started
+				worker.join()
+
+				assertAll( [
+					() => expect( outcome.drained ).toBeFalse(),
+					() => expect( took ).toBeLT( 2000 )
+				] )
+			} )
+
+			it( "reports draining on /health/ready while still serving during drainDelayMs", function() {
+				var app = _newApp()
+				app.health()
+				app.get( "/ping", ( req, res ) => res.send( "pong" ) )
+				_start( app )
+
+				var worker = _inBackground( () => { app.shutdown( { drainDelayMs: 1000, timeoutMs: 2000 } ) } )
+				sleep( 300 )
+				var ready = variables.client.get( variables.base & "/health/ready" )
+				var ping = variables.client.get( variables.base & "/ping" )
+				worker.join()
+
+				assertAll( [
+					() => expect( ready.statusCode ).toBe( 503 ),
+					() => expect( JSONDeserialize( ready.body ).status ).toBe( "draining" ),
+					() => expect( ping.statusCode ).withContext( "other routes keep working during the delay" ).toBe( 200 )
+				] )
+			} )
+
+			it( "closes open WebSocket connections and fires their onClose", function() {
+				var app = _newApp()
+				var closes = []
+				app.ws( "/w", ( connection ) => {
+					connection.onClose( ( code, reason ) => { closes.append( code ) } )
+				} )
+				_start( app )
+				var client = new "../helpers/WebSocketTestClient"()
+				client.connect( "localhost", variables.port, "/w" )
+				sleep( 150 )
+
+				var outcome = app.shutdown( { timeoutMs: 1000 } )
+				assertAll( [
+					() => expect( outcome.webSocketsClosed ).toBe( 1 ),
+					() => expect( closes ).toHaveLength( 1 )
+				] )
+			} )
+
+			it( "is a no-op on an app that is already closed", function() {
+				var app = _newApp()
+				_start( app )
+				app.close()
+				expect( app.shutdown().drained ).toBeTrue()
+			} )
+
+		} )
+
+	}
+
+}

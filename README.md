@@ -195,6 +195,45 @@ Every request gets a line on stdout as soon as it's received —
 `app.set("log", false)` — useful for a high-throughput deployment that
 doesn't want a synchronous stdout write on every request.
 
+#### Health checks and graceful shutdown (`app.health()` / `app.shutdown()`)
+
+```js
+app.health( { checks: { db: () => pingDatabase() } } )   // register before app.use(...) middleware
+```
+
+`app.health()` adds `GET /health/live` (200 while the process can answer
+at all) and `GET /health/ready` (200 when the app should receive traffic,
+otherwise 503) — the shape a load balancer or a Kubernetes
+`livenessProbe`/`readinessProbe` wants. Each function in `checks` returns
+`false`, or throws, when that dependency is unhealthy; readiness then
+answers `503 { status: "unhealthy", failing: ["db"] }` — the check names,
+never their exception text (which is logged instead). `path` changes the
+`/health` prefix. Readiness also reports `503 { status: "draining" }` the
+moment a shutdown begins. These are ordinary routes, so register them
+before any session/CSRF/rate-limit middleware if probes shouldn't pass
+through it.
+
+`app.shutdown( { timeoutMs, drainDelayMs } )` stops the app gracefully:
+readiness flips to draining straight away; after `drainDelayMs` (default
+`0` — raise it to give a load balancer time to notice before requests are
+refused) new requests get a `503`, every open WebSocket connection is
+closed (firing its `onClose`), and requests already running get up to
+`timeoutMs` to finish before the server stops regardless. It returns
+`{ drained, webSocketsClosed }`; `drained` is `false` if the timeout ran
+out. A long-lived response such as an SSE stream counts as in flight until
+it ends, so it uses the whole timeout. `app.close()` is still the
+immediate stop.
+
+`SIGTERM`/Ctrl-C now run this too, with `app.set( "shutdownTimeoutMs", ms )`
+(default `5000`) as the timeout — `0` restores the old immediate stop. In
+Kubernetes:
+
+```yaml
+readinessProbe: { httpGet: { path: /health/ready, port: 3000 }, periodSeconds: 5 }
+livenessProbe:  { httpGet: { path: /health/live,  port: 3000 }, periodSeconds: 10 }
+terminationGracePeriodSeconds: 30    # comfortably above shutdownTimeoutMs
+```
+
 #### Auto-restart on file change (`app.set("reloadOnChange", true)`)
 
 ```js
@@ -276,6 +315,14 @@ longer than that. A write that fails or times out closes the connection
 and fires its `onClose` callback, so the app's cleanup runs. The `app.ws()` callback itself also runs on its own
 virtual thread rather than Undertow's shared I/O pool, so a connect
 handler that blocks can't stall other connections' handshakes.
+
+`app.set( "wsIdleTimeoutMs", ms )` (default `0`, off) drops a connection
+that has sent nothing — no message, no ping, no pong — for that long, and
+fires its `onClose`. The server pings every third of that period, and a
+healthy client (every browser, automatically) answers, so a quiet but
+alive connection is never dropped; one whose peer vanished, or that
+ignores pings, is. It's opt-in because the right value depends on your
+clients; `60000` is a reasonable start.
 
 Incoming messages are capped at 1 MB by default — a larger one is
 refused and the connection closed with a `1009` (message too big) — so an
@@ -1321,7 +1368,9 @@ app.use( boxExpressSession( { store: boxExpressCacheStore( "sessions" ) } ) )  /
 ```
 
 The named cache has to already exist — `boxExpressCacheStore()` doesn't
-register one, it just talks to it. A cache is registered in `boxlang.json`'s
+register one, it just talks to it. If it doesn't, or the store later
+fails, the app keeps serving: see **Falling back without durable
+storage** below. A cache is registered in `boxlang.json`'s
 top-level `caches` block, keyed by whatever name you pass in:
 
 ```json
@@ -1356,6 +1405,29 @@ processes hitting the same database — exactly what the default `MemoryStore`
 can't do. `JDBCStore` auto-detects the database vendor from the JDBC driver
 (MySQL, Postgres, SQL Server, Oracle, SQLite, Derby, HSQLDB, MariaDB) to
 generate the right `CREATE TABLE`/eviction SQL for each.
+
+**Falling back without durable storage.** `boxExpressCacheStore()` (and
+rate limiting's `cache` option) degrade instead of failing requests:
+
+- The named cache isn't registered → sessions live in this process's
+  memory, with a warning logged at startup.
+- The cache is registered but in-memory (BoxLang's default
+  `ConcurrentStore`, which `isDistributed()` reports as not shared) → it's
+  used as-is, with a warning that entries aren't shared across instances
+  or kept across restarts.
+- A call to a durable cache fails at runtime (the database goes away) →
+  that call uses per-process memory, logged at most once every 30 seconds,
+  and the next call tries the cache again, so it recovers by itself.
+  Entries written during the outage stay local; reads check the cache
+  first, then local memory.
+
+`getMode()` reports `"cache"` or `"local"` and `isDurable()` whether the
+cache is backed by a durable, shared store. Options (also on
+`boxExpressSession( { cache: "sessions" } )`, shorthand for
+`{ store: boxExpressCacheStore( "sessions" ) }`): `fallback: false` makes a
+missing cache throw at startup and runtime failures propagate, and
+`requireDurable: true` refuses to start unless the cache is durable — use
+either to fail fast in production instead of degrading.
 
 Two separate things worth knowing, confirmed by running it against a real
 database rather than assumed from the docs:
@@ -1488,9 +1560,25 @@ O(1) bookkeeping per request instead of a timestamp log per key. The
 default key is `req.ip` — same caveat as `req.ip` itself applies: behind a
 reverse proxy without `app.set("trust proxy", true)`, every request shares
 the proxy's own IP as the key, rate-limiting the whole app together rather
-than per client. The store is in-memory on each `RateLimit` instance (same
-trade-off as `Session`'s default `MemoryStore` — fine for a single-process
-app, not a cluster).
+than per client. By default the store is in-memory on each `RateLimit`
+instance (same trade-off as `Session`'s default `MemoryStore` — fine for a
+single-process app, not a cluster).
+
+To share the count across instances, name a registered BoxLang cache:
+
+```js
+app.use( "/login", boxExpressRateLimit( { max: 5, windowMs: 15 * 60000, cache: "shared" } ) )
+```
+
+`cache` takes the same `fallback`/`requireDurable` options and degrades the
+same way as durable sessions (above): with no durable cache it counts per
+process, with a warning, and never fails the request. `store: myStore` (any
+object with `hit( key, windowMs )` returning `{ count, resetAt }`) plugs in
+your own. The read-then-write against the cache isn't atomic, so under
+heavy concurrency a limit can run a few requests over, never far under,
+and every request costs a cache round trip — a database call for a
+`JDBCStore` — so use it on routes that matter (login, signup) rather than
+as a blanket limit.
 
 #### CSRF protection (`boxExpressCsrf()` / `Csrf`)
 
@@ -1612,6 +1700,29 @@ Two more BoxLang-specific things that shaped how these are written:
   rather than `../fixtures/...`.
 
 ## Changelog
+
+**0.2.17**
+- **`app.health()` and `app.shutdown()`:** liveness/readiness endpoints for
+  load balancers and Kubernetes, and a graceful stop that flips readiness
+  to draining, refuses new requests, closes open WebSockets and waits up
+  to `timeoutMs` for in-flight requests. `SIGTERM`/Ctrl-C now run it
+  (`shutdownTimeoutMs`, default 5s; `0` restores the old immediate stop).
+- **`wsIdleTimeoutMs`:** opt-in drop of WebSocket connections that go
+  silent, with server pings so healthy quiet connections survive. The
+  other half of CVE-2026-81624 (unbounded connection lifetime) alongside
+  0.2.13's message-size cap.
+- **Shared rate limiting:** `boxExpressRateLimit( { cache: "name" } )`
+  (or `store:`) counts in a BoxLang cache so the limit holds across
+  instances. `boxExpressSession( { cache: "name" } )` is shorthand for the
+  cache-backed session store.
+- **Graceful fallback:** the cache-backed stores now degrade to
+  per-process memory instead of failing requests when the named cache is
+  missing or a durable store fails at runtime (logged, and recovering on
+  its own). **Behavior change:** `boxExpressCacheStore( "missing" )` used
+  to throw on first use; it now falls back with a warning — pass
+  `{ fallback: false }` for the old behavior.
+- The server now tracks open WebSocket connections so shutdown can close
+  them. Full suite: 340/340.
 
 **0.2.16**
 - **STOMP limits:** new `maxConnections` (default 10000, per node) and

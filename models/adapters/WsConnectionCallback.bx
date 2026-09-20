@@ -44,8 +44,10 @@ class {
 	 * already defined and this single-threaded resolution is the only one
 	 * that will ever happen.
 	 */
-	function init( wsRoutes, maxMessageSize = 1048576 ) {
+	function init( wsRoutes, maxMessageSize = 1048576, idleTimeoutMs = 0 ) {
 		variables.wsRoutes = wsRoutes
+		variables.idleTimeoutMs = javacast( "long", idleTimeoutMs )
+		variables.openConnections = createObject( "java", "java.util.concurrent.ConcurrentHashMap" ).init()
 		variables.maxMessageSize = javacast( "long", maxMessageSize )
 		variables.listenerClass = createObject( "java", "boxexpress.ws.BoxWebSocketListener" )
 		// onConnect() below runs on Undertow's own XNIO I/O thread — Undertow
@@ -67,6 +69,21 @@ class {
 		return this
 	}
 
+	/**
+	 * Closes every open WebSocket connection — used by the app's graceful
+	 * shutdown, since a connection that's already been upgraded is no longer
+	 * an in-flight HTTP request and so isn't waited on by request draining.
+	 * Returns how many it closed.
+	 */
+	function closeAll() {
+		var closed = 0
+		for ( var connection in variables.openConnections.values().toArray() ) {
+			connection.close()
+			closed++
+		}
+		return closed
+	}
+
 	function onConnect( exchange, channel ) {
 		// getRequestURI() includes the query string (confirmed directly —
 		// unlike HttpServerExchange.getRequestPath() used for the plain
@@ -86,6 +103,13 @@ class {
 		var handlerProxy = createDynamicProxy( handlerAdapter, [ "boxexpress.ws.WebSocketMessageHandler" ] )
 		var listener = variables.listenerClass.init( handlerProxy, variables.maxMessageSize )
 		channel.getReceiveSetter().set( listener )
+		listener.startIdleMonitor( channel, variables.idleTimeoutMs )
+
+		var connectionKey = createUUID()
+		variables.openConnections.put( connectionKey, connection )
+		connection._onFinalClose( function() {
+			variables.openConnections.remove( connectionKey )
+		} )
 
 		// handlerFn (and therefore resumeReceives(), which has to stay
 		// ordered after it — registering the app's own onMessage()/

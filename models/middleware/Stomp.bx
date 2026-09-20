@@ -12,26 +12,26 @@
  * mirrors a proven design's behavior without copying its exact API
  * mechanics.
  *
-* Multi-node: pass options.cluster (an app.getClusterManager()) and every
-* publish is also relayed to the broker on each peer instance, through the
-* same subscriber/exchange/listener path a local SEND takes — see
-* plans/cluster-support.md. The subscriber registry itself stays
-* per-process (a connection lives on exactly one node), so cluster-wide
-* views are limited to what nodes publish about themselves —
-* getClusterPresence() — and DistributionExchange's round-robin counters
-* are per node.
-*
-* Protocol versions 1.0, 1.1 and 1.2 are all accepted (see
-* _handleConnect); a connection is served in the highest version both
-* sides offer. Inbound WebSocket frames may be text or binary (binary is
-* decoded as UTF-8); outbound frames are always text.
-*
-* Lifecycle hooks — options.onConnect / onDisconnect / onSubscribe /
-* onUnsubscribe — observe a connection's life without changing it (a hook
-* that throws is logged and ignored). stomp.sendToUser(), sendToConnection()
-* and disconnect() are the server-side counterparts.
+ * Multi-node: pass options.cluster (an app.getClusterManager()) and every
+ * publish is also relayed to the broker on each peer instance, through the
+ * same subscriber/exchange/listener path a local SEND takes — see
+ * plans/cluster-support.md. The subscriber registry itself stays
+ * per-process (a connection lives on exactly one node), so cluster-wide
+ * views are limited to what nodes publish about themselves —
+ * getClusterPresence() — and DistributionExchange's round-robin counters
+ * are per node.
  *
-* NACK is bookkeeping-identical to ACK here — see _handleAcknowledge()'s
+ * Protocol versions 1.0, 1.1 and 1.2 are all accepted (see
+ * _handleConnect); a connection is served in the highest version both
+ * sides offer. Inbound WebSocket frames may be text or binary (binary is
+ * decoded as UTF-8); outbound frames are always text.
+ *
+ * Lifecycle hooks — options.onConnect / onDisconnect / onSubscribe /
+ * onUnsubscribe — observe a connection's life without changing it (a hook
+ * that throws is logged and ignored). stomp.sendToUser(), sendToConnection()
+ * and disconnect() are the server-side counterparts.
+ *
+ * NACK is bookkeeping-identical to ACK here — see _handleAcknowledge()'s
  * docblock for why: this broker has no message queue to redeliver into,
  * so the positive/negative distinction real brokers use to drive
  * redelivery has nothing to act on.
@@ -77,7 +77,7 @@ class {
 		variables.onDisconnectFn = options.onDisconnect ?: javacast( "null", "" )
 		variables.onSubscribeFn = options.onSubscribe ?: javacast( "null", "" )
 		variables.onUnsubscribeFn = options.onUnsubscribe ?: javacast( "null", "" )
-variables.codec = new "../StompFrameCodec"()
+		variables.codec = new "../StompFrameCodec"()
 
 		// destination -> { "connectionId:subId" -> { connection, subId, connectionId, ackMode } }
 		// Keyed on a server-generated connectionId + the client's own subId,
@@ -286,7 +286,7 @@ variables.codec = new "../StompFrameCodec"()
 			}
 
 			var onFrame = ( raw ) => {
-			lastActivityMs = stomp._nowMs()
+				lastActivityMs = stomp._nowMs()
 
 				// A bare STOMP heartbeat is a single newline with no frame
 				// at all — updating lastActivityMs above is the entire
@@ -322,185 +322,185 @@ variables.codec = new "../StompFrameCodec"()
 				// client with no reply at all. Logged server-side; the client gets a
 				// generic ERROR with no exception detail.
 				try {
-				switch ( frame.getCommand() ) {
-					case "CONNECT":
-					case "STOMP": {
-					if ( connected ) {
-					stomp._sendError( connection, "Already connected", receiptId, true )
-					break
-					}
-					var authResult = stomp._handleConnect( connection, frame, connectionMetadata )
-					connected = authResult.ok
-					login = authResult.login
-					if ( connected ) {
-					version = authResult.version
-					stomp._registerConnection( connectionId, connection, login, connectionMetadata )
-					stomp._fireOnConnect( login, connection, connectionId, connectionMetadata )
-							if ( authResult.outgoingHeartbeatMs > 0 ) {
-								stomp._startOutgoingHeartbeat( connection, authResult.outgoingHeartbeatMs )
-							}
-							if ( authResult.incomingHeartbeatMs > 0 ) {
-								stomp._startHeartbeatMonitor( connection, authResult.incomingHeartbeatMs, getLastActivityMs )
-							}
-						}
-						break
-					}
-					case "SUBSCRIBE": {
-						if ( !connected ) {
-							stomp._sendError( connection, "Not connected", receiptId, true )
-							break
-						}
-						if ( stomp._handleSubscribe( connection, connectionId, frame, login, mySubscriptions, version ) ) {
-							stomp._maybeReceipt( connection, receiptId )
-						}
-						break
-					}
-					case "UNSUBSCRIBE": {
-						if ( !connected ) {
-							stomp._sendError( connection, "Not connected", receiptId, true )
-							break
-						}
-						stomp._handleUnsubscribe( connectionId, frame, mySubscriptions, login, version )
-						stomp._maybeReceipt( connection, receiptId )
-						break
-					}
-					case "SEND": {
-						if ( !connected ) {
-							stomp._sendError( connection, "Not connected", receiptId, true )
-							break
-						}
-						var sendTx = frame.getHeader( "transaction", "" )
-						if ( len( sendTx ) ) {
-							if ( !structKeyExists( activeTransactions, sendTx ) ) {
-								stomp._sendError( connection, "Unknown transaction: " & sendTx, receiptId )
+					switch ( frame.getCommand() ) {
+						case "CONNECT":
+						case "STOMP": {
+							if ( connected ) {
+								stomp._sendError( connection, "Already connected", receiptId, true )
 								break
 							}
-							if ( variables.maxTransactionFrames > 0 && activeTransactions[ sendTx ].len() >= variables.maxTransactionFrames ) {
-								stomp._sendError( connection, "Too many frames in transaction " & sendTx, receiptId )
+							var authResult = stomp._handleConnect( connection, frame, connectionMetadata )
+							connected = authResult.ok
+							login = authResult.login
+							if ( connected ) {
+								version = authResult.version
+								stomp._registerConnection( connectionId, connection, login, connectionMetadata )
+								stomp._fireOnConnect( login, connection, connectionId, connectionMetadata )
+								if ( authResult.outgoingHeartbeatMs > 0 ) {
+									stomp._startOutgoingHeartbeat( connection, authResult.outgoingHeartbeatMs )
+								}
+								if ( authResult.incomingHeartbeatMs > 0 ) {
+									stomp._startHeartbeatMonitor( connection, authResult.incomingHeartbeatMs, getLastActivityMs )
+								}
+							}
+							break
+						}
+						case "SUBSCRIBE": {
+							if ( !connected ) {
+								stomp._sendError( connection, "Not connected", receiptId, true )
 								break
 							}
-							// Deferred to COMMIT — see _handleSend's docblock
-							// for what that does and doesn't guarantee.
-							activeTransactions[ sendTx ].append( () => stomp._handleSend( connection, connectionId, frame, login ) )
-							stomp._maybeReceipt( connection, receiptId )
-						} else if ( stomp._handleSend( connection, connectionId, frame, login ) ) {
-							stomp._maybeReceipt( connection, receiptId )
-						}
-						break
-					}
-					case "ACK":
-					case "NACK": {
-						if ( !connected ) {
-							stomp._sendError( connection, "Not connected", receiptId, true )
+							if ( stomp._handleSubscribe( connection, connectionId, frame, login, mySubscriptions, version ) ) {
+								stomp._maybeReceipt( connection, receiptId )
+							}
 							break
 						}
-						var ackTx = frame.getHeader( "transaction", "" )
-						if ( len( ackTx ) ) {
-							if ( !structKeyExists( activeTransactions, ackTx ) ) {
-								stomp._sendError( connection, "Unknown transaction: " & ackTx, receiptId )
+						case "UNSUBSCRIBE": {
+							if ( !connected ) {
+								stomp._sendError( connection, "Not connected", receiptId, true )
 								break
 							}
-							if ( variables.maxTransactionFrames > 0 && activeTransactions[ ackTx ].len() >= variables.maxTransactionFrames ) {
-								stomp._sendError( connection, "Too many frames in transaction " & ackTx, receiptId )
+							stomp._handleUnsubscribe( connectionId, frame, mySubscriptions, login, version )
+							stomp._maybeReceipt( connection, receiptId )
+							break
+						}
+						case "SEND": {
+							if ( !connected ) {
+								stomp._sendError( connection, "Not connected", receiptId, true )
 								break
 							}
-							activeTransactions[ ackTx ].append( () => stomp._handleAcknowledge( connectionId, frame ) )
-							stomp._maybeReceipt( connection, receiptId )
-						} else if ( stomp._handleAcknowledge( connectionId, frame ) ) {
-							stomp._maybeReceipt( connection, receiptId )
-						} else {
-							stomp._sendError( connection, "No such pending message id", receiptId )
-						}
-						break
-					}
-					case "BEGIN": {
-						if ( !connected ) {
-							stomp._sendError( connection, "Not connected", receiptId, true )
-							break
-						}
-						var beginTx = frame.getHeader( "transaction", "" )
-						if ( !len( beginTx ) || structKeyExists( activeTransactions, beginTx ) ) {
-							stomp._sendError( connection, "Invalid or duplicate transaction id", receiptId )
-							break
-						}
-						if ( variables.maxTransactions > 0 && activeTransactions.count() >= variables.maxTransactions ) {
-							stomp._sendError( connection, "Too many open transactions", receiptId )
-							break
-						}
-						activeTransactions[ beginTx ] = []
-						stomp._maybeReceipt( connection, receiptId )
-						break
-					}
-					case "COMMIT": {
-						if ( !connected ) {
-							stomp._sendError( connection, "Not connected", receiptId, true )
-							break
-						}
-						var commitTx = frame.getHeader( "transaction", "" )
-						if ( !structKeyExists( activeTransactions, commitTx ) ) {
-							stomp._sendError( connection, "Unknown transaction: " & commitTx, receiptId )
-							break
-						}
-						var actions = activeTransactions[ commitTx ]
-						structDelete( activeTransactions, commitTx )
-						for ( var action in actions ) {
-							try {
-								action()
-							} catch ( any e ) {
-								println( "[Stomp] error running a buffered transaction frame: " & e.message )
-								stomp._sendError( connection, "Internal server error", receiptId )
+							var sendTx = frame.getHeader( "transaction", "" )
+							if ( len( sendTx ) ) {
+								if ( !structKeyExists( activeTransactions, sendTx ) ) {
+									stomp._sendError( connection, "Unknown transaction: " & sendTx, receiptId )
+									break
+								}
+								if ( variables.maxTransactionFrames > 0 && activeTransactions[ sendTx ].len() >= variables.maxTransactionFrames ) {
+									stomp._sendError( connection, "Too many frames in transaction " & sendTx, receiptId )
+									break
+								}
+								// Deferred to COMMIT — see _handleSend's docblock
+								// for what that does and doesn't guarantee.
+								activeTransactions[ sendTx ].append( () => stomp._handleSend( connection, connectionId, frame, login ) )
+								stomp._maybeReceipt( connection, receiptId )
+							} else if ( stomp._handleSend( connection, connectionId, frame, login ) ) {
+								stomp._maybeReceipt( connection, receiptId )
 							}
-						}
-						stomp._maybeReceipt( connection, receiptId )
-						break
-					}
-					case "ABORT": {
-						if ( !connected ) {
-							stomp._sendError( connection, "Not connected", receiptId, true )
 							break
 						}
-						var abortTx = frame.getHeader( "transaction", "" )
-						if ( !structKeyExists( activeTransactions, abortTx ) ) {
-							stomp._sendError( connection, "Unknown transaction: " & abortTx, receiptId )
+						case "ACK":
+						case "NACK": {
+							if ( !connected ) {
+								stomp._sendError( connection, "Not connected", receiptId, true )
+								break
+							}
+							var ackTx = frame.getHeader( "transaction", "" )
+							if ( len( ackTx ) ) {
+								if ( !structKeyExists( activeTransactions, ackTx ) ) {
+									stomp._sendError( connection, "Unknown transaction: " & ackTx, receiptId )
+									break
+								}
+								if ( variables.maxTransactionFrames > 0 && activeTransactions[ ackTx ].len() >= variables.maxTransactionFrames ) {
+									stomp._sendError( connection, "Too many frames in transaction " & ackTx, receiptId )
+									break
+								}
+								activeTransactions[ ackTx ].append( () => stomp._handleAcknowledge( connectionId, frame ) )
+								stomp._maybeReceipt( connection, receiptId )
+							} else if ( stomp._handleAcknowledge( connectionId, frame ) ) {
+								stomp._maybeReceipt( connection, receiptId )
+							} else {
+								stomp._sendError( connection, "No such pending message id", receiptId )
+							}
 							break
 						}
-						structDelete( activeTransactions, abortTx )
-						stomp._maybeReceipt( connection, receiptId )
-						break
-					}
-					case "DISCONNECT": {
-						stomp._maybeReceipt( connection, receiptId )
-						connection.close()
-						break
-					}
+						case "BEGIN": {
+							if ( !connected ) {
+								stomp._sendError( connection, "Not connected", receiptId, true )
+								break
+							}
+							var beginTx = frame.getHeader( "transaction", "" )
+							if ( !len( beginTx ) || structKeyExists( activeTransactions, beginTx ) ) {
+								stomp._sendError( connection, "Invalid or duplicate transaction id", receiptId )
+								break
+							}
+							if ( variables.maxTransactions > 0 && activeTransactions.count() >= variables.maxTransactions ) {
+								stomp._sendError( connection, "Too many open transactions", receiptId )
+								break
+							}
+							activeTransactions[ beginTx ] = []
+							stomp._maybeReceipt( connection, receiptId )
+							break
+						}
+						case "COMMIT": {
+							if ( !connected ) {
+								stomp._sendError( connection, "Not connected", receiptId, true )
+								break
+							}
+							var commitTx = frame.getHeader( "transaction", "" )
+							if ( !structKeyExists( activeTransactions, commitTx ) ) {
+								stomp._sendError( connection, "Unknown transaction: " & commitTx, receiptId )
+								break
+							}
+							var actions = activeTransactions[ commitTx ]
+							structDelete( activeTransactions, commitTx )
+							for ( var action in actions ) {
+								try {
+									action()
+								} catch ( any e ) {
+									println( "[Stomp] error running a buffered transaction frame: " & e.message )
+									stomp._sendError( connection, "Internal server error", receiptId )
+								}
+							}
+							stomp._maybeReceipt( connection, receiptId )
+							break
+						}
+						case "ABORT": {
+							if ( !connected ) {
+								stomp._sendError( connection, "Not connected", receiptId, true )
+								break
+							}
+							var abortTx = frame.getHeader( "transaction", "" )
+							if ( !structKeyExists( activeTransactions, abortTx ) ) {
+								stomp._sendError( connection, "Unknown transaction: " & abortTx, receiptId )
+								break
+							}
+							structDelete( activeTransactions, abortTx )
+							stomp._maybeReceipt( connection, receiptId )
+							break
+						}
+						case "DISCONNECT": {
+							stomp._maybeReceipt( connection, receiptId )
+							connection.close()
+							break
+						}
 						default: {
 							stomp._sendError( connection, "Unknown command: " & frame.getCommand(), receiptId, true )
 						}
 					}
-					} catch ( any e ) {
-						println( "[Stomp] error handling " & frame.getCommand() & " frame: " & e.message )
-						stomp._sendError( connection, "Internal server error", receiptId )
-						}
-						}
+				} catch ( any e ) {
+					println( "[Stomp] error handling " & frame.getCommand() & " frame: " & e.message )
+					stomp._sendError( connection, "Internal server error", receiptId )
+				}
+			}
 
-						connection.onMessage( onFrame )
-						// STOMP-over-WebSocket clients may send frames as binary messages
-						// (stomp.js's forceBinaryWSFrames); the frame text is UTF-8 either way.
-						connection.onBinary( ( bytes ) => {
-						onFrame( createObject( "java", "java.lang.String" ).init( bytes, "UTF-8" ) )
-						} )
+			connection.onMessage( onFrame )
+			// STOMP-over-WebSocket clients may send frames as binary messages
+			// (stomp.js's forceBinaryWSFrames); the frame text is UTF-8 either way.
+			connection.onBinary( ( bytes ) => {
+				onFrame( createObject( "java", "java.lang.String" ).init( bytes, "UTF-8" ) )
+			} )
 
-						connection.onClose( ( code, reason ) => {
-						if ( connected ) {
-						for ( var closingSubId in structCopy( mySubscriptions ) ) {
+			connection.onClose( ( code, reason ) => {
+				if ( connected ) {
+					for ( var closingSubId in structCopy( mySubscriptions ) ) {
 						stomp._fireOnUnsubscribe( login, mySubscriptions[ closingSubId ], closingSubId, connectionId, connectionMetadata )
-						}
-						}
-						stomp._removeAllSubscriptions( connectionId, mySubscriptions )
-						if ( connected ) {
-						stomp._fireOnDisconnect( login, connectionId, connectionMetadata )
-						}
-						} )
+					}
+				}
+				stomp._removeAllSubscriptions( connectionId, mySubscriptions )
+				if ( connected ) {
+					stomp._fireOnDisconnect( login, connectionId, connectionMetadata )
+				}
+			} )
 		}
 	}
 
@@ -542,16 +542,16 @@ variables.codec = new "../StompFrameCodec"()
 		var acceptedVersions = frame.getHeader( "accept-version", "1.0" )
 		var version = ""
 		for ( var candidate in [ "1.2", "1.1", "1.0" ] ) {
-		if ( acceptedVersions.listFind( candidate ) ) {
-		version = candidate
-		break
-		}
+			if ( acceptedVersions.listFind( candidate ) ) {
+				version = candidate
+				break
+			}
 		}
 		if ( !len( version ) ) {
-		var versionError = new "../StompFrame"( "ERROR", { message: "Supported versions: 1.0,1.1,1.2", version: "1.0,1.1,1.2" } )
-		connection.send( variables.codec.serialize( versionError ) )
-		connection.close()
-		return { ok: false, login: "", version: "", outgoingHeartbeatMs: 0, incomingHeartbeatMs: 0 }
+			var versionError = new "../StompFrame"( "ERROR", { message: "Supported versions: 1.0,1.1,1.2", version: "1.0,1.1,1.2" } )
+			connection.send( variables.codec.serialize( versionError ) )
+			connection.close()
+			return { ok: false, login: "", version: "", outgoingHeartbeatMs: 0, incomingHeartbeatMs: 0 }
 		}
 
 		var login = frame.getHeader( "login", "" )
@@ -568,17 +568,17 @@ variables.codec = new "../StompFrameCodec"()
 			if ( !authenticated ) {
 				_sendError( connection, "Authentication failed", frame.getHeader( "receipt", "" ), true )
 				return { ok: false, login: "", version: "", outgoingHeartbeatMs: 0, incomingHeartbeatMs: 0 }
-				}
-				}
+			}
+		}
 
-				// Heart-beating arrived in 1.1; a 1.0 connection never has any.
-				var negotiated = version == "1.0" ? { outgoingMs: 0, incomingMs: 0 } : _negotiateHeartbeat( frame )
-				var connectedHeaders = { version: version }
+		// Heart-beating arrived in 1.1; a 1.0 connection never has any.
+		var negotiated = version == "1.0" ? { outgoingMs: 0, incomingMs: 0 } : _negotiateHeartbeat( frame )
+		var connectedHeaders = { version: version }
 		for ( var metadataKey in connectionMetadata ) {
 			connectedHeaders[ metadataKey ] = toString( connectionMetadata[ metadataKey ] )
 		}
 		if ( variables.heartbeatMs > 0 && version != "1.0" ) {
-		// This server's own capabilities (sx,sy) — not the negotiated
+			// This server's own capabilities (sx,sy) — not the negotiated
 			// value, which each side computes independently from both
 			// sides' headers per spec. sy equals sx here: one configured
 			// interval covers both "how often I'll send" and "how often I
@@ -590,9 +590,9 @@ variables.codec = new "../StompFrameCodec"()
 		}
 		connection.send( variables.codec.serialize( new "../StompFrame"( "CONNECTED", connectedHeaders ), version ) )
 		return {
-		ok: true,
-		login: login,
-		version: version,
+			ok: true,
+			login: login,
+			version: version,
 			outgoingHeartbeatMs: negotiated.outgoingMs,
 			incomingHeartbeatMs: negotiated.incomingMs
 		}
@@ -648,13 +648,13 @@ variables.codec = new "../StompFrameCodec"()
 	}
 
 	function _handleSubscribe( connection, connectionId, frame, login, mySubscriptions, version = "1.2" ) {
-	var destination = frame.getHeader( "destination", "" )
-	var subId = frame.getHeader( "id", "" )
-	// The id header is optional in STOMP 1.0 (UNSUBSCRIBE then names the
-	// destination instead); derive a stable one so the registry stays keyed the same way.
-	if ( !len( subId ) && version == "1.0" && len( destination ) ) {
-	subId = "dest:" & destination
-	}
+		var destination = frame.getHeader( "destination", "" )
+		var subId = frame.getHeader( "id", "" )
+		// The id header is optional in STOMP 1.0 (UNSUBSCRIBE then names the
+		// destination instead); derive a stable one so the registry stays keyed the same way.
+		if ( !len( subId ) && version == "1.0" && len( destination ) ) {
+			subId = "dest:" & destination
+		}
 		if ( !len( destination ) || !len( subId ) ) {
 			_sendError( connection, "SUBSCRIBE requires destination and id headers", frame.getHeader( "receipt", "" ), true )
 			return false
@@ -719,10 +719,10 @@ variables.codec = new "../StompFrameCodec"()
 	}
 
 	function _handleUnsubscribe( connectionId, frame, mySubscriptions, login = "", version = "1.2" ) {
-	var subId = frame.getHeader( "id", "" )
-	if ( !len( subId ) && version == "1.0" && len( frame.getHeader( "destination", "" ) ) ) {
-	subId = "dest:" & frame.getHeader( "destination", "" )
-	}
+		var subId = frame.getHeader( "id", "" )
+		if ( !len( subId ) && version == "1.0" && len( frame.getHeader( "destination", "" ) ) ) {
+			subId = "dest:" & frame.getHeader( "destination", "" )
+		}
 		if ( !structKeyExists( mySubscriptions, subId ) ) {
 			return
 		}
@@ -730,10 +730,10 @@ variables.codec = new "../StompFrameCodec"()
 		lock name="#_destLockName( destination )#" type="exclusive" timeout="5" {
 			if ( structKeyExists( variables.subscribersByDestination, destination ) ) {
 				structDelete( variables.subscribersByDestination[ destination ], connectionId & ":" & subId )
-						_pruneDestination( destination )
-					}
-				}
-				// Any messages still pending ack on this subscription can never be
+				_pruneDestination( destination )
+			}
+		}
+		// Any messages still pending ack on this subscription can never be
 		// acked now — drop them too, or they'd sit in the registry forever (a
 		// real, if small, leak: nothing else ever clears an entry whose
 		// subscription was torn down out from under it). A separate,
@@ -751,7 +751,7 @@ variables.codec = new "../StompFrameCodec"()
 		}
 		structDelete( mySubscriptions, subId )
 		_fireOnUnsubscribe( login, destination, subId, connectionId, _metadataFor( connectionId ) )
-		}
+	}
 
 	/**
 	 * Also the deferred action a transactional SEND runs at COMMIT time —
@@ -861,8 +861,8 @@ variables.codec = new "../StompFrameCodec"()
 	 * at all.
 	 */
 	function _handleAcknowledge( connectionId, frame ) {
-	// 1.2 acks by the MESSAGE's "ack" header via `id`; 1.0/1.1 clients ack by `message-id`.
-	var ackId = frame.getHeader( "id", frame.getHeader( "message-id", "" ) )
+		// 1.2 acks by the MESSAGE's "ack" header via `id`; 1.0/1.1 clients ack by `message-id`.
+		var ackId = frame.getHeader( "id", frame.getHeader( "message-id", "" ) )
 		if ( !len( ackId ) ) {
 			return false
 		}
@@ -960,313 +960,313 @@ variables.codec = new "../StompFrameCodec"()
 	 * ACK/NACK has something to reference.
 	 */
 	function _deliverToDestination( destination, body, extraHeaders, originConnection, target = {} ) {
-	var recipients = {}
-	lock name="#_destLockName( destination )#" type="exclusive" timeout="5" {
-		if ( structKeyExists( variables.subscribersByDestination, destination ) ) {
-			// structCopy(), not duplicate() — confirmed directly that
-			// duplicate() tries to deep-copy every value, including the
-			// WebSocketConnection objects themselves, and doesn't know
-			// how to duplicate their underlying Java channel. A shallow
-			// copy is all this needs: new struct, same connection
-			// references, so the actual sends below can happen outside
-			// the registry lock without touching a struct the registry
-			// might mutate concurrently.
-			recipients = structCopy( variables.subscribersByDestination[ destination ] )
-		}
-	}
-
-	var targeted = !structIsEmpty( target )
-	var outgoing = []
-	for ( var key in recipients ) {
-		var subscriber = recipients[ key ]
-		if ( targeted ) {
-			if ( len( target.login ?: "" ) && subscriber.login != target.login ) {
-				continue
-			}
-			if ( len( target.connectionId ?: "" ) && subscriber.connectionId != target.connectionId ) {
-				continue
-			}
-		}
-		var headers = duplicate( extraHeaders )
-		headers[ "destination" ] = destination
-		headers[ "message-id" ] = createUUID()
-		headers[ "subscription" ] = subscriber.subId
-
-		if ( subscriber.ackMode != "auto" ) {
-			// 1.2 hands the client a separate `ack` id; 1.0/1.1 clients
-			// acknowledge by the message-id itself.
-			var ackId = subscriber.version == "1.2" ? createUUID() : headers[ "message-id" ]
-			if ( subscriber.version == "1.2" ) {
-				headers[ "ack" ] = ackId
-			}
-			var overLimit = false
-			lock name="#_connLockName( subscriber.connectionId )#" type="exclusive" timeout="5" {
-				overLimit = variables.maxPendingAcks > 0
-					&& structCount( variables.pendingAcksByConnection[ subscriber.connectionId ] ?: {} ) >= variables.maxPendingAcks
-			}
-			if ( overLimit ) {
-				// A client that never acks would otherwise grow this registry forever.
-				_sendError( subscriber.connection, "Too many unacknowledged messages", "", true )
-				continue
-			}
-			lock name="#_connLockName( subscriber.connectionId )#" type="exclusive" timeout="5" {
-				var nextSeq = ( variables.ackSeqByConnection[ subscriber.connectionId ] ?: 0 ) + 1
-				variables.ackSeqByConnection[ subscriber.connectionId ] = nextSeq
-				if ( !structKeyExists( variables.pendingAcksByConnection, subscriber.connectionId ) ) {
-					variables.pendingAcksByConnection[ subscriber.connectionId ] = {}
-				}
-				variables.pendingAcksByConnection[ subscriber.connectionId ][ ackId ] = {
-					subId: subscriber.subId,
-					destination: destination,
-					ackMode: subscriber.ackMode,
-					seq: nextSeq
-				}
-			}
-		}
-
-		outgoing.append( {
-			subscriber: subscriber,
-			frameText: variables.codec.serialize( new "../StompFrame"( "MESSAGE", headers, body ), subscriber.version )
-		} )
-	}
-
-	// Each write is bounded (WebSocketConnection.send()'s 5s cap), but done
-	// one after another, N unresponsive subscribers would still stack up to
-	// N x 5s on the publisher. Writing to them concurrently makes the worst
-	// case the slowest single subscriber, not the sum. A lone recipient
-	// (the common case) skips the hand-off entirely.
-	if ( outgoing.len() == 1 ) {
-		outgoing[ 1 ].subscriber.connection.send( outgoing[ 1 ].frameText )
-	} else if ( outgoing.len() > 1 ) {
-		var futures = []
-		for ( var item in outgoing ) {
-			futures.append( _submitSend( item.subscriber.connection, item.frameText ) )
-		}
-		for ( var future in futures ) {
-			try {
-				future.get()
-			} catch ( any e ) {
-				println( "[Stomp] fan-out write failed: " & e.message )
-			}
-		}
-	}
-
-	// A connection whose write failed or timed out is closed by now —
-	// drop it from the registry rather than leave it for every later publish.
-	for ( var item in outgoing ) {
-		if ( item.subscriber.connection.isClosed() ) {
-			_evictConnection( item.subscriber.connectionId )
-		}
-	}
-
-	// Targeted sends reach specific connections only — server-side listeners
-	// aren't "connections," so they don't see them.
-	if ( !targeted && structKeyExists( variables.listeners, destination ) ) {
-		var listenerHeaders = duplicate( extraHeaders )
-		listenerHeaders[ "destination" ] = destination
-		listenerHeaders[ "message-id" ] = createUUID()
-		try {
-			variables.listeners[ destination ]( new "../StompMessage"( "MESSAGE", listenerHeaders, body, originConnection ) )
-		} catch ( any e ) {
-			// A server-side listener's own bug shouldn't take down
-			// delivery to real subscribers or other listeners on the
-			// same destination — same posture as the shim's _guard()
-			// wrapper around WebSocket callbacks (see BoxWebSocketListener.java),
-			// logged the same way HttpBridge.bx logs its own caught
-			// dispatch errors rather than silently swallowed.
-			println( "[Stomp] listener for '" & destination & "' threw: " & e.message )
-		}
-	}
-	return outgoing.len()
-}
-
-function _submitSend( connection, frameText ) {
-	return variables.virtualExecutor.submit( createDynamicProxy(
-		new "../ThreadRunnable"( function() {
-			connection.send( frameText )
-		} ),
-		[ "java.lang.Runnable" ]
-	) )
-}
-
-/**
- * Removes every trace of a connection this broker has just found closed
- * during a delivery. The normal path is the connection's own onClose
- * callback; this covers a connection that's closed without ever getting to
- * fire it.
- */
-function _evictConnection( connectionId ) {
-	for ( var destination in structKeyArray( variables.subscribersByDestination ) ) {
+		var recipients = {}
 		lock name="#_destLockName( destination )#" type="exclusive" timeout="5" {
 			if ( structKeyExists( variables.subscribersByDestination, destination ) ) {
-				for ( var subKey in structKeyArray( variables.subscribersByDestination[ destination ] ) ) {
-					if ( variables.subscribersByDestination[ destination ][ subKey ].connectionId == connectionId ) {
-						structDelete( variables.subscribersByDestination[ destination ], subKey )
+				// structCopy(), not duplicate() — confirmed directly that
+				// duplicate() tries to deep-copy every value, including the
+				// WebSocketConnection objects themselves, and doesn't know
+				// how to duplicate their underlying Java channel. A shallow
+				// copy is all this needs: new struct, same connection
+				// references, so the actual sends below can happen outside
+				// the registry lock without touching a struct the registry
+				// might mutate concurrently.
+				recipients = structCopy( variables.subscribersByDestination[ destination ] )
+			}
+		}
+
+		var targeted = !structIsEmpty( target )
+		var outgoing = []
+		for ( var key in recipients ) {
+			var subscriber = recipients[ key ]
+			if ( targeted ) {
+				if ( len( target.login ?: "" ) && subscriber.login != target.login ) {
+					continue
+				}
+				if ( len( target.connectionId ?: "" ) && subscriber.connectionId != target.connectionId ) {
+					continue
+				}
+			}
+			var headers = duplicate( extraHeaders )
+			headers[ "destination" ] = destination
+			headers[ "message-id" ] = createUUID()
+			headers[ "subscription" ] = subscriber.subId
+
+			if ( subscriber.ackMode != "auto" ) {
+				// 1.2 hands the client a separate `ack` id; 1.0/1.1 clients
+				// acknowledge by the message-id itself.
+				var ackId = subscriber.version == "1.2" ? createUUID() : headers[ "message-id" ]
+				if ( subscriber.version == "1.2" ) {
+					headers[ "ack" ] = ackId
+				}
+				var overLimit = false
+				lock name="#_connLockName( subscriber.connectionId )#" type="exclusive" timeout="5" {
+					overLimit = variables.maxPendingAcks > 0
+					&& structCount( variables.pendingAcksByConnection[ subscriber.connectionId ] ?: {} ) >= variables.maxPendingAcks
+				}
+				if ( overLimit ) {
+					// A client that never acks would otherwise grow this registry forever.
+					_sendError( subscriber.connection, "Too many unacknowledged messages", "", true )
+					continue
+				}
+				lock name="#_connLockName( subscriber.connectionId )#" type="exclusive" timeout="5" {
+					var nextSeq = ( variables.ackSeqByConnection[ subscriber.connectionId ] ?: 0 ) + 1
+					variables.ackSeqByConnection[ subscriber.connectionId ] = nextSeq
+					if ( !structKeyExists( variables.pendingAcksByConnection, subscriber.connectionId ) ) {
+						variables.pendingAcksByConnection[ subscriber.connectionId ] = {}
+					}
+					variables.pendingAcksByConnection[ subscriber.connectionId ][ ackId ] = {
+						subId: subscriber.subId,
+						destination: destination,
+						ackMode: subscriber.ackMode,
+						seq: nextSeq
 					}
 				}
-				_pruneDestination( destination )
+			}
+
+			outgoing.append( {
+				subscriber: subscriber,
+				frameText: variables.codec.serialize( new "../StompFrame"( "MESSAGE", headers, body ), subscriber.version )
+			} )
+		}
+
+		// Each write is bounded (WebSocketConnection.send()'s 5s cap), but done
+		// one after another, N unresponsive subscribers would still stack up to
+		// N x 5s on the publisher. Writing to them concurrently makes the worst
+		// case the slowest single subscriber, not the sum. A lone recipient
+		// (the common case) skips the hand-off entirely.
+		if ( outgoing.len() == 1 ) {
+			outgoing[ 1 ].subscriber.connection.send( outgoing[ 1 ].frameText )
+		} else if ( outgoing.len() > 1 ) {
+			var futures = []
+			for ( var item in outgoing ) {
+				futures.append( _submitSend( item.subscriber.connection, item.frameText ) )
+			}
+			for ( var future in futures ) {
+				try {
+					future.get()
+				} catch ( any e ) {
+					println( "[Stomp] fan-out write failed: " & e.message )
+				}
+			}
+		}
+
+		// A connection whose write failed or timed out is closed by now —
+		// drop it from the registry rather than leave it for every later publish.
+		for ( var item in outgoing ) {
+			if ( item.subscriber.connection.isClosed() ) {
+				_evictConnection( item.subscriber.connectionId )
+			}
+		}
+
+		// Targeted sends reach specific connections only — server-side listeners
+		// aren't "connections," so they don't see them.
+		if ( !targeted && structKeyExists( variables.listeners, destination ) ) {
+			var listenerHeaders = duplicate( extraHeaders )
+			listenerHeaders[ "destination" ] = destination
+			listenerHeaders[ "message-id" ] = createUUID()
+			try {
+				variables.listeners[ destination ]( new "../StompMessage"( "MESSAGE", listenerHeaders, body, originConnection ) )
+			} catch ( any e ) {
+				// A server-side listener's own bug shouldn't take down
+				// delivery to real subscribers or other listeners on the
+				// same destination — same posture as the shim's _guard()
+				// wrapper around WebSocket callbacks (see BoxWebSocketListener.java),
+				// logged the same way HttpBridge.bx logs its own caught
+				// dispatch errors rather than silently swallowed.
+				println( "[Stomp] listener for '" & destination & "' threw: " & e.message )
+			}
+		}
+		return outgoing.len()
+	}
+
+	function _submitSend( connection, frameText ) {
+		return variables.virtualExecutor.submit( createDynamicProxy(
+			new "../ThreadRunnable"( function() {
+				connection.send( frameText )
+			} ),
+			[ "java.lang.Runnable" ]
+		) )
+	}
+
+	/**
+	 * Removes every trace of a connection this broker has just found closed
+	 * during a delivery. The normal path is the connection's own onClose
+	 * callback; this covers a connection that's closed without ever getting to
+	 * fire it.
+	 */
+	function _evictConnection( connectionId ) {
+		for ( var destination in structKeyArray( variables.subscribersByDestination ) ) {
+			lock name="#_destLockName( destination )#" type="exclusive" timeout="5" {
+				if ( structKeyExists( variables.subscribersByDestination, destination ) ) {
+					for ( var subKey in structKeyArray( variables.subscribersByDestination[ destination ] ) ) {
+						if ( variables.subscribersByDestination[ destination ][ subKey ].connectionId == connectionId ) {
+							structDelete( variables.subscribersByDestination[ destination ], subKey )
+						}
+					}
+					_pruneDestination( destination )
+				}
+			}
+		}
+		lock name="#_connLockName( connectionId )#" type="exclusive" timeout="5" {
+			structDelete( variables.pendingAcksByConnection, connectionId )
+			structDelete( variables.ackSeqByConnection, connectionId )
+			structDelete( variables.connectionsById, connectionId )
+		}
+	}
+
+	/**
+	 * Server-side publish to one user's connections only: delivers to
+	 * subscriptions on `destination` (resolved through the exchanges like any
+	 * other publish) whose connection authenticated with this login. In a
+	 * cluster it's relayed, so the user is reached on whichever node holds
+	 * their connection. Returns how many subscriptions on THIS node received it.
+	 */
+	function sendToUser( login, destination, data, headers = {} ) {
+		if ( !len( login ) ) {
+			throw( type = "BoxExpress.InvalidArgument", message = "sendToUser() requires a login" )
+		}
+		return _sendTargeted( { login: login, connectionId: "" }, destination, data, headers )
+	}
+
+	/**
+	 * Same, for one specific connection (a key of getConnections()). Connection
+	 * ids are unique across nodes, so in a cluster only the owning node delivers.
+	 */
+	function sendToConnection( connectionId, destination, data, headers = {} ) {
+		if ( !len( connectionId ) ) {
+			throw( type = "BoxExpress.InvalidArgument", message = "sendToConnection() requires a connectionId" )
+		}
+		return _sendTargeted( { login: "", connectionId: connectionId }, destination, data, headers )
+	}
+
+	function _sendTargeted( target, destination, data, headers ) {
+		var payload = isSimpleValue( data ) ? toString( data ) : JSONSerialize( data )
+		var delivered = _deliverTargeted( target, destination, payload, headers )
+		if ( !isNull( variables.clusterManager ) ) {
+			variables.clusterManager.relay( destination, payload, headers, target )
+		}
+		return delivered
+	}
+
+	function _deliverTargeted( target, destination, body, headers ) {
+		var delivered = 0
+		for ( var physicalDestination in _resolveDestinations( destination, body, headers ) ) {
+			delivered += _deliverToDestination( physicalDestination, body, headers, "", target )
+		}
+		return delivered
+	}
+
+	/**
+	 * Closes one connection from the server side (a kick). If `message` is
+	 * given the client first gets an ERROR frame carrying it. Returns false if
+	 * no such connection is connected to this node.
+	 */
+	function disconnect( connectionId, message = "" ) {
+		var entry = variables.connectionsById[ connectionId ] ?: javacast( "null", "" )
+		if ( isNull( entry ) ) {
+			return false
+		}
+		if ( len( message ) ) {
+			_sendError( entry.connection, message, "", true )
+		} else {
+			entry.connection.close()
+		}
+		return true
+	}
+
+	/**
+	 * The distinct logins connected to THIS node.
+	 */
+	function _localLogins() {
+		var logins = {}
+		for ( var connectionId in structCopy( variables.connectionsById ) ) {
+			var entryLogin = ( variables.connectionsById[ connectionId ] ?: { login: "" } ).login
+			if ( len( entryLogin ) ) {
+				logins[ entryLogin ] = true
+			}
+		}
+		return structKeyArray( logins )
+	}
+
+	/**
+	 * Who's connected across the whole cluster: { logins: [distinct, cluster-
+	 * wide], byNode: { nodeName: [logins] } }. Each peer publishes its own list
+	 * on its heartbeat, so peers' entries can lag by up to a heartbeat interval —
+	 * fine for "who's online," not for anything that needs to be exact. Without
+	 * clustering it's just this node.
+	 */
+	function getClusterPresence() {
+		var byNode = {}
+		var localName = "local"
+		if ( !isNull( variables.clusterManager ) && variables.clusterManager.isEnabled() ) {
+			localName = variables.clusterManager.getMyPeerName()
+			byNode = variables.clusterManager.getPeerPresence()
+		}
+		byNode[ localName ] = _localLogins()
+		var all = {}
+		for ( var node in byNode ) {
+			for ( var presentLogin in byNode[ node ] ) {
+				all[ presentLogin ] = true
+			}
+		}
+		var logins = structKeyArray( all )
+		arraySort( logins, "text" )
+		return { logins: logins, byNode: byNode }
+	}
+
+	function _fireOnConnect( login, connection, connectionId, connectionMetadata ) {
+		if ( !isNull( variables.onConnectFn ) ) {
+			try {
+				variables.onConnectFn( login, connection, connectionMetadata, connectionId )
+			} catch ( any e ) {
+				println( "[Stomp] onConnect() threw: " & e.message )
 			}
 		}
 	}
-	lock name="#_connLockName( connectionId )#" type="exclusive" timeout="5" {
-		structDelete( variables.pendingAcksByConnection, connectionId )
-		structDelete( variables.ackSeqByConnection, connectionId )
-		structDelete( variables.connectionsById, connectionId )
-	}
-}
 
-/**
- * Server-side publish to one user's connections only: delivers to
- * subscriptions on `destination` (resolved through the exchanges like any
- * other publish) whose connection authenticated with this login. In a
- * cluster it's relayed, so the user is reached on whichever node holds
- * their connection. Returns how many subscriptions on THIS node received it.
- */
-function sendToUser( login, destination, data, headers = {} ) {
-	if ( !len( login ) ) {
-		throw( type = "BoxExpress.InvalidArgument", message = "sendToUser() requires a login" )
-	}
-	return _sendTargeted( { login: login, connectionId: "" }, destination, data, headers )
-}
-
-/**
- * Same, for one specific connection (a key of getConnections()). Connection
- * ids are unique across nodes, so in a cluster only the owning node delivers.
- */
-function sendToConnection( connectionId, destination, data, headers = {} ) {
-	if ( !len( connectionId ) ) {
-		throw( type = "BoxExpress.InvalidArgument", message = "sendToConnection() requires a connectionId" )
-	}
-	return _sendTargeted( { login: "", connectionId: connectionId }, destination, data, headers )
-}
-
-function _sendTargeted( target, destination, data, headers ) {
-	var payload = isSimpleValue( data ) ? toString( data ) : JSONSerialize( data )
-	var delivered = _deliverTargeted( target, destination, payload, headers )
-	if ( !isNull( variables.clusterManager ) ) {
-		variables.clusterManager.relay( destination, payload, headers, target )
-	}
-	return delivered
-}
-
-function _deliverTargeted( target, destination, body, headers ) {
-	var delivered = 0
-	for ( var physicalDestination in _resolveDestinations( destination, body, headers ) ) {
-		delivered += _deliverToDestination( physicalDestination, body, headers, "", target )
-	}
-	return delivered
-}
-
-/**
- * Closes one connection from the server side (a kick). If `message` is
- * given the client first gets an ERROR frame carrying it. Returns false if
- * no such connection is connected to this node.
- */
-function disconnect( connectionId, message = "" ) {
-	var entry = variables.connectionsById[ connectionId ] ?: javacast( "null", "" )
-	if ( isNull( entry ) ) {
-		return false
-	}
-	if ( len( message ) ) {
-		_sendError( entry.connection, message, "", true )
-	} else {
-		entry.connection.close()
-	}
-	return true
-}
-
-/**
- * The distinct logins connected to THIS node.
- */
-function _localLogins() {
-	var logins = {}
-	for ( var connectionId in structCopy( variables.connectionsById ) ) {
-		var entryLogin = ( variables.connectionsById[ connectionId ] ?: { login: "" } ).login
-		if ( len( entryLogin ) ) {
-			logins[ entryLogin ] = true
+	function _fireOnDisconnect( login, connectionId, connectionMetadata ) {
+		if ( !isNull( variables.onDisconnectFn ) ) {
+			try {
+				variables.onDisconnectFn( login, connectionMetadata, connectionId )
+			} catch ( any e ) {
+				println( "[Stomp] onDisconnect() threw: " & e.message )
+			}
 		}
 	}
-	return structKeyArray( logins )
-}
 
-/**
- * Who's connected across the whole cluster: { logins: [distinct, cluster-
- * wide], byNode: { nodeName: [logins] } }. Each peer publishes its own list
- * on its heartbeat, so peers' entries can lag by up to a heartbeat interval —
- * fine for "who's online," not for anything that needs to be exact. Without
- * clustering it's just this node.
- */
-function getClusterPresence() {
-	var byNode = {}
-	var localName = "local"
-	if ( !isNull( variables.clusterManager ) && variables.clusterManager.isEnabled() ) {
-		localName = variables.clusterManager.getMyPeerName()
-		byNode = variables.clusterManager.getPeerPresence()
-	}
-	byNode[ localName ] = _localLogins()
-	var all = {}
-	for ( var node in byNode ) {
-		for ( var presentLogin in byNode[ node ] ) {
-			all[ presentLogin ] = true
+	function _fireOnSubscribe( login, destination, subscriptionId, connection, connectionMetadata ) {
+		if ( !isNull( variables.onSubscribeFn ) ) {
+			try {
+				variables.onSubscribeFn( login, destination, subscriptionId, connection, connectionMetadata )
+			} catch ( any e ) {
+				println( "[Stomp] onSubscribe() threw: " & e.message )
+			}
 		}
 	}
-	var logins = structKeyArray( all )
-	arraySort( logins, "text" )
-	return { logins: logins, byNode: byNode }
-}
 
-function _fireOnConnect( login, connection, connectionId, connectionMetadata ) {
-	if ( !isNull( variables.onConnectFn ) ) {
-		try {
-			variables.onConnectFn( login, connection, connectionMetadata, connectionId )
-		} catch ( any e ) {
-			println( "[Stomp] onConnect() threw: " & e.message )
+	function _fireOnUnsubscribe( login, destination, subscriptionId, connectionId, connectionMetadata ) {
+		if ( !isNull( variables.onUnsubscribeFn ) ) {
+			try {
+				variables.onUnsubscribeFn( login, destination, subscriptionId, connectionMetadata )
+			} catch ( any e ) {
+				println( "[Stomp] onUnsubscribe() threw: " & e.message )
+			}
 		}
 	}
-}
 
-function _fireOnDisconnect( login, connectionId, connectionMetadata ) {
-	if ( !isNull( variables.onDisconnectFn ) ) {
-		try {
-			variables.onDisconnectFn( login, connectionMetadata, connectionId )
-		} catch ( any e ) {
-			println( "[Stomp] onDisconnect() threw: " & e.message )
-		}
-	}
-}
-
-function _fireOnSubscribe( login, destination, subscriptionId, connection, connectionMetadata ) {
-	if ( !isNull( variables.onSubscribeFn ) ) {
-		try {
-			variables.onSubscribeFn( login, destination, subscriptionId, connection, connectionMetadata )
-		} catch ( any e ) {
-			println( "[Stomp] onSubscribe() threw: " & e.message )
-		}
-	}
-}
-
-function _fireOnUnsubscribe( login, destination, subscriptionId, connectionId, connectionMetadata ) {
-	if ( !isNull( variables.onUnsubscribeFn ) ) {
-		try {
-			variables.onUnsubscribeFn( login, destination, subscriptionId, connectionMetadata )
-		} catch ( any e ) {
-			println( "[Stomp] onUnsubscribe() threw: " & e.message )
-		}
-	}
-}
-
-function _removeAllSubscriptions( connectionId, mySubscriptions ) {
+	function _removeAllSubscriptions( connectionId, mySubscriptions ) {
 		for ( var subId in mySubscriptions ) {
 			var destination = mySubscriptions[ subId ]
 			lock name="#_destLockName( destination )#" type="exclusive" timeout="5" {
 				if ( structKeyExists( variables.subscribersByDestination, destination ) ) {
 					structDelete( variables.subscribersByDestination[ destination ], connectionId & ":" & subId )
-								_pruneDestination( destination )
-							}
-						}
-					}
-					lock name="#_connLockName( connectionId )#" type="exclusive" timeout="5" {
-						structDelete( variables.pendingAcksByConnection, connectionId )
+					_pruneDestination( destination )
+				}
+			}
+		}
+		lock name="#_connLockName( connectionId )#" type="exclusive" timeout="5" {
+			structDelete( variables.pendingAcksByConnection, connectionId )
 			structDelete( variables.ackSeqByConnection, connectionId )
 			structDelete( variables.connectionsById, connectionId )
 		}
@@ -1367,15 +1367,15 @@ function _removeAllSubscriptions( connectionId, mySubscriptions ) {
 		// spends its whole life asleep, and a platform thread each would cap
 		// how many connections a node can hold.
 		variables.virtualExecutor.submit( createDynamicProxy(
-		new "../ThreadRunnable"( function() {
-		while ( !connection.isClosed() ) {
-		sleep( intervalMs )
-		if ( !connection.isClosed() ) {
-		connection.send( char( 10 ) )
-		}
-		}
-		} ),
-		[ "java.lang.Runnable" ]
+			new "../ThreadRunnable"( function() {
+				while ( !connection.isClosed() ) {
+					sleep( intervalMs )
+					if ( !connection.isClosed() ) {
+						connection.send( char( 10 ) )
+					}
+				}
+			} ),
+			[ "java.lang.Runnable" ]
 		) )
 	}
 
@@ -1392,16 +1392,16 @@ function _removeAllSubscriptions( connectionId, mySubscriptions ) {
 		var stomp = this
 		var timeoutMs = intervalMs * 2
 		variables.virtualExecutor.submit( createDynamicProxy(
-		new "../ThreadRunnable"( function() {
-		while ( !connection.isClosed() ) {
-		sleep( intervalMs )
-		if ( !connection.isClosed() && ( stomp._nowMs() - getLastActivityMs() ) > timeoutMs ) {
-		stomp._sendError( connection, "Heart-beat timeout", "", true )
-		return
-		}
-		}
-		} ),
-		[ "java.lang.Runnable" ]
+			new "../ThreadRunnable"( function() {
+				while ( !connection.isClosed() ) {
+					sleep( intervalMs )
+					if ( !connection.isClosed() && ( stomp._nowMs() - getLastActivityMs() ) > timeoutMs ) {
+						stomp._sendError( connection, "Heart-beat timeout", "", true )
+						return
+					}
+				}
+			} ),
+			[ "java.lang.Runnable" ]
 		) )
 	}
 

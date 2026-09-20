@@ -1,0 +1,150 @@
+/**
+ * RateLimit's shared store: { cache: "name" } counts hits in a BoxLang
+ * cache so the limit holds across instances, and degrades to per-process
+ * counting when the cache isn't there.
+ */
+class extends="testbox.system.BaseSpec" {
+
+	private function _res() {
+		var res = { statusCode: 200, headers: {}, body: "" }
+		res.set = ( name, value ) => { res.headers[ name ] = value; return res }
+		res.status = ( code ) => { res.statusCode = code; return res }
+		res.json = ( data ) => { res.body = data; return res }
+		return res
+	}
+
+	private function _hitThrough( middleware, ip = "1.2.3.4" ) {
+		var res = _res()
+		var passed = { value: false }
+		middleware( { ip: ip }, res, () => { passed.value = true } )
+		res.passed = passed.value
+		return res
+	}
+
+	function run() {
+
+		describe( "boxExpressRateLimit({ cache })", function() {
+
+			it( "blocks past max, using a shared cache", function() {
+				var name = "rlSpec" & createUUID().replace( "-", "", "all" )
+				var dir = expandPath( "./tmp-ratelimit-spec-" & createUUID() )
+				cacheService().createCache( name, "BoxCacheProvider", { objectStore: "FileSystemStore", directory: dir } )
+
+				try {
+					var limiter = new "../../models/middleware/RateLimit"().limit( { max: 3, windowMs: 60000, cache: name } )
+					var results = []
+					for ( var i = 1; i <= 5; i++ ) {
+						results.append( _hitThrough( limiter ) )
+					}
+					assertAll( [
+						() => expect( results[ 3 ].passed ).toBeTrue(),
+						() => expect( results[ 4 ].passed ).toBeFalse(),
+						() => expect( results[ 4 ].statusCode ).toBe( 429 ),
+						() => expect( results[ 4 ].headers[ "RateLimit-Remaining" ] ).toBe( "0" )
+					] )
+				} finally {
+					cacheService().shutdownCache( name )
+					directoryDelete( dir, true )
+				}
+			} )
+
+			it( "counts across two limiters sharing a durable cache — one per 'instance'", function() {
+				var name = "rlSpec" & createUUID().replace( "-", "", "all" )
+				var dir = expandPath( "./tmp-ratelimit-spec-" & createUUID() )
+				cacheService().createCache( name, "BoxCacheProvider", { objectStore: "FileSystemStore", directory: dir } )
+
+				try {
+					var nodeA = new "../../models/middleware/RateLimit"().limit( { max: 4, windowMs: 60000, cache: name } )
+					var nodeB = new "../../models/middleware/RateLimit"().limit( { max: 4, windowMs: 60000, cache: name } )
+
+					_hitThrough( nodeA )
+					_hitThrough( nodeB )
+					_hitThrough( nodeA )
+					_hitThrough( nodeB )
+					var fifth = _hitThrough( nodeA )
+
+					assertAll( [
+						() => expect( fifth.passed ).withContext( "4 hits split across two instances already used the whole budget" ).toBeFalse(),
+						() => expect( fifth.statusCode ).toBe( 429 )
+					] )
+				} finally {
+					cacheService().shutdownCache( name )
+					directoryDelete( dir, true )
+				}
+			} )
+
+			it( "keeps separate counts per key", function() {
+				var name = "rlSpec" & createUUID().replace( "-", "", "all" )
+				var dir = expandPath( "./tmp-ratelimit-spec-" & createUUID() )
+				cacheService().createCache( name, "BoxCacheProvider", { objectStore: "FileSystemStore", directory: dir } )
+
+				try {
+					var limiter = new "../../models/middleware/RateLimit"().limit( { max: 1, windowMs: 60000, cache: name } )
+					_hitThrough( limiter, "10.0.0.1" )
+					assertAll( [
+						() => expect( _hitThrough( limiter, "10.0.0.1" ).passed ).toBeFalse(),
+						() => expect( _hitThrough( limiter, "2001:db8::1" ).passed ).withContext( "a different client, IPv6 key" ).toBeTrue()
+					] )
+				} finally {
+					cacheService().shutdownCache( name )
+					directoryDelete( dir, true )
+				}
+			} )
+
+			it( "falls back to per-process counting when the cache doesn't exist", function() {
+				var limiter = new "../../models/middleware/RateLimit"().limit( { max: 2, windowMs: 60000, cache: "no-such-cache-" & createUUID() } )
+				var results = [ _hitThrough( limiter ), _hitThrough( limiter ), _hitThrough( limiter ) ]
+				assertAll( [
+					() => expect( results[ 2 ].passed ).toBeTrue(),
+					() => expect( results[ 3 ].passed ).toBeFalse(),
+					() => expect( results[ 3 ].statusCode ).toBe( 429 )
+				] )
+			} )
+
+			it( "keeps limiting, from local counts, if the cache disappears mid-run", function() {
+				var name = "rlSpec" & createUUID().replace( "-", "", "all" )
+				var dir = expandPath( "./tmp-ratelimit-spec-" & createUUID() )
+				cacheService().createCache( name, "BoxCacheProvider", { objectStore: "FileSystemStore", directory: dir } )
+
+				try {
+					var limiter = new "../../models/middleware/RateLimit"().limit( { max: 2, windowMs: 60000, cache: name } )
+					_hitThrough( limiter )
+					cacheService().shutdownCache( name )
+
+					// The shared count is unreachable now, so counting restarts
+					// from zero on this process — but it is still enforced.
+					var afterLoss = [ _hitThrough( limiter ), _hitThrough( limiter ), _hitThrough( limiter ) ]
+					assertAll( [
+						() => expect( afterLoss[ 1 ].passed ).withContext( "never errors out" ).toBeTrue(),
+						() => expect( afterLoss[ 2 ].passed ).toBeTrue(),
+						() => expect( afterLoss[ 3 ].passed ).withContext( "max: 2 enforced on local counts" ).toBeFalse(),
+						() => expect( afterLoss[ 3 ].statusCode ).toBe( 429 )
+					] )
+				} finally {
+					try { cacheService().shutdownCache( name ) } catch ( any e ) {}
+					try { directoryDelete( dir, true ) } catch ( any e ) {}
+				}
+			} )
+
+			it( "still uses the built-in in-memory counting when neither cache nor store is given", function() {
+				var limiter = new "../../models/middleware/RateLimit"().limit( { max: 1, windowMs: 60000 } )
+				_hitThrough( limiter )
+				expect( _hitThrough( limiter ).passed ).toBeFalse()
+			} )
+
+			it( "accepts a custom store object", function() {
+				var calls = []
+				var store = { hit: ( key, windowMs ) => { calls.append( key ); return { count: 99, resetAt: getTickCount() + 1000 } } }
+				var limiter = new "../../models/middleware/RateLimit"().limit( { max: 5, store: store } )
+				var res = _hitThrough( limiter, "9.9.9.9" )
+				assertAll( [
+					() => expect( calls ).toBe( [ "9.9.9.9" ] ),
+					() => expect( res.passed ).toBeFalse()
+				] )
+			} )
+
+		} )
+
+	}
+
+}

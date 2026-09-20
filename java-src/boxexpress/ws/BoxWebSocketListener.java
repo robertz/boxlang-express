@@ -67,6 +67,9 @@ public class BoxWebSocketListener extends AbstractReceiveListener {
 
 	private final long maxMessageSize;
 
+	// Last time anything (a message, ping or pong) arrived from the client.
+	private volatile long lastInboundMs = System.currentTimeMillis();
+
 	public BoxWebSocketListener( WebSocketMessageHandler handler, long maxMessageSize ) {
 		this.handler = handler;
 		this.maxMessageSize = maxMessageSize;
@@ -84,14 +87,70 @@ public class BoxWebSocketListener extends AbstractReceiveListener {
 		return maxMessageSize;
 	}
 
+	/**
+	 * Drops a connection that has sent nothing for idleTimeoutMs — no message,
+	 * no ping, and, crucially, no pong. A ping goes out every third of that
+	 * period, and a healthy client (every browser, automatically) answers it,
+	 * so a quiet-but-alive connection is never dropped; one whose peer has
+	 * vanished or that simply ignores pings is. (Undertow's own idle timeout
+	 * would not do this: it counts our outgoing pings as activity.)
+	 * The virtual thread ends on its own once the channel closes.
+	 */
+	public void startIdleMonitor( WebSocketChannel channel, long idleTimeoutMs ) {
+		if ( idleTimeoutMs <= 0 ) {
+			return;
+		}
+		long tickMs = Math.max( 250L, idleTimeoutMs / 3 );
+		Thread.ofVirtual().name( "ws-idle-", 0 ).start( () -> {
+			try {
+				while ( channel.isOpen() ) {
+					Thread.sleep( tickMs );
+					if ( !channel.isOpen() ) {
+						return;
+					}
+					if ( System.currentTimeMillis() - lastInboundMs > idleTimeoutMs ) {
+						WebSockets.sendClose( 1001, "idle timeout", channel, null );
+						executor.submit( _guard( () -> handler.onError( channel, new java.io.IOException( "idle timeout" ) ) ) );
+						executor.shutdown();
+						try {
+							channel.close();
+						} catch ( Exception ignored ) {
+						}
+						return;
+					}
+					WebSockets.sendPing( ByteBuffer.allocate( 0 ), channel, null );
+				}
+			} catch ( InterruptedException e ) {
+				Thread.currentThread().interrupt();
+			} catch ( Throwable t ) {
+				System.err.println( "[boxexpress-ws-shim] idle monitor failed:" );
+				t.printStackTrace();
+			}
+		} );
+	}
+
+	@Override
+	protected void onFullPingMessage( WebSocketChannel channel, BufferedBinaryMessage message ) throws java.io.IOException {
+		lastInboundMs = System.currentTimeMillis();
+		super.onFullPingMessage( channel, message );
+	}
+
+	@Override
+	protected void onFullPongMessage( WebSocketChannel channel, BufferedBinaryMessage message ) throws java.io.IOException {
+		lastInboundMs = System.currentTimeMillis();
+		super.onFullPongMessage( channel, message );
+	}
+
 	@Override
 	protected void onFullTextMessage( WebSocketChannel channel, BufferedTextMessage message ) {
+		lastInboundMs = System.currentTimeMillis();
 		String data = message.getData();
 		executor.submit( _guard( () -> handler.onMessage( channel, data ) ) );
 	}
 
 	@Override
 	protected void onFullBinaryMessage( WebSocketChannel channel, BufferedBinaryMessage message ) {
+		lastInboundMs = System.currentTimeMillis();
 		ByteBuffer merged = WebSockets.mergeBuffers( message.getData().getResource() );
 		byte[] data = new byte[ merged.remaining() ];
 		merged.get( data );

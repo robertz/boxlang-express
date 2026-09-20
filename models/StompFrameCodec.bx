@@ -111,8 +111,8 @@ class {
 	 * favor of this one.
 	 */
 	function serialize( frame, version = "1.2" ) {
-	var escapeVersion = listFindNoCase( "CONNECT,STOMP,CONNECTED", frame.getCommand() ) ? "1.0" : version
-	var body = frame.getBody()
+		var escapeVersion = listFindNoCase( "CONNECT,STOMP,CONNECTED", frame.getCommand() ) ? "1.0" : version
+		var body = frame.getBody()
 		var out = frame.getCommand() & char( 10 )
 		for ( var key in frame.getHeaders() ) {
 			if ( key == "content-length" ) {
@@ -130,59 +130,59 @@ class {
 	}
 
 	private function _escape( str, version = "1.2" ) {
-	if ( version == "1.0" ) {
-	return toString( str )
-	}
-	// Order matters: backslash first, so the backslashes introduced by
+		if ( version == "1.0" ) {
+			return toString( str )
+		}
+		// Order matters: backslash first, so the backslashes introduced by
 		// the newline/colon/CR escaping below don't themselves get escaped
 		// a second time.
 		var result = toString( str ).replace( "\", "\\", "all" )
-		result = result.replace( char( 10 ), "\n", "all" )
-		if ( version == "1.2" ) {
-		result = result.replace( char( 13 ), "\r", "all" )
+			result = result.replace( char( 10 ), "\n", "all" )
+			if ( version == "1.2" ) {
+				result = result.replace( char( 13 ), "\r", "all" )
+			}
+			result = result.replace( ":", "\c", "all" )
+			return result
 		}
-		result = result.replace( ":", "\c", "all" )
-		return result
-	}
 
-	private function _unescape( str, version = "1.2" ) {
-	if ( version == "1.0" ) {
-	return str
-	}
-	var result = ""
-		var i = 1
-		var len = str.len()
-		while ( i <= len ) {
-			var ch = str.mid( i, 1 )
-			if ( ch == "\" && i < len ) {
-				var next = str.mid( i + 1, 1 )
-				if ( next == "n" ) {
-					result &= char( 10 )
-					i += 2
-				} else if ( next == "c" ) {
-					result &= ":"
-					i += 2
-				} else if ( next == "r" && version == "1.2" ) {
-					result &= char( 13 )
-					i += 2
-				} else if ( next == "\" ) {
-					result &= "\"
-					i += 2
+		private function _unescape( str, version = "1.2" ) {
+			if ( version == "1.0" ) {
+				return str
+			}
+			var result = ""
+			var i = 1
+			var len = str.len()
+			while ( i <= len ) {
+				var ch = str.mid( i, 1 )
+				if ( ch == "\" && i < len ) {
+					var next = str.mid( i + 1, 1 )
+					if ( next == "n" ) {
+						result &= char( 10 )
+						i += 2
+					} else if ( next == "c" ) {
+						result &= ":"
+						i += 2
+					} else if ( next == "r" && version == "1.2" ) {
+						result &= char( 13 )
+						i += 2
+					} else if ( next == "\" ) {
+						result &= "\"
+						i += 2
+					} else {
+						// An unrecognized escape — leave the backslash literal
+						// rather than throwing, matching this project's
+						// generally-lenient parsing posture elsewhere
+						// (RangeParser falls back to "full" on anything it
+						// can't parse rather than erroring the request).
+						result &= ch
+						i++
+					}
 				} else {
-					// An unrecognized escape — leave the backslash literal
-					// rather than throwing, matching this project's
-					// generally-lenient parsing posture elsewhere
-					// (RangeParser falls back to "full" on anything it
-					// can't parse rather than erroring the request).
 					result &= ch
 					i++
 				}
-			} else {
-				result &= ch
-				i++
 			}
+			return result
 		}
-		return result
-	}
 
-}
+	}

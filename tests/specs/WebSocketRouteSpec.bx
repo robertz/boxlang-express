@@ -31,22 +31,22 @@ class extends="testbox.system.BaseSpec" {
 
 		variables.binaryReceived = []
 		variables.app.ws( "/binary", ( connection ) => {
-		connection.onBinary( ( bytes ) => {
-		variables.binaryReceived.append( bytes.len() )
-		connection.send( "got:" & bytes.len() )
-		} )
+			connection.onBinary( ( bytes ) => {
+				variables.binaryReceived.append( bytes.len() )
+				connection.send( "got:" & bytes.len() )
+			} )
 		} )
 
 		variables.serverCloseEvents = []
 		variables.app.ws( "/kick", ( connection ) => {
-		connection.onClose( ( code, reason ) => {
-		variables.serverCloseEvents.append( code )
-		} )
-		connection.onMessage( ( text ) => {
-		if ( text == "kick" ) {
-		connection.close()
-		}
-		} )
+			connection.onClose( ( code, reason ) => {
+				variables.serverCloseEvents.append( code )
+			} )
+			connection.onMessage( ( text ) => {
+				if ( text == "kick" ) {
+					connection.close()
+				}
+			} )
 		} )
 
 		variables.capturedHeaders = {}
@@ -112,34 +112,34 @@ class extends="testbox.system.BaseSpec" {
 			} )
 
 			it( "delivers a binary message to onBinary(), and drops it when none is registered", function() {
-			var client = new "../helpers/WebSocketTestClient"()
-			client.connect( "localhost", variables.testPort, "/binary" )
-			client.sendBinary( repeatString( "b", 300 ).getBytes( "UTF-8" ) )
-			expect( client.readTextFrame() ).toBe( "got:300" )
-			client.close()
+				var client = new "../helpers/WebSocketTestClient"()
+				client.connect( "localhost", variables.testPort, "/binary" )
+				client.sendBinary( repeatString( "b", 300 ).getBytes( "UTF-8" ) )
+				expect( client.readTextFrame() ).toBe( "got:300" )
+				client.close()
 
-			var plain = new "../helpers/WebSocketTestClient"()
-			plain.connect( "localhost", variables.testPort, "/chat" )
-			plain.sendBinary( "ignored".getBytes( "UTF-8" ) )
-			plain.sendText( "still-works" )
-			expect( plain.readTextFrame() ).toBe( "echo:still-works" )
-			plain.close()
+				var plain = new "../helpers/WebSocketTestClient"()
+				plain.connect( "localhost", variables.testPort, "/chat" )
+				plain.sendBinary( "ignored".getBytes( "UTF-8" ) )
+				plain.sendText( "still-works" )
+				expect( plain.readTextFrame() ).toBe( "echo:still-works" )
+				plain.close()
 			} )
 
 			it( "fires onClose() when the SERVER closes the connection, not only when the client does", function() {
-			var client = new "../helpers/WebSocketTestClient"()
-			client.connect( "localhost", variables.testPort, "/kick" )
-			client.sendText( "kick" )
+				var client = new "../helpers/WebSocketTestClient"()
+				client.connect( "localhost", variables.testPort, "/kick" )
+				client.sendText( "kick" )
 
-			var waited = 0
-			while ( variables.serverCloseEvents.len() == 0 && waited < 2000 ) {
-			sleep( 50 )
-			waited += 50
-			}
-			expect( variables.serverCloseEvents ).toHaveLength( 1 )
-			client.close()
-			sleep( 200 )
-			expect( variables.serverCloseEvents ).withContext( "and only once" ).toHaveLength( 1 )
+				var waited = 0
+				while ( variables.serverCloseEvents.len() == 0 && waited < 2000 ) {
+					sleep( 50 )
+					waited += 50
+				}
+				expect( variables.serverCloseEvents ).toHaveLength( 1 )
+				client.close()
+				sleep( 200 )
+				expect( variables.serverCloseEvents ).withContext( "and only once" ).toHaveLength( 1 )
 			} )
 
 			it( "fires the connection's onClose() callback when the client disconnects", function() {
@@ -189,7 +189,7 @@ class extends="testbox.system.BaseSpec" {
 					& "Connection: Upgrade" & crlf
 					& "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==" & crlf
 					& "Sec-WebSocket-Version: 13" & crlf & crlf
-				).getBytes( "UTF-8" ) )
+					).getBytes( "UTF-8" ) )
 				out.flush()
 
 				var reader = createObject( "java", "java.io.BufferedReader" ).init(

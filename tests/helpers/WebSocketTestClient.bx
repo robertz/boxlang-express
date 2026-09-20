@@ -61,6 +61,10 @@ class {
 		_sendFrame( 129, text.getBytes( "UTF-8" ) )   // FIN + text opcode (0x81)
 	}
 
+	function sendPong() {
+		_sendFrame( 138, "".getBytes( "UTF-8" ) )   // FIN + pong opcode (0x8A), empty payload
+	}
+
 	function sendBinary( payload ) {
 		_sendFrame( 130, payload )   // FIN + binary opcode (0x82)
 	}
@@ -99,24 +103,31 @@ class {
 	 */
 	function readTextFrame() {
 		var inStream = variables.socket.getInputStream()
-		var byte1 = inStream.read()
-		var byte2 = inStream.read()
-		var len = bitAnd( byte2, 127 )
-		if ( len == 126 ) {
-			var lenHigh = inStream.read()
-			var lenLow = inStream.read()
-			len = bitOr( bitSHLN( lenHigh, 8 ), lenLow )
-		}
-		var bodyBytes = repeatString( char( 0 ), len ).getBytes( "UTF-8" )
-		var totalRead = 0
-		while ( totalRead < len ) {
-			var n = inStream.read( bodyBytes, javacast( "int", totalRead ), javacast( "int", len - totalRead ) )
-			if ( n == -1 ) {
-				break
+		// Ping/pong frames (opcodes 9/10) are keepalive noise a real WebSocket
+		// client hides from the application, so skip them here too.
+		while ( true ) {
+			var byte1 = inStream.read()
+			var byte2 = inStream.read()
+			var len = bitAnd( byte2, 127 )
+			if ( len == 126 ) {
+				var lenHigh = inStream.read()
+				var lenLow = inStream.read()
+				len = bitOr( bitSHLN( lenHigh, 8 ), lenLow )
 			}
-			totalRead += n
+			var bodyBytes = repeatString( char( 0 ), len ).getBytes( "UTF-8" )
+			var totalRead = 0
+			while ( totalRead < len ) {
+				var n = inStream.read( bodyBytes, javacast( "int", totalRead ), javacast( "int", len - totalRead ) )
+				if ( n == -1 ) {
+					break
+				}
+				totalRead += n
+			}
+			var opcode = bitAnd( byte1, 15 )
+			if ( opcode != 9 && opcode != 10 ) {
+				return createObject( "java", "java.lang.String" ).init( bodyBytes, "UTF-8" )
+			}
 		}
-		return createObject( "java", "java.lang.String" ).init( bodyBytes, "UTF-8" )
 	}
 
 	/**

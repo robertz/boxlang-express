@@ -1,35 +1,51 @@
 /**
  * A Session-compatible store backed by BoxLang's own cache() service —
- * memory by default, or a SQL table if the named cache is configured with
- * objectStore: "JDBCStore" in boxlang.json. Implements the get(id)/
- * set(id, data, maxAge)/destroy(id) contract Session.bx's `store` option
- * expects, so sessions can survive a restart and be shared across a
- * cluster — the two things the default in-memory MemoryStore can't do.
+ * memory by default, or a SQL table / directory if the named cache is
+ * configured with objectStore: "JDBCStore" / "FileSystemStore" in
+ * boxlang.json. Implements the get(id)/set(id, data, maxAge)/destroy(id)
+ * contract Session.bx's `store` option expects, so sessions can survive a
+ * restart and be shared across a cluster — the two things the default
+ * in-memory MemoryStore can't do.
  *
  *   app.use( boxExpressSession( { store: boxExpressCacheStore() } ) )              // "default" cache
  *   app.use( boxExpressSession( { store: boxExpressCacheStore( "sessions" ) } ) )   // a named cache
  *
  * The named cache must already be registered in boxlang.json — this class
- * doesn't create one. See README.md for a JDBCStore example.
+ * doesn't create one. If it isn't (or the store later fails), sessions fall
+ * back to per-process memory and the app keeps serving, with a logged
+ * warning — see CacheAccess.bx for exactly what degrades and how it
+ * recovers. Pass { fallback: false } to fail loudly instead, or
+ * { requireDurable: true } to refuse to start on a non-durable cache.
  */
 class {
 
-	function init( cacheName = "default" ) {
-		variables.cacheName = cacheName
+	function init( cacheName = "default", options = {} ) {
+		variables.access = new CacheAccess( cacheName, {
+			label: "session store",
+			fallback: options.fallback ?: true,
+			requireDurable: options.requireDurable ?: false
+		} )
 		return this
 	}
 
 	function get( id ) {
-		var result = cache( variables.cacheName ).get( id )
-		return result.isPresent() ? result.get() : javacast( "null", "" )
+		return variables.access.get( id )
 	}
 
 	function set( id, data, maxAge ) {
-		cache( variables.cacheName ).set( id, data, maxAge )
+		variables.access.set( id, data, maxAge )
 	}
 
 	function destroy( id ) {
-		cache( variables.cacheName ).clear( id )
+		variables.access.remove( id )
+	}
+
+	function getMode() {
+		return variables.access.getMode()
+	}
+
+	function isDurable() {
+		return variables.access.isDurable()
 	}
 
 }

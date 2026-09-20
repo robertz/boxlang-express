@@ -21,6 +21,7 @@ class {
 		variables.closeCallback = javacast( "null", "" )
 		variables.binaryCallback = javacast( "null", "" )
 		variables.closeNotified = false
+		variables.finalizer = javacast( "null", "" )
 		variables.lockName = "WebSocketConnection-" & createUUID()
 		// send()'s actual blocking write has no timeout of its own —
 		// confirmed directly that a peer which vanishes mid-write can hang
@@ -112,17 +113,17 @@ class {
 				} catch ( any e ) {
 					sendFailed = true
 				}
-				}
-				}
-				// A write that failed or timed out means the peer is gone or wedged.
-				// Tear the connection down properly (outside the lock) so the app's
-				// onClose cleanup runs, instead of leaving a zombie that every later
-				// send() has to wait out or skip.
-				if ( sendFailed ) {
-					_abort( "send failed or timed out" )
-				}
-				return this
-				}
+			}
+		}
+		// A write that failed or timed out means the peer is gone or wedged.
+		// Tear the connection down properly (outside the lock) so the app's
+		// onClose cleanup runs, instead of leaving a zombie that every later
+		// send() has to wait out or skip.
+		if ( sendFailed ) {
+			_abort( "send failed or timed out" )
+		}
+		return this
+	}
 
 	function close() {
 		if ( !variables.closed ) {
@@ -133,47 +134,59 @@ class {
 					try {
 						variables.channel.sendClose()
 					} catch ( any e ) {
-								}
-							}
-						}
 					}
-					// A locally initiated close never gets an onCloseMessage back that
-					// _dispatchClose() would act on (it sees closed == true and returns), so
-					// without this the app's onClose callback — and whatever cleanup hangs off
-					// it, like Stomp.bx's registry teardown — silently never ran for a
-					// server-side close.
-					_notifyClose( 1000, "closed locally" )
-					return this
-					}
+				}
+			}
+		}
+		// A locally initiated close never gets an onCloseMessage back that
+		// _dispatchClose() would act on (it sees closed == true and returns), so
+		// without this the app's onClose callback — and whatever cleanup hangs off
+		// it, like Stomp.bx's registry teardown — silently never ran for a
+		// server-side close.
+		_notifyClose( 1000, "closed locally" )
+		return this
+	}
 
-					/**
-					 * Forcibly drops a connection whose peer stopped responding, then runs
-					 * the normal close notification.
-					 */
-					function _abort( reason ) {
-						if ( variables.closed ) {
-							return
-						}
-						variables.closed = true
-						variables.sendExecutor.shutdown()
-						try {
-							variables.channel.close()
-						} catch ( any e ) {
-						}
-						_notifyClose( 1006, reason )
-					}
+	/**
+	 * Forcibly drops a connection whose peer stopped responding, then runs
+	 * the normal close notification.
+	 */
+	function _abort( reason ) {
+		if ( variables.closed ) {
+			return
+		}
+		variables.closed = true
+		variables.sendExecutor.shutdown()
+		try {
+			variables.channel.close()
+		} catch ( any e ) {
+		}
+		_notifyClose( 1006, reason )
+	}
 
-					function _notifyClose( code, reason ) {
-						if ( variables.closeNotified ) {
-							return
-						}
-						variables.closeNotified = true
-						if ( !isNull( variables.closeCallback ) ) {
-							variables.closeCallback( code, reason )
-						}
-					}
+	/**
+	 * Internal hook for the server's own connection registry (so it can drop
+	 * this connection once it's gone) — separate from onClose(), which belongs
+	 * to application code.
+	 */
+	function _onFinalClose( callback ) {
+		variables.finalizer = callback
+	}
 
-					function isClosed() {
+	function _notifyClose( code, reason ) {
+		if ( variables.closeNotified ) {
+			return
+		}
+		variables.closeNotified = true
+		if ( !isNull( variables.finalizer ) ) {
+			variables.finalizer()
+		}
+		if ( !isNull( variables.closeCallback ) ) {
+			variables.closeCallback( code, reason )
+		}
+	}
+
+	function isClosed() {
 		return variables.closed
 	}
 

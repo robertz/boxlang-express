@@ -19,6 +19,9 @@ class {
 		variables.scheduler = javacast( "null", "" )
 		variables.clusterManager = javacast( "null", "" )
 		variables.closed = false
+		variables.draining = false
+		variables.gracefulHandler = javacast( "null", "" )
+		variables.wsCallbackObject = javacast( "null", "" )
 		variables.color = new AnsiColor()
 		return this
 	}
@@ -243,7 +246,12 @@ class {
 		// completely unchanged, for everything else.
 		var rootProxy = proxy
 		if ( !structIsEmpty( variables.wsRoutes ) ) {
-			var wsConnectionCallback = new adapters.WsConnectionCallback( variables.wsRoutes, this.settings.wsMaxMessageSize ?: 1048576 )
+			var wsConnectionCallback = new adapters.WsConnectionCallback(
+				variables.wsRoutes,
+				this.settings.wsMaxMessageSize ?: 1048576,
+				this.settings.wsIdleTimeoutMs ?: 0
+			)
+			variables.wsCallbackObject = wsConnectionCallback
 			var wsCallbackProxy = createDynamicProxy( wsConnectionCallback, [ "io.undertow.websockets.WebSocketConnectionCallback" ] )
 
 			// Registering the STOMP-over-WebSocket subprotocol names here
@@ -271,7 +279,11 @@ class {
 
 		var builder = createObject( "java", "io.undertow.Undertow" ).builder()
 		builder.addHttpListener( port, "0.0.0.0" )
-		builder.setHandler( rootProxy )
+		// Wrapping the whole chain in Undertow's GracefulShutdownHandler is what
+		// lets shutdown() below refuse new requests with a 503 while waiting for
+		// the ones already running to finish.
+		variables.gracefulHandler = createObject( "java", "io.undertow.server.handlers.GracefulShutdownHandler" ).init( rootProxy )
+		builder.setHandler( variables.gracefulHandler )
 		builder.setSocketOption( createObject( "java", "org.xnio.Options" ).BACKLOG, javacast( "int", backlog ) )
 		builder.setServerOption( createObject( "java", "io.undertow.UndertowOptions" ).ENABLE_STATISTICS, javacast( "boolean", true ) )
 
@@ -308,6 +320,103 @@ class {
 		return this
 	}
 
+	/**
+	 * Registers liveness and readiness endpoints — GET <path>/live (200 as
+	 * long as the process can answer at all) and GET <path>/ready (200 when
+	 * the app should receive traffic, 503 when it shouldn't) — for load
+	 * balancers and orchestrators (a Kubernetes livenessProbe/readinessProbe).
+	 *
+	 *   app.health()
+	 *   app.health( { path: "/healthz", checks: { db: () => pingDatabase() } } )
+	 *
+	 * Each entry in options.checks is a function returning false — or
+	 * throwing — when that dependency is unhealthy; readiness then reports 503
+	 * with the names of the failing checks (never their exception messages).
+	 * Readiness also reports 503 the moment shutdown() begins, so a load
+	 * balancer stops sending traffic before the drain starts.
+	 *
+	 * Routes are ordinary ones, so call this before app.use(...) if the
+	 * endpoints shouldn't pass through session/CSRF/rate-limit middleware.
+	 */
+	function health( options = {} ) {
+		var basePath = options.path ?: "/health"
+		var checks = options.checks ?: {}
+		var app = this
+
+		get( basePath & "/live", ( req, res ) => {
+			res.set( "Cache-Control", "no-store" )
+			res.json( { status: "ok" } )
+		} )
+
+		get( basePath & "/ready", ( req, res ) => {
+			res.set( "Cache-Control", "no-store" )
+			if ( app.isDraining() ) {
+				return res.status( 503 ).json( { status: "draining" } )
+			}
+			var failed = []
+			for ( var checkName in checks ) {
+				try {
+					var result = checks[ checkName ]()
+					if ( !isNull( result ) && isBoolean( result ) && !result ) {
+						failed.append( checkName )
+					}
+				} catch ( any e ) {
+					println( "[BoxExpress] health check '" & checkName & "' threw: " & e.message )
+					failed.append( checkName )
+				}
+			}
+			if ( failed.len() ) {
+				return res.status( 503 ).json( { status: "unhealthy", failing: failed } )
+			}
+			res.json( { status: "ready" } )
+		} )
+
+		return this
+	}
+
+	function isDraining() {
+		return variables.draining
+	}
+
+	/**
+	 * Graceful stop: readiness starts reporting 503 straight away; after
+	 * options.drainDelayMs (default 0 — set it to give a load balancer time to
+	 * notice before requests start being refused) new requests get a 503,
+	 * every open WebSocket connection is closed, and in-flight requests get up
+	 * to options.timeoutMs (default: app.set("shutdownTimeoutMs"), else 10000)
+	 * to finish before the server stops regardless. A long-lived response such
+	 * as an SSE stream counts as in-flight until it ends, so it will use the
+	 * whole timeout. Returns { drained, webSocketsClosed } — drained is false
+	 * if the timeout ran out with requests still running.
+	 *
+	 * close() remains the immediate stop; this is what SIGTERM/Ctrl-C now run.
+	 */
+	function shutdown( options = {} ) {
+		if ( variables.closed ) {
+			return { drained: true, webSocketsClosed: 0 }
+		}
+		var timeoutMs = options.timeoutMs ?: ( this.settings.shutdownTimeoutMs ?: 10000 )
+		var drainDelayMs = options.drainDelayMs ?: 0
+		var drained = true
+		var webSocketsClosed = 0
+
+		variables.draining = true
+		if ( drainDelayMs > 0 ) {
+			sleep( drainDelayMs )
+		}
+		if ( !isNull( variables.gracefulHandler ) ) {
+			variables.gracefulHandler.shutdown()
+		}
+		if ( !isNull( variables.wsCallbackObject ) ) {
+			webSocketsClosed = variables.wsCallbackObject.closeAll()
+		}
+		if ( !isNull( variables.gracefulHandler ) && timeoutMs > 0 ) {
+			drained = variables.gracefulHandler.awaitShutdown( javacast( "long", timeoutMs ) )
+		}
+		close()
+		return { drained: drained, webSocketsClosed: webSocketsClosed }
+	}
+
 	function close() {
 		if ( variables.closed ) {
 			return this
@@ -334,7 +443,7 @@ class {
 			try {
 				createObject( "java", "java.lang.Runtime" ).getRuntime().removeShutdownHook( variables.shutdownHook )
 			} catch ( any e ) {
-				// already in the middle of JVM shutdown — the hook is running (or has run) anyway
+			// already in the middle of JVM shutdown — the hook is running (or has run) anyway
 			}
 			variables.shutdownHook = javacast( "null", "" )
 		}
@@ -381,9 +490,12 @@ class {
 	 * dev-mode watcher outlive a Ctrl-C'd server.
 	 */
 	private function _registerShutdownHook() {
+		var app = this
 		var runnable = createDynamicProxy(
 			new ThreadRunnable( function() {
-				close()
+				// SIGTERM/Ctrl-C drain in-flight requests first; app.set(
+				// "shutdownTimeoutMs", 0) restores the old immediate stop.
+				app.shutdown( { timeoutMs: app.settings.shutdownTimeoutMs ?: 5000 } )
 			} ),
 			[ "java.lang.Runnable" ]
 		)

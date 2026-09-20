@@ -10,8 +10,8 @@
 @BoxBIF
 class {
 
-	function invoke( cacheName = "default" ) {
-		return new bxModules.boxexpress.models.stores.CacheStore( cacheName )
+	function invoke( cacheName = "default", options = {} ) {
+		return new bxModules.boxexpress.models.stores.CacheStore( cacheName, options )
 	}
 
 }

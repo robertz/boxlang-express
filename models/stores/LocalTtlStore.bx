@@ -1,0 +1,54 @@
+/**
+ * A small in-memory key/value store with per-entry expiry — the per-process
+ * fallback CacheAccess uses when no durable cache is available. Same idea
+ * as Session.bx's built-in MemoryStore: a ConcurrentHashMap plus cheap
+ * amortized cleanup instead of a background thread.
+ */
+class {
+
+	function init() {
+		variables.entries = createObject( "java", "java.util.concurrent.ConcurrentHashMap" ).init()
+		variables.writesSinceSweep = 0
+		return this
+	}
+
+	function get( key ) {
+		var entry = variables.entries.get( key )
+		if ( isNull( entry ) || entry.expiresAt < _now() ) {
+			return javacast( "null", "" )
+		}
+		return entry.data
+	}
+
+	function set( key, data, ttlSeconds ) {
+		variables.entries.put( key, { data: data, expiresAt: _now() + ( ttlSeconds * 1000 ) } )
+		variables.writesSinceSweep++
+		if ( variables.writesSinceSweep >= 100 ) {
+			variables.writesSinceSweep = 0
+			_sweep()
+		}
+	}
+
+	function remove( key ) {
+		variables.entries.remove( key )
+	}
+
+	function count() {
+		return variables.entries.size()
+	}
+
+	private function _now() {
+		return createObject( "java", "java.lang.System" ).currentTimeMillis()
+	}
+
+	private function _sweep() {
+		var now = _now()
+		for ( var key in variables.entries.keySet().toArray() ) {
+			var entry = variables.entries.get( key )
+			if ( !isNull( entry ) && entry.expiresAt < now ) {
+				variables.entries.remove( key )
+			}
+		}
+	}
+
+}

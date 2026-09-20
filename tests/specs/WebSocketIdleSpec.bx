@@ -1,0 +1,79 @@
+/**
+ * app.set( "wsIdleTimeoutMs", ms ) — a WebSocket connection that sends
+ * nothing (no message, no ping, no pong) for that long is dropped, and its
+ * onClose callback fires. The server pings at a third of the interval, so a
+ * client that answers pings is never dropped however quiet it is.
+ */
+class extends="testbox.system.BaseSpec" {
+
+	function beforeAll() {
+		variables.port = 4960
+		variables.app = new "../../models/BoxExpress"()
+		variables.app.set( "wsIdleTimeoutMs", 900 )
+		variables.closed = []
+		variables.app.ws( "/w", ( connection ) => {
+			connection.onClose( ( code, reason ) => { variables.closed.append( code ) } )
+			connection.onMessage( ( text ) => { connection.send( "echo:" & text ) } )
+		} )
+		variables.app.listen( port = variables.port, options = { block: false } )
+		sleep( 300 )
+	}
+
+	function afterAll() {
+		variables.app.close()
+	}
+
+	private function _waitFor( fn, timeoutMs = 4000 ) {
+		var waited = 0
+		while ( !fn() && waited < timeoutMs ) {
+			sleep( 50 )
+			waited += 50
+		}
+	}
+
+	function run() {
+		describe( "wsIdleTimeoutMs", function() {
+
+			it( "drops a connection that sends nothing, and fires its onClose", function() {
+				var before = variables.closed.len()
+				var client = new "../helpers/WebSocketTestClient"()
+				client.connect( "localhost", variables.port, "/w" )
+
+				_waitFor( () => variables.closed.len() > before )
+				expect( variables.closed.len() ).toBe( before + 1 )
+			} )
+
+			it( "keeps a connection alive while it keeps sending messages", function() {
+				var before = variables.closed.len()
+				var client = new "../helpers/WebSocketTestClient"()
+				client.connect( "localhost", variables.port, "/w" )
+
+				for ( var i = 1; i <= 6; i++ ) {
+					sleep( 300 )
+					client.sendText( "m" & i )
+					expect( client.readTextFrame() ).toBe( "echo:m" & i )
+				}
+				assertAll( [
+					() => expect( variables.closed.len() ).withContext( "still open after 1.8s (2x the timeout)" ).toBe( before ),
+					() => expect( client.readTextFrameWithTimeout( 10 ) ).toBe( "" )
+				] )
+				client.close()
+			} )
+
+			it( "keeps a connection alive that only answers pings with pongs", function() {
+				var before = variables.closed.len()
+				var client = new "../helpers/WebSocketTestClient"()
+				client.connect( "localhost", variables.port, "/w" )
+
+				for ( var i = 1; i <= 6; i++ ) {
+					sleep( 300 )
+					client.sendPong()
+				}
+				expect( variables.closed.len() ).toBe( before )
+				client.close()
+			} )
+
+		} )
+	}
+
+}

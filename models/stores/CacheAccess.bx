@@ -1,0 +1,140 @@
+/**
+ * Shared plumbing for the cache-backed stores (CacheStore for sessions,
+ * CacheRateLimitStore for rate limiting): reads and writes a named BoxLang
+ * cache() and degrades gracefully when durable shared storage isn't there,
+ * instead of failing every request.
+ *
+ * Two situations are handled, both by falling back to a per-process
+ * in-memory map (so the app keeps working, it just stops sharing state
+ * across instances):
+ *
+ *   - the named cache isn't registered at all — detected when constructed,
+ *     and every call then goes straight to the local map;
+ *   - the cache exists but a call to it fails at runtime (a database going
+ *     away under a JDBCStore, say) — that one call uses the local map,
+ *     and the next call tries the cache again, so it recovers on its own
+ *     when the store comes back. Entries written during the outage stay
+ *     local; reads check the cache first and the local map second.
+ *
+ * A cache that exists but isn't durable (BoxLang's default in-memory
+ * ConcurrentStore, per IObjectStore.isDistributed()) is used as-is, with
+ * one warning at construction that its contents aren't shared across
+ * instances or kept across restarts.
+ *
+ * options:
+ *   fallback        (default true)  false makes a missing cache throw at
+ *                                    construction and runtime errors
+ *                                    propagate, instead of degrading.
+ *   requireDurable  (default false) throw at construction unless the cache
+ *                                    is backed by a durable, shared store.
+ *   label           what to call this in log lines.
+ *
+ * Every degradation is logged (throttled), never silent.
+ */
+class {
+
+	function init( cacheName = "default", options = {} ) {
+		variables.cacheName = cacheName
+		variables.label = options.label ?: "cache store"
+		variables.fallback = options.fallback ?: true
+		variables.requireDurable = options.requireDurable ?: false
+		variables.local = new LocalTtlStore()
+		variables.mode = "cache"
+		variables.durable = false
+		variables.lastFailureLogMs = 0
+
+		var problem = ""
+		if ( !cacheService().hasCache( cacheName ) ) {
+			variables.mode = "local"
+			problem = "cache '" & cacheName & "' is not registered"
+		} else {
+			try {
+				variables.durable = cache( cacheName ).getObjectStore().isDistributed() ? true : false
+			} catch ( any e ) {
+				variables.durable = false
+			}
+			if ( !variables.durable ) {
+				problem = "cache '" & cacheName & "' is backed by an in-memory store, so its contents aren't shared across instances or kept across restarts"
+			}
+		}
+
+		if ( len( problem ) ) {
+			if ( variables.requireDurable || ( variables.mode == "local" && !variables.fallback ) ) {
+				throw(
+					type = "BoxExpress.CacheStoreError",
+					message = variables.label & ": " & problem & ( variables.requireDurable ? " (requireDurable is set)" : "" )
+				)
+			}
+			println( "[BoxExpress] " & variables.label & ": " & problem & ( variables.mode == "local" ? " — using an in-memory fallback for this process only." : "." ) )
+		}
+
+		return this
+	}
+
+	function getMode() {
+		return variables.mode
+	}
+
+	function isDurable() {
+		return variables.durable
+	}
+
+	function get( key ) {
+		if ( variables.mode == "cache" ) {
+			try {
+				var result = cache( variables.cacheName ).get( key )
+				if ( result.isPresent() ) {
+					return result.get()
+				}
+			} catch ( any e ) {
+				if ( !variables.fallback ) {
+					rethrow
+				}
+				_logFailure( e )
+			}
+		}
+		return variables.local.get( key )
+	}
+
+	function set( key, data, ttlSeconds ) {
+		if ( variables.mode == "cache" ) {
+			try {
+				cache( variables.cacheName ).set( key, data, ttlSeconds )
+				return
+			} catch ( any e ) {
+				if ( !variables.fallback ) {
+					rethrow
+				}
+				_logFailure( e )
+			}
+		}
+		variables.local.set( key, data, ttlSeconds )
+	}
+
+	function remove( key ) {
+		if ( variables.mode == "cache" ) {
+			try {
+				cache( variables.cacheName ).clear( key )
+			} catch ( any e ) {
+				if ( !variables.fallback ) {
+					rethrow
+				}
+				_logFailure( e )
+			}
+		}
+		variables.local.remove( key )
+	}
+
+	/**
+	 * Logs at most once every 30s, so a dead database doesn't flood the log
+	 * at request rate; the caller carries on with the local map.
+	 */
+	private function _logFailure( error ) {
+		var now = createObject( "java", "java.lang.System" ).currentTimeMillis()
+		if ( now - variables.lastFailureLogMs > 30000 ) {
+			variables.lastFailureLogMs = now
+			println( "[BoxExpress] " & variables.label & ": cache '" & variables.cacheName & "' failed (" & error.message & ") — using the in-memory fallback for now." )
+		}
+	}
+
+}
