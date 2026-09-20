@@ -139,25 +139,31 @@ class extends="testbox.system.BaseSpec" {
 
 			it( "fires onConnect, onSubscribe, onUnsubscribe and onDisconnect in order with the right arguments", function() {
 				var events = []
+				var ids = { connect: "", disconnect: "" }
 				var stomp = new "../../models/middleware/Stomp"( {
-					onConnect: ( login, connection, metadata, connectionId ) => { events.append( "connect:" & login & ":" & len( connectionId ) ) },
+					onConnect: ( login, connection, metadata, connectionId ) => { ids.connect = connectionId; events.append( "connect:" & login ) },
 					onSubscribe: ( login, destination, subId, connection, metadata ) => { events.append( "subscribe:" & login & ":" & destination & ":" & subId ) },
 					onUnsubscribe: ( login, destination, subId, metadata ) => { events.append( "unsubscribe:" & login & ":" & destination & ":" & subId ) },
-					onDisconnect: ( login, metadata, connectionId ) => { events.append( "disconnect:" & login ) }
+					onDisconnect: ( login, metadata, connectionId ) => { ids.disconnect = connectionId; events.append( "disconnect:" & login ) }
 				} )
 				var conn = _connect( stomp, "alice" )
+				var registeredId = stomp.getConnections().keyArray()[ 1 ]
 				conn.msg( _frame( "SUBSCRIBE", { id: "s1", destination: "/a" } ) )
 				conn.msg( _frame( "SUBSCRIBE", { id: "s2", destination: "/b" } ) )
 				conn.msg( _frame( "UNSUBSCRIBE", { id: "s1" } ) )
 				conn.cls( 1000, "" )
 
-				expect( events ).toBe( [
-					"connect:alice:35",
-					"subscribe:alice:/a:s1",
-					"subscribe:alice:/b:s2",
-					"unsubscribe:alice:/a:s1",
-					"unsubscribe:alice:/b:s2",
-					"disconnect:alice"
+				assertAll( [
+					() => expect( events ).toBe( [
+						"connect:alice",
+						"subscribe:alice:/a:s1",
+						"subscribe:alice:/b:s2",
+						"unsubscribe:alice:/a:s1",
+						"unsubscribe:alice:/b:s2",
+						"disconnect:alice"
+					] ),
+					() => expect( ids.connect ).withContext( "the id onConnect receives is the registry key" ).toBe( registeredId ),
+					() => expect( ids.disconnect ).withContext( "and onDisconnect gets the same one" ).toBe( registeredId )
 				] )
 			} )
 
