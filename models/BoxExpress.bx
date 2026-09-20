@@ -374,6 +374,114 @@ class {
 		return this
 	}
 
+	/**
+	 * Runs one request through this app — routing, middleware, handlers,
+	 * error handling, all of it — without opening a port, and returns what
+	 * the app produced. For testing your own app:
+	 *
+	 *   var res = app.inject( { method: "POST", url: "/users", body: { name: "ada" } } )
+	 *   expect( res.statusCode ).toBe( 201 )
+	 *   expect( res.json().name ).toBe( "ada" )
+	 *
+	 * options:
+	 *   method    default "GET"
+	 *   url       path plus optional query string, default "/" (a bare string
+	 *             argument, app.inject( "/x" ), means a GET of that url)
+	 *   query     a struct appended to the query string
+	 *   headers   a struct of request headers
+	 *   cookies   a struct sent as the Cookie header — pass a previous
+	 *             response's `cookies` to carry a session across requests
+	 *   body      a struct/array (sent as JSON), a string, or binary, as-is
+	 *   form      a struct sent urlencoded
+	 *   ip        the client address req.ip sees, default "127.0.0.1"
+	 *   log       true to print the usual request log line (default false)
+	 *
+	 * Returns an InjectResponse: statusCode, body, headers, cookies, json(),
+	 * header( name ). The handler runs on the calling thread. WebSocket
+	 * routes aren't reachable this way, and req.rawExchange() is null.
+	 */
+	function inject( options = {} ) {
+		if ( isSimpleValue( options ) ) {
+			options = { url: options }
+		}
+
+		var method = uCase( options.method ?: "GET" )
+		var rawUrl = options.url ?: "/"
+		var queryPos = find( "?", rawUrl )
+		var pathPart = queryPos ? left( rawUrl, queryPos - 1 ) : rawUrl
+		var queryString = queryPos ? mid( rawUrl, queryPos + 1, len( rawUrl ) - queryPos ) : ""
+
+		if ( structKeyExists( options, "query" ) ) {
+			var extra = _urlEncodePairs( options.query )
+			queryString = len( queryString ) && len( extra ) ? queryString & "&" & extra : queryString & extra
+		}
+
+		// Undertow hands handlers the decoded path; "+" is a literal plus in a
+		// path (only in a query does it mean a space), so protect it first.
+		var path = createObject( "java", "java.net.URLDecoder" ).decode( replace( pathPart, "+", "%2B", "all" ), "UTF-8" )
+		if ( !len( path ) || left( path, 1 ) != "/" ) {
+			path = "/" & path
+		}
+
+		var headers = {}
+		for ( var headerName in ( options.headers ?: {} ) ) {
+			headers[ headerName ] = toString( options.headers[ headerName ] )
+		}
+		if ( !structKeyExists( headers, "Host" ) ) {
+			headers[ "Host" ] = "localhost"
+		}
+		if ( structKeyExists( options, "cookies" ) && !structIsEmpty( options.cookies ) ) {
+			var cookiePairs = []
+			for ( var cookieName in options.cookies ) {
+				cookiePairs.append( cookieName & "=" & options.cookies[ cookieName ] )
+			}
+			headers[ "Cookie" ] = arrayToList( cookiePairs, "; " )
+		}
+
+		var bodyBytes = "".getBytes( "UTF-8" )
+		var contentType = ""
+		if ( structKeyExists( options, "form" ) ) {
+			bodyBytes = _urlEncodePairs( options.form ).getBytes( "UTF-8" )
+			contentType = "application/x-www-form-urlencoded"
+		} else if ( structKeyExists( options, "body" ) ) {
+			if ( isBinary( options.body ) ) {
+				bodyBytes = options.body
+			} else if ( isSimpleValue( options.body ) ) {
+				bodyBytes = toString( options.body ).getBytes( "UTF-8" )
+			} else {
+				bodyBytes = JSONSerialize( options.body ).getBytes( "UTF-8" )
+				contentType = "application/json"
+			}
+		}
+		if ( len( contentType ) && !structKeyExists( headers, "Content-Type" ) ) {
+			headers[ "Content-Type" ] = contentType
+		}
+		if ( !structKeyExists( headers, "Content-Length" ) && ( bodyBytes.len() > 0 || listFindNoCase( "POST,PUT,PATCH", method ) ) ) {
+			headers[ "Content-Length" ] = toString( bodyBytes.len() )
+		}
+
+		var adapter = new adapters.InjectExchangeAdapter( method, path, queryString, headers, bodyBytes, options.ip ?: "127.0.0.1" )
+
+		// A shallow copy, so the request log line can be switched off for
+		// this call without touching the app's real settings.
+		var injectSettings = structCopy( this.settings )
+		injectSettings[ "log" ] = options.log ?: false
+		new HttpBridge( variables.router, injectSettings, this.locals ).handle( adapter )
+
+		return adapter.getResult()
+	}
+
+	private function _urlEncodePairs( pairs ) {
+		var parts = []
+		for ( var key in pairs ) {
+			var values = isArray( pairs[ key ] ) ? pairs[ key ] : [ pairs[ key ] ]
+			for ( var value in values ) {
+				parts.append( urlEncodedFormat( key ) & "=" & urlEncodedFormat( toString( value ) ) )
+			}
+		}
+		return arrayToList( parts, "&" )
+	}
+
 	function isDraining() {
 		return variables.draining
 	}

@@ -1,0 +1,55 @@
+/**
+ * What app.inject() returns — the status, headers and body the app produced
+ * for an injected request, with a few conveniences for asserting on them.
+ *
+ *   var res = app.inject( { url: "/users/42" } )
+ *   res.statusCode        // 200
+ *   res.body              // the body as a string
+ *   res.json()            // the body parsed as JSON
+ *   res.header( "content-type" )
+ *   res.cookies           // { "connect.sid": "abc..." } — from Set-Cookie, ready to send back
+ */
+class {
+
+	function init( statusCode, headerList, bodyBytes ) {
+		this.statusCode = statusCode
+		this.headers = {}
+		this.setCookies = []
+		this.cookies = {}
+		this.bodyBytes = bodyBytes
+		this.body = createObject( "java", "java.lang.String" ).init( bodyBytes, "UTF-8" )
+
+		for ( var entry in headerList ) {
+			var lowerName = lCase( entry.name )
+			if ( lowerName == "set-cookie" ) {
+				this.setCookies.append( entry.value )
+				var pair = listFirst( entry.value, ";" )
+				var eqPos = find( "=", pair )
+				if ( eqPos ) {
+					this.cookies[ left( pair, eqPos - 1 ) ] = mid( pair, eqPos + 1, len( pair ) - eqPos )
+				}
+			}
+			// Repeated headers join the way HTTP itself allows; Set-Cookie
+			// (which can't be comma-joined) stays available whole as setCookies.
+			this.headers[ lowerName ] = structKeyExists( this.headers, lowerName )
+				? this.headers[ lowerName ] & ( lowerName == "set-cookie" ? char( 10 ) : ", " ) & entry.value
+				: entry.value
+		}
+		return this
+	}
+
+	/**
+	 * A response header by name, case-insensitively; "" if absent.
+	 */
+	function header( name ) {
+		return this.headers[ lCase( name ) ] ?: ""
+	}
+
+	/**
+	 * The body parsed as JSON. Throws if it isn't JSON.
+	 */
+	function json() {
+		return JSONDeserialize( this.body )
+	}
+
+}

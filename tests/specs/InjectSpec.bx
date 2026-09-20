@@ -1,0 +1,280 @@
+/**
+ * app.inject() — running a request through an app in-process, without a
+ * port. Every test builds its own app and never calls listen().
+ */
+class extends="testbox.system.BaseSpec" {
+
+	private function _app() {
+		var app = new "../../models/BoxExpress"()
+		app.set( "views", expandPath( "tests/fixtures/views" ) )
+		return app
+	}
+
+	// A function of its own so each thread's closure gets its own n —
+	// BoxLang's loop variable is one variable for the whole loop.
+	private function _injectInThread( app, n, results ) {
+		var t = createObject( "java", "java.lang.Thread" ).init( createDynamicProxy(
+			new "../../models/ThreadRunnable"( function() { results[ n ] = app.inject( "/n/" & n ).body } ),
+			[ "java.lang.Runnable" ]
+		) )
+		t.start()
+		return t
+	}
+
+	function run() {
+
+		describe( "app.inject()", function() {
+
+			it( "routes a GET with params and a query string, and does not need listen()", function() {
+				var app = _app()
+				app.get( "/users/:id", ( req, res ) => res.json( { id: req.params.id, q: req.query } ) )
+
+				var res = app.inject( { url: "/users/42?x=1&y=two" } )
+				assertAll( [
+					() => expect( res.statusCode ).toBe( 200 ),
+					() => expect( res.json().id ).toBe( "42" ),
+					() => expect( res.json().q.y ).toBe( "two" ),
+					() => expect( res.header( "Content-Type" ) ).toInclude( "application/json" ),
+					() => expect( isNull( app.getConnectorStatistics() ) ).withContext( "no server was started" ).toBeTrue()
+				] )
+			} )
+
+			it( "accepts a bare url string as a GET", function() {
+				var app = _app()
+				app.get( "/ping", ( req, res ) => res.send( "pong" ) )
+				expect( app.inject( "/ping" ).body ).toBe( "pong" )
+			} )
+
+			it( "merges a query struct into the query string, encoding it", function() {
+				var app = _app()
+				app.get( "/s", ( req, res ) => res.json( { query: req.query, url: req.originalUrl } ) )
+
+				var res = app.inject( { url: "/s?a=1", query: { b: "x y", c: [ "1", "2" ] } } )
+				assertAll( [
+					() => expect( res.json().query.a ).toBe( "1" ),
+					() => expect( res.json().query.b ).toBe( "x y" ),
+					() => expect( res.json().url ).withContext( "an array value repeats the key" ).toInclude( "c=1&c=2" )
+				] )
+			} )
+
+			it( "decodes an encoded path but keeps a literal plus", function() {
+				var app = _app()
+				app.get( "/files/:name", ( req, res ) => res.send( req.params.name ) )
+				assertAll( [
+					() => expect( app.inject( "/files/a%20b" ).body ).toBe( "a b" ),
+					() => expect( app.inject( "/files/a+b" ).body ).toBe( "a+b" )
+				] )
+			} )
+
+			it( "returns the app's own 404 for an unknown route", function() {
+				var res = _app().inject( "/nope" )
+				assertAll( [
+					() => expect( res.statusCode ).toBe( 404 ),
+					() => expect( res.body ).toInclude( "Cannot GET /nope" )
+				] )
+			} )
+
+			it( "turns a throwing handler into a 500 without leaking the message", function() {
+				var app = _app()
+				app.get( "/boom", ( req, res ) => { throw( "secret detail" ) } )
+				var res = app.inject( "/boom" )
+				assertAll( [
+					() => expect( res.statusCode ).toBe( 500 ),
+					() => expect( res.body ).notToInclude( "secret detail" )
+				] )
+			} )
+
+			it( "runs middleware, including one that short-circuits", function() {
+				var app = _app()
+				app.use( ( req, res, next ) => {
+					if ( ( req.headers[ "x-token" ] ?: "" ) != "let-me-in" ) {
+						return res.status( 401 ).json( { error: true } )
+					}
+					next()
+				} )
+				app.get( "/private", ( req, res ) => res.send( "secret" ) )
+
+				assertAll( [
+					() => expect( app.inject( "/private" ).statusCode ).toBe( 401 ),
+					() => expect( app.inject( { url: "/private", headers: { "X-Token": "let-me-in" } } ).body ).toBe( "secret" )
+				] )
+			} )
+
+			describe( "request bodies", function() {
+
+				it( "sends a struct body as JSON", function() {
+					var app = _app()
+					app.use( new "../../models/middleware/BodyParsers"().json() )
+					app.post( "/echo", ( req, res ) => res.status( 201 ).json( { got: req.body, type: req.headers[ "Content-Type" ] } ) )
+
+					var res = app.inject( { method: "POST", url: "/echo", body: { name: "ada", n: 3 } } )
+					assertAll( [
+						() => expect( res.statusCode ).toBe( 201 ),
+						() => expect( res.json().got.name ).toBe( "ada" ),
+						() => expect( res.json().type ).toBe( "application/json" )
+					] )
+				} )
+
+				it( "sends a form struct urlencoded", function() {
+					var app = _app()
+					app.use( new "../../models/middleware/BodyParsers"().urlencoded() )
+					app.post( "/login", ( req, res ) => res.json( req.body ) )
+
+					var res = app.inject( { method: "POST", url: "/login", form: { user: "ada", note: "a&b=c" } } )
+					assertAll( [
+						() => expect( res.json().user ).toBe( "ada" ),
+						() => expect( res.json().note ).toBe( "a&b=c" )
+					] )
+				} )
+
+				it( "sends a string body as-is, with the headers the caller gives", function() {
+					var app = _app()
+					app.use( new "../../models/middleware/BodyParsers"().json() )
+					app.post( "/raw", ( req, res ) => res.json( req.body ) )
+
+					var res = app.inject( {
+						method: "POST", url: "/raw",
+						headers: { "Content-Type": "application/json" },
+						body: '{"already":"serialized"}'
+					} )
+					expect( res.json().already ).toBe( "serialized" )
+				} )
+
+				it( "honors the 413 body-size limit", function() {
+					var app = _app()
+					app.use( new "../../models/middleware/BodyParsers"().json( { limit: 20 } ) )
+					app.post( "/big", ( req, res ) => res.json( req.body ) )
+					var res = app.inject( { method: "POST", url: "/big", body: { pad: repeatString( "x", 100 ) } } )
+					expect( res.statusCode ).toBe( 413 )
+				} )
+
+			} )
+
+			describe( "responses", function() {
+
+				it( "carries multi-byte text through intact", function() {
+					var app = _app()
+					app.get( "/u", ( req, res ) => res.send( "café ✓" ) )
+					expect( app.inject( "/u" ).body ).toBe( "café ✓" )
+				} )
+
+				it( "exposes redirects, status and headers", function() {
+					var app = _app()
+					app.get( "/old", ( req, res ) => res.redirect( "/new" ) )
+					var res = app.inject( "/old" )
+					assertAll( [
+						() => expect( res.statusCode ).toBe( 302 ),
+						() => expect( res.header( "LOCATION" ) ).withContext( "case-insensitive" ).toBe( "/new" ),
+						() => expect( res.header( "x-missing" ) ).toBe( "" )
+					] )
+				} )
+
+				it( "renders a view", function() {
+					var app = _app()
+					app.get( "/greet/:name", ( req, res ) => res.render( "greeting.hbs", { data: { name: req.params.name, things: [ "a" ] } } ) )
+					var res = app.inject( "/greet/Grace" )
+					assertAll( [
+						() => expect( res.statusCode ).toBe( 200 ),
+						() => expect( res.body ).toInclude( "Hello, Grace!" )
+					] )
+				} )
+
+				it( "refuses a response header value with CR/LF, exactly like the real server", function() {
+					var app = _app()
+					app.get( "/bad", ( req, res ) => { res.set( "X-Test", "a" & char( 13 ) & char( 10 ) & "Injected: 1" ); res.send( "ok" ) } )
+					var res = app.inject( "/bad" )
+					assertAll( [
+						() => expect( res.statusCode ).toBe( 500 ),
+						() => expect( res.header( "Injected" ) ).toBe( "" )
+					] )
+				} )
+
+			} )
+
+			describe( "cookies and sessions", function() {
+
+				it( "returns Set-Cookie as parsed cookies, and carries a session across injected requests", function() {
+					var app = _app()
+					app.use( new "../../models/middleware/Session"().session() )
+					app.get( "/login", ( req, res ) => { req.session.user = "ada"; res.send( "in" ) } )
+					app.get( "/me", ( req, res ) => res.json( { user: req.session.user ?: "nobody" } ) )
+
+					var login = app.inject( "/login" )
+					assertAll( [
+						() => expect( login.cookies ).toHaveKey( "connect.sid" ),
+						() => expect( login.setCookies[ 1 ] ).toInclude( "HttpOnly" ),
+						() => expect( app.inject( "/me" ).json().user ).withContext( "no cookie sent" ).toBe( "nobody" ),
+						() => expect( app.inject( { url: "/me", cookies: login.cookies } ).json().user ).toBe( "ada" )
+					] )
+				} )
+
+				it( "keeps every Set-Cookie when a response sets several", function() {
+					var app = _app()
+					app.get( "/two", ( req, res ) => { res.cookie( "a", "1" ); res.cookie( "b", "2" ); res.send( "ok" ) } )
+					var res = app.inject( "/two" )
+					assertAll( [
+						() => expect( res.setCookies ).toHaveLength( 2 ),
+						() => expect( res.cookies.a ).toBe( "1" ),
+						() => expect( res.cookies.b ).toBe( "2" )
+					] )
+				} )
+
+			} )
+
+			describe( "client identity", function() {
+
+				it( "reports the ip option as req.ip, defaulting to loopback", function() {
+					var app = _app()
+					app.get( "/ip", ( req, res ) => res.send( req.ip ) )
+					assertAll( [
+						() => expect( app.inject( "/ip" ).body ).toBe( "127.0.0.1" ),
+						() => expect( app.inject( { url: "/ip", ip: "203.0.113.9" } ).body ).toBe( "203.0.113.9" )
+					] )
+				} )
+
+				it( "honors trust proxy and the Host header like a real request", function() {
+					var app = _app()
+					app.set( "trust proxy", true )
+					app.get( "/who", ( req, res ) => res.json( { ip: req.ip, host: req.hostname } ) )
+
+					var res = app.inject( { url: "/who", headers: { "X-Forwarded-For": "198.51.100.7", "Host": "example.test:8080" } } )
+					assertAll( [
+						() => expect( res.json().ip ).toBe( "198.51.100.7" ),
+						() => expect( res.json().host ).toBe( "example.test" )
+					] )
+				} )
+
+			} )
+
+			it( "works with the rate limiter, counting per injected ip", function() {
+				var app = _app()
+				app.use( new "../../models/middleware/RateLimit"().limit( { max: 2, windowMs: 60000 } ) )
+				app.get( "/x", ( req, res ) => res.send( "ok" ) )
+
+				var codes = [ app.inject( "/x" ).statusCode, app.inject( "/x" ).statusCode, app.inject( "/x" ).statusCode ]
+				assertAll( [
+					() => expect( codes ).toBe( [ 200, 200, 429 ] ),
+					() => expect( app.inject( { url: "/x", ip: "10.9.9.9" } ).statusCode ).withContext( "a different client" ).toBe( 200 )
+				] )
+			} )
+
+			it( "serves concurrent injections independently", function() {
+				var app = _app()
+				app.get( "/n/:n", ( req, res ) => { sleep( 20 ); res.send( req.params.n ) } )
+				var results = {}
+				var threads = []
+				for ( var i = 1; i <= 8; i++ ) {
+					threads.append( _injectInThread( app, i, results ) )
+				}
+				for ( var thread in threads ) { thread.join() }
+				expect( results.count() ).toBe( 8 )
+				for ( var k in results ) {
+					expect( results[ k ] ).toBe( toString( k ) )
+				}
+			} )
+
+		} )
+
+	}
+
+}

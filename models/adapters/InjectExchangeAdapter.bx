@@ -1,0 +1,111 @@
+/**
+ * An in-memory exchange adapter (same contract as UndertowExchangeAdapter —
+ * see its docblock) for app.inject(): the request is described by plain
+ * values handed to init(), and everything the app writes is captured for
+ * getResult() instead of going to a socket. Request.bx/Response.bx can't
+ * tell the difference, so a handler sees exactly what it would over HTTP.
+ *
+ * getRawExchange() returns null — there is no Undertow exchange behind an
+ * injected request, so a handler that reaches for req.rawExchange() gets
+ * nothing here.
+ */
+class {
+
+	function init( method, path, queryString, requestHeaders, bodyBytes, remoteAddress ) {
+		variables.method = method
+		variables.path = path
+		variables.queryString = queryString
+		variables.requestHeaders = requestHeaders
+		variables.bodyBytes = bodyBytes
+		variables.remoteAddress = remoteAddress
+		variables.headerGuard = new HeaderGuard()
+
+		variables.statusCode = 200
+		variables.responseHeaders = []      // [ { name, value } ], in the order set, so Set-Cookie can repeat
+		variables.responseBytes = "".getBytes( "UTF-8" )
+		variables.streamOut = javacast( "null", "" )
+		return this
+	}
+
+	function getRawExchange() {
+		return javacast( "null", "" )
+	}
+
+	function getMethod() {
+		return variables.method
+	}
+
+	function getPath() {
+		return variables.path
+	}
+
+	function getQueryString() {
+		return variables.queryString
+	}
+
+	function getRequestHeaders() {
+		return variables.requestHeaders
+	}
+
+	function getRequestHeader( name ) {
+		return variables.requestHeaders[ name ] ?: ""
+	}
+
+	function getRemoteAddress() {
+		return variables.remoteAddress
+	}
+
+	function getRequestBodyStream() {
+		return createObject( "java", "java.io.ByteArrayInputStream" ).init( variables.bodyBytes )
+	}
+
+	function setHeader( name, value ) {
+		variables.headerGuard.check( name, value )
+		variables.responseHeaders = variables.responseHeaders.filter( ( h ) => compareNoCase( h.name, name ) != 0 )
+		variables.responseHeaders.append( { name: name, value: toString( value ) } )
+	}
+
+	function addHeader( name, value ) {
+		variables.headerGuard.check( name, value )
+		variables.responseHeaders.append( { name: name, value: toString( value ) } )
+	}
+
+	function getHeader( name ) {
+		for ( var header in variables.responseHeaders ) {
+			if ( compareNoCase( header.name, name ) == 0 ) {
+				return header.value
+			}
+		}
+		return javacast( "null", "" )
+	}
+
+	function sendBody( statusCode, bodyBytes ) {
+		variables.statusCode = statusCode
+		setHeader( "Content-Length", toString( bodyBytes.len() ) )
+		variables.responseBytes = bodyBytes
+	}
+
+	function sendHeadersOnly( statusCode ) {
+		variables.statusCode = statusCode
+	}
+
+	function setStatusCode( statusCode ) {
+		variables.statusCode = statusCode
+	}
+
+	function getResponseOutputStream() {
+		if ( isNull( variables.streamOut ) ) {
+			variables.streamOut = createObject( "java", "java.io.ByteArrayOutputStream" ).init()
+		}
+		return variables.streamOut
+	}
+
+	/**
+	 * What the app wrote, as an InjectResponse — read after handle() returns.
+	 */
+	function getResult() {
+		var bytes = isNull( variables.streamOut ) ? variables.responseBytes : variables.streamOut.toByteArray()
+		return new "../InjectResponse"( variables.statusCode, variables.responseHeaders, bytes )
+	}
+
+}

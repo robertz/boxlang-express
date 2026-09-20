@@ -1,0 +1,15 @@
+/**
+ * Response-header value validation shared by every exchange adapter, so
+ * the real server and app.inject() reject exactly the same values.
+ * Undertow narrows each header-value char to 8 bits (CVE-2026-19879), so
+ * e.g. U+010A would go out as a bare LF — reject those and raw controls.
+ */
+class {
+
+	function check( name, value ) {
+		if ( isSimpleValue( value ) && reFind( "[^\x09\x20-\x7E\x80-\xFF]", toString( value ) ) ) {
+			throw( type = "BoxExpress.InvalidHeaderValue", message = "Header [#name#] contains a control or non-Latin-1 character" )
+		}
+	}
+
+}

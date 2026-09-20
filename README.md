@@ -195,6 +195,47 @@ Every request gets a line on stdout as soon as it's received —
 `app.set("log", false)` — useful for a high-throughput deployment that
 doesn't want a synchronous stdout write on every request.
 
+#### Testing your app without a server (`app.inject()`)
+
+`app.inject( options )` runs one request through the app — routing,
+middleware, handlers, error handling — on the calling thread, without
+opening a port, and returns what the app produced:
+
+```js
+var res = app.inject( { method: "POST", url: "/users", body: { name: "ada" } } )
+expect( res.statusCode ).toBe( 201 )
+expect( res.json().name ).toBe( "ada" )
+```
+
+A bare string is a `GET`: `app.inject( "/health/ready" )`. Options:
+`method` (default `"GET"`); `url` (path plus optional query string —
+encoded characters in the path are decoded, as for a real request);
+`query` (a struct merged into the query string, URL-encoded; an array
+value repeats the key); `headers`; `body` (a struct or array is sent as
+JSON with the matching `Content-Type`, a string or binary value as-is);
+`form` (a struct, sent urlencoded); `cookies` (a struct, sent as the
+`Cookie` header); `ip` (what `req.ip` sees, default `127.0.0.1`); and
+`log` (print the usual request log line, off by default).
+
+The result has `statusCode`, `body` (a string), `headers` (a struct with
+lower-cased names), `json()`, `header( name )` (case-insensitive, `""` if
+absent), and the cookies the response set: `cookies` (name to value) and
+`setCookies` (each raw `Set-Cookie` line). A response's `cookies` is shaped
+to be passed straight back in, which carries a session across calls:
+
+```js
+var login = app.inject( { method: "POST", url: "/login", form: { user: "ada" } } )
+var me    = app.inject( { url: "/me", cookies: login.cookies } )
+```
+
+The request goes through the same `Request`/`Response` objects, router
+and error handling as one arriving over a socket, so a `404`, a thrown
+handler becoming a `500`, an oversized body becoming a `413`, and a
+response header refused for containing a newline all behave the same. Two
+things it can't do: `req.rawExchange()` is `null` (there is no Undertow
+behind an injected request), and `app.ws()` routes can't be reached this
+way — those need a real server and a WebSocket client.
+
 #### Health checks and graceful shutdown (`app.health()` / `app.shutdown()`)
 
 ```js
@@ -1700,6 +1741,16 @@ Two more BoxLang-specific things that shaped how these are written:
   rather than `../fixtures/...`.
 
 ## Changelog
+
+**0.2.18**
+- **`app.inject()`:** run a request through an app in-process, with no
+  port, and get back `statusCode`, `body`, `headers`, `json()`, `header()`
+  and the cookies the response set (`cookies`, ready to pass into the next
+  call to carry a session). Backed by a new in-memory exchange adapter
+  behind the same `Request`/`Response`/`HttpBridge` a real request uses.
+  The response-header value check moved into a shared `HeaderGuard` so the
+  real server and injected requests reject the same values. Full suite:
+  361/361.
 
 **0.2.17**
 - **`app.health()` and `app.shutdown()`:** liveness/readiness endpoints for
