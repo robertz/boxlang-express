@@ -1,0 +1,81 @@
+/**
+ * app.set( "requestId", true ) — every request gets an id, echoed on the
+ * response as X-Request-Id and available as req.id; a sane id from the
+ * client is reused, an unsafe one is replaced.
+ */
+class extends="testbox.system.BaseSpec" {
+
+	private function _app( enabled = true ) {
+		var app = new "../../models/BoxExpress"()
+		if ( enabled ) {
+			app.set( "requestId", true )
+		}
+		app.get( "/id", ( req, res ) => res.json( { id: req.id ?: "none" } ) )
+		return app
+	}
+
+	function run() {
+		describe( "requestId", function() {
+
+			it( "is off by default: no header, no req.id", function() {
+				var res = _app( false ).inject( "/id" )
+				assertAll( [
+					() => expect( res.header( "X-Request-Id" ) ).toBe( "" ),
+					() => expect( res.json().id ).toBe( "none" )
+				] )
+			} )
+
+			it( "generates a distinct id per request, matching req.id and the response header", function() {
+				var app = _app()
+				var first = app.inject( "/id" )
+				var second = app.inject( "/id" )
+				assertAll( [
+					() => expect( len( first.header( "X-Request-Id" ) ) ).toBeGT( 10 ),
+					() => expect( first.json().id ).toBe( first.header( "X-Request-Id" ) ),
+					() => expect( second.header( "X-Request-Id" ) ).notToBe( first.header( "X-Request-Id" ) )
+				] )
+			} )
+
+			it( "reuses a well-formed id from the client", function() {
+				var res = _app().inject( { url: "/id", headers: { "X-Request-Id": "trace-abc.123_DEF" } } )
+				assertAll( [
+					() => expect( res.header( "X-Request-Id" ) ).toBe( "trace-abc.123_DEF" ),
+					() => expect( res.json().id ).toBe( "trace-abc.123_DEF" )
+				] )
+			} )
+
+			it( "replaces a client id that is too long or has unsafe characters", function() {
+				var app = _app()
+				var bad = [ repeatString( "a", 129 ), "has space", "semi;colon", "quote""s", "new" & char( 10 ) & "line", "<script>" ]
+				for ( var value in bad ) {
+					var res = app.inject( { url: "/id", headers: { "X-Request-Id": value } } )
+					expect( res.header( "X-Request-Id" ) ).withContext( "for input: " & value.left( 20 ) ).notToBe( value )
+				}
+			} )
+
+			it( "honors a custom header name", function() {
+				var app = new "../../models/BoxExpress"()
+				app.set( "requestId", true )
+				app.set( "requestIdHeader", "X-Correlation-Id" )
+				app.get( "/id", ( req, res ) => res.json( { id: req.id } ) )
+
+				var res = app.inject( { url: "/id", headers: { "X-Correlation-Id": "from-client" } } )
+				assertAll( [
+					() => expect( res.header( "X-Correlation-Id" ) ).toBe( "from-client" ),
+					() => expect( res.header( "X-Request-Id" ) ).toBe( "" )
+				] )
+			} )
+
+			it( "is present on error and 404 responses too", function() {
+				var app = _app()
+				app.get( "/boom", ( req, res ) => { throw( "x" ) } )
+				assertAll( [
+					() => expect( len( app.inject( "/nope" ).header( "X-Request-Id" ) ) ).toBeGT( 0 ),
+					() => expect( len( app.inject( "/boom" ).header( "X-Request-Id" ) ) ).toBeGT( 0 )
+				] )
+			} )
+
+		} )
+	}
+
+}

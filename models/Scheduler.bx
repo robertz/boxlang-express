@@ -103,6 +103,13 @@ class {
 			clustered: clustered,
 			handle: handle,
 			runningFlag: createObject( "java", "java.util.concurrent.atomic.AtomicBoolean" ).init( false ),
+			// Counters for getMetrics() — AtomicLongs, since a job with allowOverlap
+			// can update them from several virtual threads at once.
+			runs: createObject( "java", "java.util.concurrent.atomic.AtomicLong" ).init( 0 ),
+			failures: createObject( "java", "java.util.concurrent.atomic.AtomicLong" ).init( 0 ),
+			skipped: createObject( "java", "java.util.concurrent.atomic.AtomicLong" ).init( 0 ),
+			lastSuccessMs: createObject( "java", "java.util.concurrent.atomic.AtomicLong" ).init( 0 ),
+			lastDurationNanos: createObject( "java", "java.util.concurrent.atomic.AtomicLong" ).init( 0 ),
 			startedAt: 0,
 			// A job body that never returns (blocks forever on some call with
 			// no timeout of its own — the exact way a stalled WebSocket send
@@ -175,6 +182,7 @@ class {
 			// harmlessly resets a flag that's already been reset.
 			var runningForMs = getTickCount() - job.startedAt
 			if ( runningForMs < job.stallThresholdMs ) {
+				job.skipped.incrementAndGet()
 				return
 			}
 			println( "[Scheduler] job '" & job.name & "' has been running for " & runningForMs & "ms (stall threshold " & job.stallThresholdMs & "ms) — forcing it open so future ticks aren't blocked forever" )
@@ -195,9 +203,14 @@ class {
 		try {
 			variables.taskExecutor.submit( createDynamicProxy(
 				new ThreadRunnable( function() {
+					var startedNs = createObject( "java", "java.lang.System" ).nanoTime()
+					job.runs.incrementAndGet()
 					try {
 						job.callback( job.handle )
+						job.lastDurationNanos.set( createObject( "java", "java.lang.System" ).nanoTime() - startedNs )
+						job.lastSuccessMs.set( createObject( "java", "java.lang.System" ).currentTimeMillis() )
 					} catch ( any e ) {
+						job.failures.incrementAndGet()
 						// Caught and logged, never left to kill future ticks —
 						// same posture as HttpBridge.bx's dispatch guard and
 						// Stomp.bx's server-side listener guard (see
@@ -250,6 +263,44 @@ class {
 			}
 		}
 		return result
+	}
+
+	/**
+	 * Per-job metrics for app.metrics(), each labeled with the job's name — so
+	 * a job that has quietly been failing for a week shows up as a rising
+	 * failures counter and a stale last-success time, instead of only as
+	 * lines in a log nobody is reading.
+	 */
+	function getMetrics() {
+		var runs = []
+		var failures = []
+		var skipped = []
+		var lastSuccess = []
+		var lastDuration = []
+		var running = []
+		for ( var jobId in structCopy( variables.jobs ) ) {
+			var job = variables.jobs[ jobId ] ?: javacast( "null", "" )
+			if ( isNull( job ) ) {
+				continue
+			}
+			var labels = { job: job.name }
+			runs.append( { labels: labels, value: job.runs.get() } )
+			failures.append( { labels: labels, value: job.failures.get() } )
+			skipped.append( { labels: labels, value: job.skipped.get() } )
+			running.append( { labels: labels, value: job.runningFlag.get() ? 1 : 0 } )
+			if ( job.lastSuccessMs.get() > 0 ) {
+				lastSuccess.append( { labels: labels, value: job.lastSuccessMs.get() / 1000 } )
+				lastDuration.append( { labels: labels, value: job.lastDurationNanos.get() / 1000000000 } )
+			}
+		}
+		return [
+			{ name: "boxexpress_scheduler_job_runs_total", type: "counter", help: "Times the job has started running.", samples: runs },
+			{ name: "boxexpress_scheduler_job_failures_total", type: "counter", help: "Runs that threw an error.", samples: failures },
+			{ name: "boxexpress_scheduler_job_skipped_total", type: "counter", help: "Ticks skipped because the previous run was still going.", samples: skipped },
+			{ name: "boxexpress_scheduler_job_running", type: "gauge", help: "1 while the job is running.", samples: running },
+			{ name: "boxexpress_scheduler_job_last_success_timestamp_seconds", type: "gauge", help: "Unix time of the last successful run.", samples: lastSuccess },
+			{ name: "boxexpress_scheduler_job_last_duration_seconds", type: "gauge", help: "How long the last successful run took.", samples: lastDuration }
+		]
 	}
 
 	/**

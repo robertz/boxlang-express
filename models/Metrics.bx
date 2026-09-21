@@ -1,0 +1,39 @@
+/**
+ * A tiny thread-safe counter registry — the write side of metrics. Request
+ * handling increments named counters here; app.metrics() reads them back
+ * and hands them to PrometheusFormat. Counters are longs, so a duration is
+ * kept in nanoseconds and converted to seconds only when exposed.
+ */
+class {
+
+	function init() {
+		variables.counters = createObject( "java", "java.util.concurrent.ConcurrentHashMap" ).init()
+		return this
+	}
+
+	function inc( key, delta = 1 ) {
+		var counter = variables.counters.get( key )
+		if ( isNull( counter ) ) {
+			variables.counters.putIfAbsent( key, createObject( "java", "java.util.concurrent.atomic.AtomicLong" ).init( 0 ) )
+			counter = variables.counters.get( key )
+		}
+		counter.addAndGet( javacast( "long", delta ) )
+	}
+
+	/**
+	 * One finished request: counted by status class ("2xx", "4xx", ...) and
+	 * timed. The duration is kept as a running sum and count — enough for an
+	 * average and a rate, without a histogram's bucket choices.
+	 */
+	function recordRequest( statusCode, durationNanos ) {
+		inc( "http.requests." & int( statusCode / 100 ) & "xx" )
+		inc( "http.duration.nanos", durationNanos )
+		inc( "http.duration.count" )
+	}
+
+	function get( key ) {
+		var counter = variables.counters.get( key )
+		return isNull( counter ) ? 0 : counter.get()
+	}
+
+}

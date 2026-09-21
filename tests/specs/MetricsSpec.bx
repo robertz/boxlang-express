@@ -1,0 +1,258 @@
+/**
+ * app.metrics() and the Prometheus text it serves — the exposition format
+ * itself, each metric source (scheduler, cluster, STOMP), the token guard,
+ * and request counting against a live server.
+ */
+class extends="testbox.system.BaseSpec" {
+
+	private function _sample( body, line ) {
+		// Returns the value on the first line that starts with `line `.
+		for ( var text in body.listToArray( char( 10 ) ) ) {
+			if ( left( text, len( line ) + 1 ) == line & " " ) {
+				return mid( text, len( line ) + 2, len( text ) )
+			}
+		}
+		return javacast( "null", "" )
+	}
+
+	private function _fakeConn() {
+		var c = { closed: false, sent: [] }
+		c.send = ( data ) => { c.sent.append( data ) }
+		c.close = () => { c.closed = true }
+		c.isClosed = () => c.closed
+		c.onMessage = ( fn ) => { c.msg = fn }
+		c.onBinary = ( fn ) => { c.bin = fn }
+		c.onClose = ( fn ) => { c.cls = fn }
+		return c
+	}
+
+	function run() {
+
+		describe( "PrometheusFormat", function() {
+
+			it( "writes HELP and TYPE once per metric, then one line per sample", function() {
+				var text = new "../../models/PrometheusFormat"().render( [ {
+					name: "demo_total", type: "counter", help: "A demo.",
+					samples: [ { labels: { a: "1" }, value: 3 }, { labels: { a: "2" }, value: 4 } ]
+				} ] )
+				expect( text ).toBe( "## HELP demo_total A demo." & char( 10 ) & "## TYPE demo_total counter" & char( 10 ) & 'demo_total{a="1"} 3' & char( 10 ) & 'demo_total{a="2"} 4' & char( 10 ) )
+			} )
+
+			it( "escapes backslash, quote and newline in label values", function() {
+				var text = new "../../models/PrometheusFormat"().render( [ {
+					name: "m", type: "gauge", help: "h",
+					samples: [ { labels: { job: 'a\b"c' & char( 10 ) & "d" }, value: 1 } ]
+				} ] )
+				expect( text ).toInclude( 'm{job="a\\b\"c\nd"} 1' )
+			} )
+
+			it( "sorts labels, writes summary suffixes, and omits a metric with no samples", function() {
+				var text = new "../../models/PrometheusFormat"().render( [
+					{ name: "empty", type: "gauge", help: "h", samples: [] },
+					{ name: "lat", type: "summary", help: "h", samples: [
+						{ suffix: "_sum", labels: { z: "1", a: "2" }, value: 1.5 },
+						{ suffix: "_count", labels: {}, value: 3 }
+					] }
+				] )
+				assertAll( [
+					() => expect( text ).notToInclude( "empty" ),
+					() => expect( text ).toInclude( 'lat_sum{a="2",z="1"} 1.5' ),
+					() => expect( text ).toInclude( "lat_count 3" )
+				] )
+			} )
+
+			it( "writes integers plainly and small fractions without scientific notation", function() {
+				var text = new "../../models/PrometheusFormat"().render( [ { name: "n", type: "gauge", help: "h", samples: [
+					{ labels: { k: "int" }, value: 1000000 },
+					{ labels: { k: "tiny" }, value: 0.000047584 },
+					{ labels: { k: "bool" }, value: true }
+				] } ] )
+				assertAll( [
+					() => expect( text ).toInclude( 'n{k="int"} 1000000' ),
+					() => expect( text ).toInclude( 'n{k="tiny"} 0.000047584' ),
+					() => expect( text ).toInclude( 'n{k="bool"} 1' )
+				] )
+			} )
+
+		} )
+
+		describe( "app.metrics()", function() {
+
+			it( "serves the Prometheus content type and includes the built-in metrics", function() {
+				var app = new "../../models/BoxExpress"()
+				app.metrics()
+				var res = app.inject( "/metrics" )
+				app.close()
+				assertAll( [
+					() => expect( res.statusCode ).toBe( 200 ),
+					() => expect( res.header( "Content-Type" ) ).toBe( "text/plain; version=0.0.4; charset=utf-8" ),
+					() => expect( res.header( "Cache-Control" ) ).toBe( "no-store" ),
+					() => expect( res.body ).toInclude( "## TYPE boxexpress_http_requests_total counter" ),
+					() => expect( res.body ).toInclude( "boxexpress_draining 0" ),
+					() => expect( res.body ).toInclude( "boxexpress_websocket_connections 0" )
+				] )
+			} )
+
+			it( "honors a custom path", function() {
+				var app = new "../../models/BoxExpress"()
+				app.metrics( { path: "/-/metrics" } )
+				var found = app.inject( "/-/metrics" ).statusCode
+				var missing = app.inject( "/metrics" ).statusCode
+				app.close()
+				expect( [ found, missing ] ).toBe( [ 200, 404 ] )
+			} )
+
+			it( "requires the bearer token when one is set", function() {
+				var app = new "../../models/BoxExpress"()
+				app.metrics( { token: "s3cret" } )
+				var none = app.inject( "/metrics" )
+				var wrong = app.inject( { url: "/metrics", headers: { "Authorization": "Bearer nope" } } )
+				var right = app.inject( { url: "/metrics", headers: { "Authorization": "Bearer s3cret" } } )
+				app.close()
+				assertAll( [
+					() => expect( none.statusCode ).toBe( 401 ),
+					() => expect( none.header( "WWW-Authenticate" ) ).toBe( "Bearer" ),
+					() => expect( wrong.statusCode ).toBe( 401 ),
+					() => expect( right.statusCode ).toBe( 200 ),
+					() => expect( none.body ).notToInclude( "boxexpress_" )
+				] )
+			} )
+
+			it( "reports each scheduled job's runs, failures, skips, and last success", function() {
+				var app = new "../../models/BoxExpress"()
+				app.metrics()
+				app.schedule( 60, () => {}, { name: "healthy" } )
+				app.schedule( 60, () => { throw( "nope" ) }, { name: "broken" } )
+				app.schedule( 60, () => { sleep( 400 ) }, { name: "slow" } )
+				sleep( 700 )
+				var body = app.inject( "/metrics" ).body
+				app.close()
+
+				assertAll( [
+					() => expect( val( _sample( body, 'boxexpress_scheduler_job_runs_total{job="healthy"}' ) ) ).toBeGTE( 3 ),
+					() => expect( _sample( body, 'boxexpress_scheduler_job_failures_total{job="healthy"}' ) ).toBe( "0" ),
+					() => expect( val( _sample( body, 'boxexpress_scheduler_job_failures_total{job="broken"}' ) ) ).toBeGTE( 3 ),
+					() => expect( val( _sample( body, 'boxexpress_scheduler_job_skipped_total{job="slow"}' ) ) ).withContext( "overlapping ticks of a slow job" ).toBeGTE( 1 ),
+					() => expect( val( _sample( body, 'boxexpress_scheduler_job_last_success_timestamp_seconds{job="healthy"}' ) ) ).toBeGT( 1700000000 ),
+					() => expect( isNull( _sample( body, 'boxexpress_scheduler_job_last_success_timestamp_seconds{job="broken"}' ) ) ).withContext( "never succeeded: no sample rather than a fake zero" ).toBeTrue()
+				] )
+			} )
+
+			it( "includes STOMP broker metrics when passed as a source", function() {
+				var stomp = new "../../models/middleware/Stomp"()
+				var nl = char( 10 )
+				var conn = _fakeConn()
+				stomp.handler()( conn )
+				conn.msg( "CONNECT" & nl & "accept-version:1.2" & nl & nl & char( 0 ) )
+				conn.msg( "SUBSCRIBE" & nl & "id:s" & nl & "destination:/q" & nl & nl & char( 0 ) )
+				stomp.send( "/q", "one" )
+				stomp.send( "/q", "two" )
+
+				var app = new "../../models/BoxExpress"()
+				app.metrics( { sources: [ stomp ] } )
+				var body = app.inject( "/metrics" ).body
+				app.close()
+				assertAll( [
+					() => expect( _sample( body, "boxexpress_stomp_connections" ) ).toBe( "1" ),
+					() => expect( _sample( body, "boxexpress_stomp_subscriptions" ) ).toBe( "1" ),
+					() => expect( _sample( body, "boxexpress_stomp_messages_published_total" ) ).toBe( "2" ),
+					() => expect( _sample( body, "boxexpress_stomp_messages_delivered_total" ) ).toBe( "2" )
+				] )
+			} )
+
+			it( "skips a source that throws instead of failing the whole scrape", function() {
+				var app = new "../../models/BoxExpress"()
+				app.metrics( { sources: [ { getMetrics: () => { throw( "bad source" ) } } ] } )
+				var res = app.inject( "/metrics" )
+				app.close()
+				assertAll( [
+					() => expect( res.statusCode ).toBe( 200 ),
+					() => expect( res.body ).toInclude( "boxexpress_draining" )
+				] )
+			} )
+
+			it( "reports cluster peers, and manager status once an election has been checked", function() {
+				var name = "metricsSpec" & createUUID().replace( "-", "", "all" )
+				var dir = expandPath( "./tmp-metrics-spec-" & createUUID() )
+				cacheService().createCache( name, "BoxCacheProvider", { objectStore: "FileSystemStore", directory: dir } )
+				var app = new "../../models/BoxExpress"()
+				try {
+					app.set( "cluster", { enabled: true, name: "node-metrics", cacheProvider: name, peerIdleTimeoutSeconds: 30 } )
+					app.metrics()
+					var cluster = app.getClusterManager()
+
+					var before = app.inject( "/metrics" ).body
+					cluster.isManager()
+					var after = app.inject( "/metrics" ).body
+					assertAll( [
+						() => expect( _sample( before, "boxexpress_cluster_peers" ) ).toBe( "0" ),
+						() => expect( isNull( _sample( before, "boxexpress_cluster_is_manager" ) ) ).withContext( "no election checked yet" ).toBeTrue(),
+						() => expect( _sample( after, "boxexpress_cluster_is_manager" ) ).toBe( "1" )
+					] )
+				} finally {
+					app.close()
+					try { cacheService().shutdownCache( name ) } catch ( any e ) {}
+					try { directoryDelete( dir, true ) } catch ( any e ) {}
+				}
+			} )
+
+			it( "counts requests by status class and their duration against a live server", function() {
+				var port = 4890
+				var app = new "../../models/BoxExpress"()
+				app.set( "log", false )
+				app.metrics()
+				app.get( "/ok", ( req, res ) => { sleep( 30 ); res.send( "ok" ) } )
+				app.get( "/boom", ( req, res ) => { throw( "x" ) } )
+				app.listen( port = port, options = { block: false } )
+				sleep( 300 )
+				try {
+					var client = new "../helpers/HttpClient"()
+					for ( var i = 1; i <= 3; i++ ) { client.get( "http://localhost:" & port & "/ok" ) }
+					client.get( "http://localhost:" & port & "/missing" )
+					client.get( "http://localhost:" & port & "/boom" )
+					var body = client.get( "http://localhost:" & port & "/metrics" ).body
+
+					assertAll( [
+						() => expect( _sample( body, 'boxexpress_http_requests_total{class="2xx"}' ) ).toBe( "3" ),
+						() => expect( _sample( body, 'boxexpress_http_requests_total{class="4xx"}' ) ).toBe( "1" ),
+						() => expect( _sample( body, 'boxexpress_http_requests_total{class="5xx"}' ) ).toBe( "1" ),
+						() => expect( val( _sample( body, "boxexpress_http_request_duration_seconds_count" ) ) ).withContext( "the scrape itself is only counted after it responds" ).toBe( 5 ),
+						() => expect( val( _sample( body, "boxexpress_http_request_duration_seconds_sum" ) ) ).toBeGTE( 0.09 ),
+						() => expect( val( _sample( body, "boxexpress_http_bytes_sent_total" ) ) ).toBeGT( 0 ),
+						() => expect( val( _sample( body, "boxexpress_http_active_requests" ) ) ).withContext( "the scrape is the one active request" ).toBe( 1 )
+					] )
+				} finally {
+					app.close()
+				}
+			} )
+
+			it( "counts open WebSocket connections", function() {
+				var port = 4891
+				var app = new "../../models/BoxExpress"()
+				app.set( "log", false )
+				app.metrics()
+				app.ws( "/w", ( connection ) => {} )
+				app.listen( port = port, options = { block: false } )
+				sleep( 300 )
+				try {
+					var socket = new "../helpers/WebSocketTestClient"()
+					socket.connect( "localhost", port, "/w" )
+					sleep( 150 )
+					var open = new "../helpers/HttpClient"().get( "http://localhost:" & port & "/metrics" ).body
+					socket.close()
+					sleep( 300 )
+					var closed = new "../helpers/HttpClient"().get( "http://localhost:" & port & "/metrics" ).body
+					assertAll( [
+						() => expect( _sample( open, "boxexpress_websocket_connections" ) ).toBe( "1" ),
+						() => expect( _sample( closed, "boxexpress_websocket_connections" ) ).toBe( "0" )
+					] )
+				} finally {
+					app.close()
+				}
+			} )
+
+		} )
+
+	}
+
+}

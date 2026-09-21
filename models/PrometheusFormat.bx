@@ -1,0 +1,60 @@
+/**
+ * Renders metrics in the Prometheus text exposition format (0.0.4).
+ *
+ * A metric is { name, type, help, samples }, where type is "counter",
+ * "gauge" or "summary" and each sample is { labels, value } — with an
+ * optional `suffix` ("_sum", "_count") appended to the metric name, which
+ * is how a summary's two series are expressed. HELP and TYPE are written
+ * once per metric however many samples it has.
+ */
+class {
+
+	function render( metrics ) {
+		var lines = []
+		for ( var metric in metrics ) {
+			if ( !metric.samples.len() ) {
+				continue
+			}
+			lines.append( "## HELP " & metric.name & " " & _escapeHelp( metric.help ?: "" ) )
+			lines.append( "## TYPE " & metric.name & " " & metric.type )
+			for ( var sample in metric.samples ) {
+				lines.append( metric.name & ( sample.suffix ?: "" ) & _labels( sample.labels ?: {} ) & " " & _value( sample.value ) )
+			}
+		}
+		return arrayToList( lines, char( 10 ) ) & char( 10 )
+	}
+
+	private function _labels( labels ) {
+		if ( structIsEmpty( labels ) ) {
+			return ""
+		}
+		var parts = []
+		for ( var name in structKeyArray( labels ).sort( "text" ) ) {
+			parts.append( name & '="' & _escapeLabel( toString( labels[ name ] ) ) & '"' )
+		}
+		return "{" & arrayToList( parts, "," ) & "}"
+	}
+
+	// Label values are arbitrary strings (a job name, say), so backslash,
+	// double quote and newline have to be escaped or one bad value could
+	// break the whole scrape.
+	private function _escapeLabel( value ) {
+		return value.replace( "\", "\\", "all" ).replace( '"', '\"', "all" ).replace( char( 10 ), "\n", "all" ).replace( char( 13 ), "\r", "all" )
+		}
+
+		private function _escapeHelp( value ) {
+			return value.replace( "\", "\\", "all" ).replace( char( 10 ), "\n", "all" )
+			}
+
+			private function _value( value ) {
+				if ( isBoolean( value ) && !isNumeric( value ) ) {
+					return value ? "1" : "0"
+				}
+				var asDouble = javacast( "double", value )
+				if ( asDouble == int( asDouble ) && abs( asDouble ) < 1000000000000 ) {
+					return toString( int( asDouble ) )
+				}
+				return createObject( "java", "java.math.BigDecimal" ).valueOf( asDouble ).toPlainString()
+			}
+
+		}

@@ -236,6 +236,55 @@ things it can't do: `req.rawExchange()` is `null` (there is no Undertow
 behind an injected request), and `app.ws()` routes can't be reached this
 way — those need a real server and a WebSocket client.
 
+#### Observability: request IDs and metrics (`app.set("requestId")` / `app.metrics()`)
+
+**Request IDs.** `app.set( "requestId", true )` gives every request an id:
+it's available as `req.id`, echoed on the response as `X-Request-Id`, and
+added to the request log line and the unhandled-error log line, so one
+request can be followed across log lines and across nodes behind a load
+balancer. A well-formed `X-Request-Id` from the client (up to 128
+characters of letters, digits, `.`, `_` and `-`) is reused, so an id
+minted at the edge carries through; anything else is replaced with a
+generated one, since it's client-controlled and ends up in logs and a
+response header. `app.set( "requestIdHeader", "X-Correlation-Id" )`
+renames the header. Off by default, so existing log output is unchanged.
+
+```
+[2026-09-20 21:02:38] [checkout-7f3a] GET /hello 127.0.0.1
+```
+
+**Metrics.** `app.metrics()` adds a Prometheus-format endpoint (default
+`GET /metrics`) and starts counting requests — call it before
+`listen()`, and before `app.use()` if scrapes shouldn't pass through
+sessions or rate limiting:
+
+```js
+app.metrics( { token: getSystemSetting( "METRICS_TOKEN" ), sources: [ stomp ] } )
+```
+
+| Metric | Type | Meaning |
+|---|---|---|
+| `boxexpress_http_requests_total{class}` | counter | requests by status class (`2xx`, `4xx`, …) |
+| `boxexpress_http_request_duration_seconds_sum` / `_count` | summary | total handling time and count, for averages and rates |
+| `boxexpress_http_active_connections`, `_active_requests` | gauge | open connections; requests in flight |
+| `boxexpress_http_bytes_received_total`, `_bytes_sent_total` | counter | from Undertow |
+| `boxexpress_websocket_connections` | gauge | open `app.ws()` connections |
+| `boxexpress_draining` | gauge | `1` once `app.shutdown()` has begun |
+| `boxexpress_scheduler_job_runs_total{job}`, `_failures_total`, `_skipped_total`, `_running` | counter / gauge | per scheduled job |
+| `boxexpress_scheduler_job_last_success_timestamp_seconds{job}`, `_last_duration_seconds` | gauge | absent until the job has succeeded once |
+| `boxexpress_cluster_peers`, `boxexpress_cluster_is_manager` | gauge | with clustering on; `is_manager` appears once an election has been checked, and reports the last check rather than triggering one |
+| `boxexpress_stomp_connections`, `_subscriptions`, `_messages_published_total`, `_messages_delivered_total` | gauge / counter | for a broker passed in `sources` |
+
+`sources` takes any object with a `getMetrics()` method returning
+`{ name, type, help, samples: [ { labels, value } ] }` — so your own code
+can add metrics to the same endpoint. A source that throws is logged and
+skipped rather than failing the scrape. `token` requires
+`Authorization: Bearer <token>` (compared in constant time); the numbers
+are operational detail, so don't leave the endpoint open on a public
+listener. Requests made through `app.inject()` aren't counted. There are
+deliberately no per-route latency histograms — raw paths would blow up the
+number of series, and bucket boundaries are an app-specific choice.
+
 #### Health checks and graceful shutdown (`app.health()` / `app.shutdown()`)
 
 ```js
@@ -1741,6 +1790,21 @@ Two more BoxLang-specific things that shaped how these are written:
   rather than `../fixtures/...`.
 
 ## Changelog
+
+**0.2.19**
+- **Request IDs:** `app.set( "requestId", true )` — `req.id`, an
+  `X-Request-Id` response header (a well-formed one from the client is
+  reused, anything else replaced), and the id in the request and
+  unhandled-error log lines. Off by default.
+- **`app.metrics()`:** a Prometheus-format `/metrics` endpoint — requests
+  by status class and duration, Undertow connections and bytes, open
+  WebSockets, draining state, per-job scheduler runs/failures/skips/last
+  success, cluster peers and manager status, and any `sources` (a STOMP
+  broker's connections, subscriptions and message counts). Optional bearer
+  `token`. A scheduled job that has quietly been failing now shows up as a
+  rising failure counter and a stale last-success time. Full suite:
+  380/380, also verified in the `cli-1.16.0`, `cli-1.17.0` and `cli`
+  container images CI uses.
 
 **0.2.18**
 - **`app.inject()`:** run a request through an app in-process, with no

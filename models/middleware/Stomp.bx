@@ -68,6 +68,8 @@ class {
 		// maxConnections counts connections that completed CONNECT;
 		// maxSubscribersPerDestination counts subscriptions on one destination.
 		variables.maxConnections = options.maxConnections ?: 10000
+		variables.publishedCount = createObject( "java", "java.util.concurrent.atomic.AtomicLong" ).init( 0 )
+		variables.deliveredCount = createObject( "java", "java.util.concurrent.atomic.AtomicLong" ).init( 0 )
 		variables.maxSubscribersPerDestination = options.maxSubscribersPerDestination ?: 10000
 		variables.virtualExecutor = createObject( "java", "java.util.concurrent.Executors" ).newVirtualThreadPerTaskExecutor()
 
@@ -926,6 +928,7 @@ class {
 	 * init() docblock for the full explanation.
 	 */
 	function _deliver( destination, body, extraHeaders, originConnection = "", originPeer = "" ) {
+		variables.publishedCount.incrementAndGet()
 		for ( var physicalDestination in _resolveDestinations( destination, body, extraHeaders ) ) {
 			_deliverToDestination( physicalDestination, body, extraHeaders, originConnection )
 		}
@@ -1077,6 +1080,7 @@ class {
 				println( "[Stomp] listener for '" & destination & "' threw: " & e.message )
 			}
 		}
+		variables.deliveredCount.addAndGet( javacast( "long", outgoing.len() ) )
 		return outgoing.len()
 	}
 
@@ -1294,6 +1298,25 @@ class {
 
 	function getExchanges() {
 		return variables.exchanges
+	}
+
+	/**
+	 * For app.metrics( { sources: [ stomp ] } ): current connections and
+	 * subscriptions, and how many messages have been published to the broker
+	 * (including ones relayed in from other cluster nodes) and delivered to
+	 * subscribers.
+	 */
+	function getMetrics() {
+		var subscriptions = 0
+		for ( var destination in structCopy( variables.subscribersByDestination ) ) {
+			subscriptions += structCount( variables.subscribersByDestination[ destination ] ?: {} )
+		}
+		return [
+			{ name: "boxexpress_stomp_connections", type: "gauge", help: "Connected STOMP clients.", samples: [ { labels: {}, value: structCount( variables.connectionsById ) } ] },
+			{ name: "boxexpress_stomp_subscriptions", type: "gauge", help: "Active STOMP subscriptions.", samples: [ { labels: {}, value: subscriptions } ] },
+			{ name: "boxexpress_stomp_messages_published_total", type: "counter", help: "Messages published to the broker.", samples: [ { labels: {}, value: variables.publishedCount.get() } ] },
+			{ name: "boxexpress_stomp_messages_delivered_total", type: "counter", help: "MESSAGE frames delivered to subscribers.", samples: [ { labels: {}, value: variables.deliveredCount.get() } ] }
+		]
 	}
 
 	function getConfig() {

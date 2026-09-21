@@ -20,6 +20,8 @@ class {
 		variables.clusterManager = javacast( "null", "" )
 		variables.closed = false
 		variables.draining = false
+		variables.metricsRegistry = ""    // "" until app.metrics() is called — see HttpBridge.init()
+		variables.metricsSources = []
 		variables.gracefulHandler = javacast( "null", "" )
 		variables.wsCallbackObject = javacast( "null", "" )
 		variables.color = new AnsiColor()
@@ -219,7 +221,7 @@ class {
 	 */
 	function listen( port, callback, options = {} ) {
 		var backlog = options.backlog ?: 1024
-		var bridge = new HttpBridge( variables.router, this.settings, this.locals )
+		var bridge = new HttpBridge( variables.router, this.settings, this.locals, variables.metricsRegistry )
 
 		var glue = new adapters.UndertowHandlerGlue( bridge )
 		var innerProxy = createDynamicProxy( glue, [ "io.undertow.server.HttpHandler" ] )
@@ -480,6 +482,117 @@ class {
 			}
 		}
 		return arrayToList( parts, "&" )
+	}
+
+	/**
+	 * Registers a Prometheus-format metrics endpoint — GET <path> (default
+	 * "/metrics") — and starts counting requests. Call it before listen().
+	 *
+	 *   app.metrics()
+	 *   app.metrics( { path: "/-/metrics", token: getSystemSetting( "METRICS_TOKEN" ), sources: [ stomp ] } )
+	 *
+	 * What it exposes: requests by status class and their total duration (the
+	 * `_sum`/`_count` pair a rate or average is built from), Undertow's active
+	 * connections/requests and bytes in/out, open WebSocket connections,
+	 * whether the app is draining for shutdown, every scheduled job's runs,
+	 * failures, overlap skips, last success and last duration, the cluster's
+	 * peer count and manager status when clustering is on, and anything in
+	 * options.sources — objects with a getMetrics() method, such as a STOMP
+	 * broker (connections, subscriptions, messages published and delivered).
+	 *
+	 * options.token requires "Authorization: Bearer <token>" — the numbers are
+	 * operational detail, so don't leave the endpoint open on a public
+	 * listener; put it behind the token, a firewall, or a private port's
+	 * proxy. Register this before app.use() middleware if scrapes shouldn't
+	 * pass through sessions or rate limiting. Requests made through
+	 * app.inject() aren't counted.
+	 */
+	function metrics( options = {} ) {
+		var app = this
+		var path = options.path ?: "/metrics"
+		var token = options.token ?: ""
+		if ( isSimpleValue( variables.metricsRegistry ) ) {
+			variables.metricsRegistry = new Metrics()
+		}
+		for ( var source in ( options.sources ?: [] ) ) {
+			variables.metricsSources.append( source )
+		}
+
+		get( path, ( req, res ) => {
+			if ( len( token ) ) {
+				var presented = req.headers[ "Authorization" ] ?: ""
+				var expected = "Bearer " & token
+				// Constant-time, so the comparison doesn't leak how much of a guess matched.
+				if ( !createObject( "java", "java.security.MessageDigest" ).isEqual( presented.getBytes( "UTF-8" ), expected.getBytes( "UTF-8" ) ) ) {
+					res.set( "WWW-Authenticate", "Bearer" )
+					return res.status( 401 ).send( "Unauthorized" )
+				}
+			}
+			res.set( "Cache-Control", "no-store" )
+			res.set( "Content-Type", "text/plain; version=0.0.4; charset=utf-8" )
+			res.send( new PrometheusFormat().render( app.collectMetrics() ) )
+		} )
+
+		return this
+	}
+
+	/**
+	 * Every metric this app currently reports, as PrometheusFormat's input.
+	 * Public because the /metrics handler calls it from a closure; useful for
+	 * inspecting values in a test, too.
+	 */
+	function collectMetrics() {
+		var out = []
+		var registry = variables.metricsRegistry
+
+		if ( !isSimpleValue( registry ) ) {
+			var samples = []
+			for ( var statusClass in [ "1xx", "2xx", "3xx", "4xx", "5xx" ] ) {
+				samples.append( { labels: { class: statusClass }, value: registry.get( "http.requests." & statusClass ) } )
+			}
+			out.append( { name: "boxexpress_http_requests_total", type: "counter", help: "Requests handled, by response status class.", samples: samples } )
+			out.append( {
+				name: "boxexpress_http_request_duration_seconds", type: "summary",
+				help: "Time spent handling requests.",
+				samples: [
+					{ suffix: "_sum", labels: {}, value: registry.get( "http.duration.nanos" ) / 1000000000 },
+					{ suffix: "_count", labels: {}, value: registry.get( "http.duration.count" ) }
+				]
+			} )
+		}
+
+		var stats = getConnectorStatistics()
+		if ( !isNull( stats ) ) {
+			out.append( { name: "boxexpress_http_active_connections", type: "gauge", help: "Open client connections.", samples: [ { labels: {}, value: stats.getActiveConnections() } ] } )
+			out.append( { name: "boxexpress_http_active_requests", type: "gauge", help: "Requests currently being handled.", samples: [ { labels: {}, value: stats.getActiveRequests() } ] } )
+			out.append( { name: "boxexpress_http_bytes_received_total", type: "counter", help: "Bytes received.", samples: [ { labels: {}, value: stats.getBytesReceived() } ] } )
+			out.append( { name: "boxexpress_http_bytes_sent_total", type: "counter", help: "Bytes sent.", samples: [ { labels: {}, value: stats.getBytesSent() } ] } )
+		}
+
+		out.append( {
+			name: "boxexpress_websocket_connections", type: "gauge", help: "Open WebSocket connections.",
+			samples: [ { labels: {}, value: isNull( variables.wsCallbackObject ) ? 0 : variables.wsCallbackObject.openCount() } ]
+		} )
+		out.append( { name: "boxexpress_draining", type: "gauge", help: "1 while the app is shutting down.", samples: [ { labels: {}, value: variables.draining ? 1 : 0 } ] } )
+
+		var producers = []
+		if ( !isNull( variables.scheduler ) ) {
+			producers.append( variables.scheduler )
+		}
+		if ( !isNull( variables.clusterManager ) ) {
+			producers.append( variables.clusterManager )
+		}
+		for ( var extra in variables.metricsSources ) {
+			producers.append( extra )
+		}
+		for ( var producer in producers ) {
+			try {
+				out.append( producer.getMetrics(), true )
+			} catch ( any e ) {
+				println( "[BoxExpress] a metrics source failed and was skipped: " & e.message )
+			}
+		}
+		return out
 	}
 
 	function isDraining() {

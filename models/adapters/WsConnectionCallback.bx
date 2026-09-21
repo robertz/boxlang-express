@@ -75,6 +75,10 @@ class {
 	 * an in-flight HTTP request and so isn't waited on by request draining.
 	 * Returns how many it closed.
 	 */
+	function openCount() {
+		return variables.openConnections.size()
+	}
+
 	function closeAll() {
 		var closed = 0
 		for ( var connection in variables.openConnections.values().toArray() ) {

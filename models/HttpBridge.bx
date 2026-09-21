@@ -7,10 +7,13 @@
  */
 class {
 
-	function init( router, settings, appLocals = {} ) {
+	function init( router, settings, appLocals = {}, metrics = "" ) {
 		variables.router = router
 		variables.settings = settings
 		variables.appLocals = appLocals
+		// "" (not a real null) when metrics aren't enabled — a null parameter
+		// can't be referenced by name, see StompMessage.bx's init().
+		variables.metrics = metrics
 		variables.color = new AnsiColor()
 		return this
 	}
@@ -18,10 +21,17 @@ class {
 	function handle( exchangeAdapter ) {
 		var req = ""
 		var res = ""
+		var requestId = ""
+		var startedNs = createObject( "java", "java.lang.System" ).nanoTime()
 
 		try {
 			req = new Request( exchangeAdapter, variables.settings )
 			res = new Response( exchangeAdapter, variables.settings, variables.appLocals )
+			if ( variables.settings[ "requestId" ] ?: false ) {
+				requestId = _resolveRequestId( req )
+				req.id = requestId
+				res.set( variables.settings[ "requestIdHeader" ] ?: "X-Request-Id", requestId )
+			}
 			// The one log line every single request pays for, whether anyone's
 			// watching stdout or not — opt out with app.set("log", false) for a
 			// high-throughput deployment that doesn't want it (println is a
@@ -29,7 +39,7 @@ class {
 			// Unlike this, the error paths below always log: those are actual
 			// server-side failures, not routine traffic.
 			if ( variables.settings[ "log" ] ?: true ) {
-				println( variables.color.gray( "[#dateTimeFormat( now(), 'yyyy-MM-dd HH:mm:ss' )#]" ) & " " & variables.color.method( req.method ) & " #req.path# " & variables.color.dim( req.ip ) )
+				println( variables.color.gray( "[#dateTimeFormat( now(), 'yyyy-MM-dd HH:mm:ss' )#]" ) & _idTag( requestId ) & " " & variables.color.method( req.method ) & " #req.path# " & variables.color.dim( req.ip ) )
 			}
 		} catch ( any e ) {
 			println( variables.color.gray( "[#dateTimeFormat( now(), 'yyyy-MM-dd HH:mm:ss' )#]" ) & " " & variables.color.red( "Failed to construct Request/Response: #e.message#" ) )
@@ -54,7 +64,7 @@ class {
 		try {
 			variables.router.dispatch( req, res )
 		} catch ( any e ) {
-			println( variables.color.gray( "[#dateTimeFormat( now(), 'yyyy-MM-dd HH:mm:ss' )#]" ) & " " & variables.color.red( "Unhandled error dispatching #req.method# #req.path#: #e.message#" ) )
+			println( variables.color.gray( "[#dateTimeFormat( now(), 'yyyy-MM-dd HH:mm:ss' )#]" ) & _idTag( requestId ) & " " & variables.color.red( "Unhandled error dispatching #req.method# #req.path#: #e.message#" ) )
 			if ( !res.isSent() ) {
 				try {
 					var message = ( variables.settings[ "env" ] ?: "" ) == "development" ? e.message : "Internal Server Error"
@@ -69,7 +79,28 @@ class {
 				} catch ( any ignore ) {
 				}
 			}
+			if ( !isSimpleValue( variables.metrics ) ) {
+				variables.metrics.recordRequest( res.getStatusCode(), createObject( "java", "java.lang.System" ).nanoTime() - startedNs )
+			}
 		}
+	}
+
+	/**
+	 * Uses the caller's X-Request-Id when it looks like an id — short, and only
+	 * characters that are safe to put in a log line and a response header (it
+	 * comes from the client, so it's untrusted) — otherwise mints one.
+	 */
+	private function _resolveRequestId( req ) {
+		var headerName = variables.settings[ "requestIdHeader" ] ?: "X-Request-Id"
+		var incoming = req.headers[ headerName ] ?: ""
+		if ( len( incoming ) && reFind( "^[A-Za-z0-9._\-]{1,128}$", incoming ) ) {
+			return incoming
+		}
+		return lCase( createUUID() )
+	}
+
+	private function _idTag( requestId ) {
+		return len( requestId ) ? " " & variables.color.dim( "[" & requestId & "]" ) : ""
 	}
 
 }

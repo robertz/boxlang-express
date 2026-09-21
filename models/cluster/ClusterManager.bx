@@ -40,6 +40,7 @@ class {
 		variables.relayOpened = false
 		variables.relayMessageHandler = javacast( "null", "" )
 		variables.presenceProvider = javacast( "null", "" )
+		variables.lastManagerSeen = ""
 		variables.peerConnections = {}   // peerName -> ClusterPeer, outbound only
 
 		if ( variables.config.enabled ) {
@@ -452,9 +453,11 @@ class {
 
 			if ( !managerIsLive ) {
 				provider.set( variables.MANAGER_KEY, variables.myPeerName, variables.peerIdleTimeoutSeconds * 3 )
+				variables.lastManagerSeen = variables.myPeerName
 				return variables.myPeerName
 			}
 
+			variables.lastManagerSeen = currentManager
 			return currentManager
 		} catch ( any e ) {
 			// Same transient-store-error concern as getPeers() above,
@@ -483,6 +486,31 @@ class {
 			return true
 		}
 		return getManagerNode() == variables.myPeerName
+	}
+
+	/**
+	 * For app.metrics(). is_manager reports what the most recent election
+	 * check saw rather than running a new one — a scrape shouldn't itself
+	 * trigger an election — so it's only present once a clustered job (or an
+	 * explicit isManager() call) has checked at least once.
+	 */
+	function getMetrics() {
+		if ( !variables.config.enabled ) {
+			return []
+		}
+		var metrics = [ {
+			name: "boxexpress_cluster_peers", type: "gauge",
+			help: "Other live instances this one can see through the shared cache.",
+			samples: [ { labels: {}, value: getPeers().len() } ]
+		} ]
+		if ( len( variables.lastManagerSeen ) ) {
+			metrics.append( {
+				name: "boxexpress_cluster_is_manager", type: "gauge",
+				help: "1 if this instance was the elected manager at the last election check.",
+				samples: [ { labels: {}, value: variables.lastManagerSeen == variables.myPeerName ? 1 : 0 } ]
+			} )
+		}
+		return metrics
 	}
 
 	function isEnabled() {
