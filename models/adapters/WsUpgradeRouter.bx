@@ -10,11 +10,16 @@
  */
 class {
 
-	function init( wsHandshakeHandler, wsRoutePaths, httpHandler ) {
+	function init( wsHandshakeHandler, wsRoutePaths, httpHandler, routeOrigins = {}, settings = {} ) {
 		variables.wsHandshakeHandler = wsHandshakeHandler
 		variables.wsRoutePaths = wsRoutePaths
 		variables.httpHandler = httpHandler
+		variables.routeOrigins = routeOrigins
+		variables.proxyTrust = settings[ "trust proxy compiled" ] ?: new "../ProxyTrust"( settings[ "trust proxy" ] ?: false )
 		variables.upgradeHeaderName = createObject( "java", "io.undertow.util.HttpString" ).init( "Upgrade" )
+		variables.originHeaderName = createObject( "java", "io.undertow.util.HttpString" ).init( "Origin" )
+		variables.hostHeaderName = createObject( "java", "io.undertow.util.HttpString" ).init( "Host" )
+		variables.forwardedHostHeaderName = createObject( "java", "io.undertow.util.HttpString" ).init( "X-Forwarded-Host" )
 		return this
 	}
 
@@ -23,10 +28,54 @@ class {
 		var isWsUpgrade = !isNull( upgradeHeader ) && upgradeHeader.equalsIgnoreCase( "websocket" )
 
 		if ( isWsUpgrade && structKeyExists( variables.wsRoutePaths, exchange.getRequestPath() ) ) {
+			if ( !_originAllowed( exchange, variables.routeOrigins[ exchange.getRequestPath() ] ?: "same-origin" ) ) {
+				exchange.setStatusCode( 403 )
+				exchange.endExchange()
+				return
+			}
 			variables.wsHandshakeHandler.handleRequest( exchange )
 		} else {
 			variables.httpHandler.handleRequest( exchange )
 		}
+	}
+
+	/**
+	 * See BoxExpress.ws()'s docblock for the policy. A missing Origin means a
+	 * non-browser client, which can't be used for cross-site hijacking.
+	 */
+	private function _originAllowed( exchange, policy ) {
+		var origin = exchange.getRequestHeaders().getFirst( variables.originHeaderName ) ?: ""
+		if ( !len( origin ) ) {
+			return true
+		}
+		if ( isSimpleValue( policy ) && policy == "*" ) {
+			return true
+		}
+		if ( isArray( policy ) ) {
+			for ( var allowed in policy ) {
+				if ( compareNoCase( allowed, origin ) == 0 ) {
+					return true
+				}
+			}
+			return false
+		}
+		// "same-origin": the page's host[:port] must be the one it connected to.
+		var originHost = lCase( reReplace( origin, "^[A-Za-z][A-Za-z0-9+.\-]*://", "" ) )
+		originHost = listFirst( originHost, "/" )
+		var hostHeader = exchange.getRequestHeaders().getFirst( variables.hostHeaderName ) ?: ""
+		if ( len( hostHeader ) && compareNoCase( originHost, hostHeader ) == 0 ) {
+			return true
+		}
+		var peer = ""
+		try {
+			peer = exchange.getSourceAddress().getAddress().getHostAddress()
+		} catch ( any e ) {
+		}
+		if ( variables.proxyTrust.trustsPeer( peer ) ) {
+			var forwardedHost = listFirst( exchange.getRequestHeaders().getFirst( variables.forwardedHostHeaderName ) ?: "", "," ).trim()
+			return len( forwardedHost ) && compareNoCase( originHost, forwardedHost ) == 0
+		}
+		return false
 	}
 
 }

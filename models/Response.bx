@@ -7,6 +7,29 @@
  */
 class {
 
+	// Built once per class, not once per request.
+	static {
+		STATUS_TEXT = {
+			200: "OK", 201: "Created", 204: "No Content",
+			301: "Moved Permanently", 302: "Found",
+			400: "Bad Request", 401: "Unauthorized", 403: "Forbidden", 404: "Not Found",
+			405: "Method Not Allowed", 409: "Conflict", 422: "Unprocessable Entity",
+			500: "Internal Server Error", 502: "Bad Gateway", 503: "Service Unavailable"
+		}
+		MIME_TYPES = {
+			html: "text/html; charset=utf-8", htm: "text/html; charset=utf-8",
+			css: "text/css; charset=utf-8", js: "text/javascript; charset=utf-8",
+			json: "application/json; charset=utf-8", txt: "text/plain; charset=utf-8",
+			png: "image/png", jpg: "image/jpeg", jpeg: "image/jpeg", gif: "image/gif",
+			svg: "image/svg+xml", ico: "image/x-icon",
+			woff: "font/woff", woff2: "font/woff2",
+			pdf: "application/pdf", zip: "application/zip",
+			csv: "text/csv; charset=utf-8", xml: "application/xml; charset=utf-8",
+			mp4: "video/mp4", webm: "video/webm", mp3: "audio/mpeg",
+			mjs: "text/javascript; charset=utf-8", webp: "image/webp", wasm: "application/wasm"
+		}
+	}
+
 	function init( exchangeAdapter, settings = {}, appLocals = {} ) {
 		variables.exchangeAdapter = exchangeAdapter
 		variables.sent = false
@@ -16,25 +39,6 @@ class {
 		variables.settings = settings
 		variables.appLocals = appLocals
 		this.locals = {}
-		variables.STATUS_TEXT = {
-			200: "OK", 201: "Created", 204: "No Content",
-			301: "Moved Permanently", 302: "Found",
-			400: "Bad Request", 401: "Unauthorized", 403: "Forbidden", 404: "Not Found",
-			405: "Method Not Allowed", 409: "Conflict", 422: "Unprocessable Entity",
-			500: "Internal Server Error", 502: "Bad Gateway", 503: "Service Unavailable"
-		}
-		// Built once per instance instead of on every sendFile()/download() call.
-		variables.MIME_TYPES = {
-			html: "text/html; charset=utf-8", htm: "text/html; charset=utf-8",
-			css: "text/css; charset=utf-8", js: "text/javascript; charset=utf-8",
-			json: "application/json; charset=utf-8", txt: "text/plain; charset=utf-8",
-			png: "image/png", jpg: "image/jpeg", jpeg: "image/jpeg", gif: "image/gif",
-			svg: "image/svg+xml", ico: "image/x-icon",
-			woff: "font/woff", woff2: "font/woff2",
-			pdf: "application/pdf", zip: "application/zip",
-			csv: "text/csv; charset=utf-8", xml: "application/xml; charset=utf-8",
-			mp4: "video/mp4", mp3: "audio/mpeg"
-		}
 		return this
 	}
 
@@ -140,7 +144,7 @@ class {
 
 	function sendStatus( code ) {
 		status( code )
-		var text = variables.STATUS_TEXT[ code ] ?: toString( code )
+		var text = static.STATUS_TEXT[ code ] ?: toString( code )
 		type( "text/plain; charset=utf-8" )
 		return _end( text.getBytes( "UTF-8" ) )
 	}
@@ -253,26 +257,63 @@ class {
 		}
 
 		if ( range.type != "satisfiable" ) {
-			var bytes = createObject( "java", "java.nio.file.Files" ).readAllBytes( fileObj.toPath() )
-			return _end( bytes )
+			return _streamFile( fileObj, 0, totalSize )
 		}
-
-		var chunkLength = range.end - range.start + 1
-		var inputStream = createObject( "java", "java.io.FileInputStream" ).init( fileObj )
-		inputStream.skip( range.start )
-		var chunk = inputStream.readNBytes( javacast( "int", chunkLength ) )
-		inputStream.close()
 
 		set( "Content-Range", "bytes #range.start#-#range.end#/#totalSize#" )
 		status( 206 )
-		return _end( chunk )
+		return _streamFile( fileObj, range.start, range.end - range.start + 1 )
 	}
 
 	/**
-	 * Strips characters that would let an attacker-controlled filename escape the
-	 * quoted Content-Disposition token (") or inject header-folding whitespace/control
-	 * characters (CR/LF and other control chars) before it's interpolated into a header.
+	 * Sends `length` bytes of the file starting at `start`, copied from disk to
+	 * the connection by the JDK (FileChannel.transferTo) rather than read into
+	 * memory first — so serving a large file costs a fixed amount of memory
+	 * per request, not the file's size, and files over 2 GB work. A HEAD
+	 * request gets the headers only, without touching the file's contents.
 	 */
+	private function _streamFile( fileObj, start, length ) {
+		if ( variables.sent ) {
+			throw( message = "Response already sent for this request", type = "BoxExpress.ResponseAlreadySent" )
+		}
+		variables.sent = true
+		for ( var callback in variables.beforeSendCallbacks ) {
+			callback()
+		}
+		variables.bytesWritten = length
+
+		if ( length == 0 ) {
+			variables.exchangeAdapter.sendHeadersOnly( variables.statusCode )
+			return this
+		}
+		set( "Content-Length", toString( length ) )
+		if ( variables.exchangeAdapter.getMethod() == "HEAD" ) {
+			variables.exchangeAdapter.sendHeadersOnly( variables.statusCode )
+			return this
+		}
+
+		variables.exchangeAdapter.setStatusCode( variables.statusCode )
+		var out = variables.exchangeAdapter.getResponseOutputStream()
+		var channel = createObject( "java", "java.io.FileInputStream" ).init( fileObj ).getChannel()
+		try {
+			var target = createObject( "java", "java.nio.channels.Channels" ).newChannel( out )
+			var position = start
+			var remaining = length
+			while ( remaining > 0 ) {
+				var sent = channel.transferTo( javacast( "long", position ), javacast( "long", remaining ), target )
+				if ( sent <= 0 ) {
+					break
+				}
+				position += sent
+				remaining -= sent
+			}
+		} finally {
+			channel.close()
+			out.close()
+		}
+		return this
+	}
+
 	private function _sanitizeHeaderToken( value ) {
 		return reReplace( value, "[""\r\n\x00-\x1F]", "", "all" )
 	}
@@ -291,21 +332,15 @@ class {
 
 	private function _guessMimeType( fileName ) {
 		var ext = listLast( fileName, "." ).lcase()
-		return variables.MIME_TYPES[ ext ] ?: "application/octet-stream"
+		return static.MIME_TYPES[ ext ] ?: "application/octet-stream"
 	}
 
 	/**
 	 * Render a view from the configured views directory (app.set("views", dir)) and
-	 * send it as the response body. Supports two engines, picked by the view's file
-	 * extension:
-	 *   .bxm — native BoxLang template (include + savecontent). `data` is available
-	 *          inside it as the `data` struct — interpolation needs a <bx:output>
-	 *          block, same as classic CFML <cfoutput>.
-	 *   .hbs — Handlebars (models/HandlebarsEngine.bx), `data` is the render context
-	 *          directly, so template variables are {{data.whatever}} — or {{whatever}}
-	 *          if you pass your view data as the top-level struct.
-	 * A view with no extension gets one appended based on app.set("view engine", ...),
-	 * defaulting to "bxm" — mirrors Express's view-engine setting.
+	 * send it as the response body. Views are native BoxLang templates (.bxm, run
+	 * via include + savecontent); `data` is available inside one as the `data`
+	 * struct, and interpolation needs a <bx:output> block, same as classic CFML
+	 * <cfoutput>. A view with no extension gets ".bxm" appended.
 	 *
 	 * `data` is merged with `app.locals` and `res.locals` before it reaches the
 	 * template — app.locals first, res.locals next (overriding app.locals), then
@@ -333,8 +368,14 @@ class {
 		}
 
 		var viewFile = view
-		if ( viewFile.right( 4 ) != ".bxm" && viewFile.right( 4 ) != ".hbs" ) {
-			viewFile &= "." & ( variables.settings[ "view engine" ] ?: "bxm" )
+		if ( lCase( viewFile.right( 4 ) ) == ".hbs" || lCase( variables.settings[ "view engine" ] ?: "bxm" ) == "hbs" ) {
+			throw(
+				message = "Handlebars (.hbs) views were removed in 0.2.20 — convert the view to .bxm",
+				type = "BoxExpress.UnsupportedViewEngine"
+			)
+		}
+		if ( lCase( viewFile.right( 4 ) ) != ".bxm" ) {
+			viewFile &= ".bxm"
 		}
 
 		var viewsRoot = createObject( "java", "java.io.File" ).init( viewsDir ).getCanonicalFile().toPath()
@@ -356,12 +397,8 @@ class {
 		var templatePath = realCandidate.toString()
 		var output = ""
 
-		if ( viewFile.right( 4 ) == ".hbs" ) {
-			output = new HandlebarsEngine().render( templatePath, data )
-		} else {
-			bx:savecontent variable="output" {
-				include "#templatePath#"
-			}
+		bx:savecontent variable="output" {
+			include "#templatePath#"
 		}
 
 		type( "text/html; charset=utf-8" )

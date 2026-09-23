@@ -23,6 +23,10 @@ class {
 		this.files = {}
 		this.headers = exchangeAdapter.getRequestHeaders()
 		this.cookies = _parseCookies( this.headers[ "Cookie" ] ?: "" )
+		// Compiled once by app.set( "trust proxy", ... ); built here only for a
+		// Request made with raw settings (a test, a bare Router).
+		variables.proxyTrust = settings[ "trust proxy compiled" ] ?: new ProxyTrust( settings[ "trust proxy" ] ?: false )
+		variables.peerAddress = exchangeAdapter.getRemoteAddress()
 		this.ip = _resolveIp( exchangeAdapter, settings )
 		this.protocol = _resolveProtocol( settings )
 		this.secure = ( this.protocol == "https" )
@@ -93,10 +97,10 @@ class {
 
 	/**
 	 * By default this is always the direct TCP peer (safe, can't be spoofed by a client).
-	 * Behind a reverse proxy, the direct peer is the proxy itself — opt in with
-	 * app.set("trust proxy", true) to prefer X-Forwarded-For instead, same as Express's
-	 * trust-proxy setting (off by default for the same reason: an untrusted client could
-	 * otherwise forge that header to spoof its IP).
+	 * Behind a reverse proxy, the direct peer is the proxy itself — app.set("trust
+	 * proxy", ...) says which hops to believe; see ProxyTrust.bx. Prefer a hop count
+	 * or a list of proxy addresses over `true`, which takes the left-most
+	 * X-Forwarded-For entry — the one a client can write.
 	 *
 	 * X-Forwarded-For is the wrong choice behind some platforms, though: verified
 	 * directly against DigitalOcean App Platform (with Cloudflare in front of that)
@@ -125,13 +129,7 @@ class {
 			}
 		}
 
-		if ( settings[ "trust proxy" ] ?: false ) {
-			var forwardedFor = this.headers[ "X-Forwarded-For" ] ?: ""
-			if ( len( forwardedFor ) ) {
-				return forwardedFor.listFirst( "," ).trim()
-			}
-		}
-		return exchangeAdapter.getRemoteAddress()
+		return variables.proxyTrust.clientIp( variables.peerAddress, this.headers[ "X-Forwarded-For" ] ?: "" )
 	}
 
 	/**
@@ -142,7 +140,7 @@ class {
 	 * untrusted client could otherwise forge that header to spoof HTTPS.
 	 */
 	private function _resolveProtocol( settings ) {
-		if ( settings[ "trust proxy" ] ?: false ) {
+		if ( variables.proxyTrust.trustsPeer( variables.peerAddress ) ) {
 			var forwardedProto = this.headers[ "X-Forwarded-Proto" ] ?: ""
 			if ( len( forwardedProto ) && forwardedProto.listFirst( "," ).trim().lcase() == "https" ) {
 				return "https"
@@ -159,7 +157,7 @@ class {
 	 */
 	private function _resolveHostname( settings ) {
 		var hostHeader = this.headers[ "Host" ] ?: ""
-		if ( settings[ "trust proxy" ] ?: false ) {
+		if ( variables.proxyTrust.trustsPeer( variables.peerAddress ) ) {
 			hostHeader = this.headers[ "X-Forwarded-Host" ] ?: hostHeader
 		}
 		if ( !len( hostHeader ) ) {

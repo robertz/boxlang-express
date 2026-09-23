@@ -1,0 +1,392 @@
+/**
+ * Regression coverage for the 0.2.20 security/performance pass: routing
+ * without recursion, static dotfiles, streamed file responses, trust proxy
+ * hop counts and address lists, CSRF token comparison, WebSocket origin
+ * checks, session regeneration and the in-memory store cap, upload
+ * extension handling and parsing, conditional GET lists, and removal of
+ * Handlebars views.
+ */
+class extends="testbox.system.BaseSpec" {
+
+	function beforeAll() {
+		variables.scratch = expandPath( "./tmp-hardening-spec-" & createUUID() )
+		directoryCreate( variables.scratch & "/public/.git", true, true )
+		directoryCreate( variables.scratch & "/public/.well-known", true, true )
+		fileWrite( variables.scratch & "/public/.env", "DB_PASSWORD=hunter2" )
+		fileWrite( variables.scratch & "/public/.git/config", "[core]" )
+		fileWrite( variables.scratch & "/public/.well-known/security.txt", "Contact: x" )
+		fileWrite( variables.scratch & "/public/app.mjs", "export default 1" )
+		fileWrite( variables.scratch & "/public/index.html", "home" )
+	}
+
+	function afterAll() {
+		try {
+			directoryDelete( variables.scratch, true )
+		} catch ( any e ) {
+		}
+	}
+
+	private function _static( options = {} ) {
+		var app = new "../../models/BoxExpress"()
+		app.use( new "../../models/middleware/StaticFiles"().serve( variables.scratch & "/public", options ) )
+		return app
+	}
+
+	function run() {
+
+		describe( "Router", function() {
+
+			it( "handles thousands of routes, and a 404 past all of them, without overflowing the stack", function() {
+				var app = new "../../models/BoxExpress"()
+				for ( var i = 1; i <= 3000; i++ ) {
+					app.get( "/r" & i, ( req, res ) => res.send( "ok" ) )
+				}
+				assertAll( [
+					() => expect( app.inject( "/r3000" ).statusCode ).toBe( 200 ),
+					() => expect( app.inject( "/nope" ).statusCode ).toBe( 404 )
+				] )
+			} )
+
+			it( "still reaches error handlers after skipping non-error layers", function() {
+				var app = new "../../models/BoxExpress"()
+				app.get( "/boom", ( req, res ) => { throw( "x" ) } )
+				for ( var i = 1; i <= 800; i++ ) {
+					app.get( "/filler" & i, ( req, res ) => res.send( "ok" ) )
+				}
+				app.use( ( err, req, res, next ) => res.status( 418 ).send( "handled" ) )
+				var res = app.inject( "/boom" )
+				expect( [ res.statusCode, res.body ] ).toBe( [ 418, "handled" ] )
+			} )
+
+		} )
+
+		describe( "Static files", function() {
+
+			it( "ignores dotfiles by default, falling through as if they weren't there", function() {
+				var app = _static()
+				assertAll( [
+					() => expect( app.inject( "/.env" ).statusCode ).toBe( 404 ),
+					() => expect( app.inject( "/.env" ).body ).notToInclude( "hunter2" ),
+					() => expect( app.inject( "/.git/config" ).statusCode ).toBe( 404 ),
+					() => expect( app.inject( "/index.html" ).statusCode ).withContext( "ordinary files unaffected" ).toBe( 200 )
+				] )
+			} )
+
+			it( "always serves /.well-known/", function() {
+				expect( _static().inject( "/.well-known/security.txt" ).body ).toBe( "Contact: x" )
+			} )
+
+			it( "answers 403 with dotfiles: deny, and serves them with dotfiles: allow", function() {
+				assertAll( [
+					() => expect( _static( { dotfiles: "deny" } ).inject( "/.env" ).statusCode ).toBe( 403 ),
+					() => expect( _static( { dotfiles: "allow" } ).inject( "/.env" ).body ).toBe( "DB_PASSWORD=hunter2" )
+				] )
+			} )
+
+			it( "rejects an unknown dotfiles value at startup", function() {
+				expect( () => _static( { dotfiles: "maybe" } ) ).toThrow( "BoxExpress.InvalidOption" )
+			} )
+
+			it( "serves ES modules with a JavaScript content type", function() {
+				expect( _static().inject( "/app.mjs" ).header( "Content-Type" ) ).toInclude( "text/javascript" )
+			} )
+
+		} )
+
+		describe( "Streamed file responses", function() {
+
+			it( "serves a large file intact over a live server, and a range from its middle", function() {
+				var bigPath = variables.scratch & "/public/big.bin"
+				var raf = createObject( "java", "java.io.RandomAccessFile" ).init( bigPath, "rw" )
+				var chunk = repeatString( "0123456789abcdef", 65536 ).getBytes( "UTF-8" )   // 1 MiB
+				for ( var i = 1; i <= 24; i++ ) {
+					raf.write( chunk )
+				}
+				raf.close()
+
+				var app = _static()
+				app.set( "log", false )
+				app.listen( port = 4930, options = { block: false } )
+				sleep( 300 )
+				try {
+					var client = createObject( "java", "java.net.http.HttpClient" ).newHttpClient()
+					var bodyAsBytes = createObject( "java", "java.net.http.HttpResponse$BodyHandlers" ).ofByteArray()
+					var full = client.send(
+						createObject( "java", "java.net.http.HttpRequest" ).newBuilder( createObject( "java", "java.net.URI" ).create( "http://localhost:4930/big.bin" ) ).build(),
+						bodyAsBytes
+					)
+					var ranged = client.send(
+						createObject( "java", "java.net.http.HttpRequest" ).newBuilder( createObject( "java", "java.net.URI" ).create( "http://localhost:4930/big.bin" ) ).header( "Range", "bytes=1048580-1048585" ).build(),
+						bodyAsBytes
+					)
+					assertAll( [
+						() => expect( full.statusCode() ).toBe( 200 ),
+						() => expect( full.body().len() ).toBe( 24 * 1048576 ),
+						() => expect( full.headers().firstValue( "Content-Length" ).orElse( "" ) ).toBe( toString( 24 * 1048576 ) ),
+						() => expect( createObject( "java", "java.util.Arrays" ).equals( full.body(), createObject( "java", "java.nio.file.Files" ).readAllBytes( createObject( "java", "java.io.File" ).init( bigPath ).toPath() ) ) ).toBeTrue(),
+						() => expect( ranged.statusCode() ).toBe( 206 ),
+						() => expect( createObject( "java", "java.lang.String" ).init( ranged.body(), "UTF-8" ) ).toBe( "456789" )
+					] )
+				} finally {
+					app.close()
+					fileDelete( bigPath )
+				}
+			} )
+
+			it( "handles files over 2 GB — HEAD and a range at the end — without reading them", function() {
+				var hugePath = variables.scratch & "/public/huge.bin"
+				var raf = createObject( "java", "java.io.RandomAccessFile" ).init( hugePath, "rw" )
+				raf.setLength( javacast( "long", 3221225472 ) )   // 3 GiB, sparse
+				raf.close()
+				try {
+					var app = _static()
+					var head = app.inject( { method: "HEAD", url: "/huge.bin" } )
+					var tail = app.inject( { url: "/huge.bin", headers: { "Range": "bytes=3221225470-" } } )
+					assertAll( [
+						() => expect( head.statusCode ).toBe( 200 ),
+						() => expect( head.header( "Content-Length" ) ).toBe( "3221225472" ),
+						() => expect( head.bodyBytes.len() ).toBe( 0 ),
+						() => expect( tail.statusCode ).toBe( 206 ),
+						() => expect( tail.bodyBytes.len() ).toBe( 2 ),
+						() => expect( tail.header( "Content-Range" ) ).toBe( "bytes 3221225470-3221225471/3221225472" ),
+						() => expect( new "../../models/RangeParser"().parse( "bytes=3000000000-3000000009", 3221225472 ).start ).withContext( "offsets past 2 GB aren't clamped" ).toBe( 3000000000 ),
+						() => expect( new "../../models/RangeParser"().parse( "bytes=99999999999999999999999-", 10 ).type ).toBe( "unsatisfiable" )
+					] )
+				} finally {
+					fileDelete( hugePath )
+				}
+			} )
+
+		} )
+
+		describe( "Conditional GET", function() {
+
+			it( "matches If-None-Match lists, *, and weak/strong variants, case-sensitively", function() {
+				var cg = new "../../models/ConditionalGet"()
+				var file = createObject( "java", "java.io.File" ).init( variables.scratch & "/public/index.html" )
+				var etag = cg.etagFor( file )
+				assertAll( [
+					() => expect( cg.isNotModified( '"other", ' & etag, "", etag, file ) ).toBeTrue(),
+					() => expect( cg.isNotModified( "*", "", etag, file ) ).toBeTrue(),
+					() => expect( cg.isNotModified( replace( etag, "W/", "" ), "", etag, file ) ).toBeTrue(),
+					() => expect( cg.isNotModified( uCase( etag ), "", etag, file ) ).withContext( "hex digits differ only in case" ).toBe( uCase( etag ) == etag ),
+					() => expect( cg.isNotModified( '"nope"', "", etag, file ) ).toBeFalse()
+				] )
+			} )
+
+		} )
+
+		describe( "trust proxy", function() {
+
+			it( "with a hop count, takes the address the nearest proxy saw — a forged X-Forwarded-For entry is ignored", function() {
+				var app = new "../../models/BoxExpress"()
+				app.set( "trust proxy", 1 )
+				app.get( "/ip", ( req, res ) => res.send( req.ip ) )
+				var res = app.inject( { url: "/ip", ip: "10.0.0.5", headers: { "X-Forwarded-For": "6.6.6.6, 203.0.113.9" } } )
+				expect( res.body ).toBe( "203.0.113.9" )
+			} )
+
+			it( "with an address list, walks back through trusted proxies only", function() {
+				var app = new "../../models/BoxExpress"()
+				app.set( "trust proxy", [ "10.0.0.0/8", "loopback" ] )
+				app.get( "/who", ( req, res ) => res.json( { ip: req.ip, protocol: req.protocol } ) )
+
+				var viaProxies = app.inject( { url: "/who", ip: "10.0.0.5", headers: { "X-Forwarded-For": "6.6.6.6, 203.0.113.9, 10.1.1.1", "X-Forwarded-Proto": "https" } } ).json()
+				var direct = app.inject( { url: "/who", ip: "198.51.100.1", headers: { "X-Forwarded-For": "6.6.6.6", "X-Forwarded-Proto": "https" } } ).json()
+				assertAll( [
+					() => expect( viaProxies.ip ).toBe( "203.0.113.9" ),
+					() => expect( viaProxies.protocol ).toBe( "https" ),
+					() => expect( direct.ip ).withContext( "a client connecting directly can't forge its ip" ).toBe( "198.51.100.1" ),
+					() => expect( direct.protocol ).withContext( "or its protocol" ).toBe( "http" )
+				] )
+			} )
+
+			it( "keeps true meaning the left-most entry, for compatibility", function() {
+				var app = new "../../models/BoxExpress"()
+				app.set( "trust proxy", true )
+				app.get( "/ip", ( req, res ) => res.send( req.ip ) )
+				expect( app.inject( { url: "/ip", headers: { "X-Forwarded-For": "6.6.6.6, 203.0.113.9" } } ).body ).toBe( "6.6.6.6" )
+			} )
+
+			it( "never resolves a hostname found in X-Forwarded-For, and rejects a bad setting at app.set()", function() {
+				var trust = new "../../models/ProxyTrust"( "10.0.0.0/8" )
+				var app = new "../../models/BoxExpress"()
+				assertAll( [
+					() => expect( trust.clientIp( "10.0.0.5", "attacker.example, 10.1.1.1" ) ).toBe( "attacker.example" ),
+					() => expect( () => app.set( "trust proxy", "not-an-address" ) ).toThrow( "BoxExpress.InvalidOption" ),
+					() => expect( () => app.set( "trust proxy", "10.0.0.0/99" ) ).toThrow( "BoxExpress.InvalidOption" )
+				] )
+			} )
+
+		} )
+
+		describe( "CSRF", function() {
+
+			it( "rejects a token that differs only in letter case", function() {
+				var app = new "../../models/BoxExpress"()
+				app.use( new "../../models/middleware/Session"().session() )
+				app.use( new "../../models/middleware/BodyParsers"().json() )
+				app.use( new "../../models/middleware/Csrf"().protect() )
+				app.get( "/token", ( req, res ) => res.send( req.csrfToken() ) )
+				app.post( "/submit", ( req, res ) => res.send( "ok" ) )
+
+				var tokenRes = app.inject( "/token" )
+				var token = tokenRes.body
+				var exact = app.inject( { method: "POST", url: "/submit", cookies: tokenRes.cookies, headers: { "X-CSRF-Token": token } } )
+				var upper = app.inject( { method: "POST", url: "/submit", cookies: tokenRes.cookies, headers: { "X-CSRF-Token": uCase( token ) } } )
+				var arrayBody = app.inject( { method: "POST", url: "/submit", cookies: tokenRes.cookies, body: [ token ] } )
+				assertAll( [
+					() => expect( exact.statusCode ).toBe( 200 ),
+					() => expect( uCase( token ) == token ? 200 : upper.statusCode ).toBe( uCase( token ) == token ? 200 : 403 ),
+					() => expect( arrayBody.statusCode ).withContext( "a JSON array body doesn't crash the check" ).toBe( 403 )
+				] )
+			} )
+
+		} )
+
+		describe( "WebSocket origins", function() {
+
+			beforeEach( function() {
+				variables.wsApp = new "../../models/BoxExpress"()
+				variables.wsApp.set( "log", false )
+				variables.wsApp.ws( "/same", ( connection ) => {} )
+				variables.wsApp.ws( "/any", ( connection ) => {}, { origins: "*" } )
+				variables.wsApp.ws( "/listed", ( connection ) => {}, { origins: [ "https://app.example.com" ] } )
+				variables.wsApp.listen( port = 4931, options = { block: false } )
+				sleep( 300 )
+			} )
+
+			afterEach( function() {
+				variables.wsApp.close()
+			} )
+
+			it( "allows a same-origin page and refuses a cross-site one by default", function() {
+				var sameOrigin = new "../helpers/WebSocketTestClient"().connect( "localhost", 4931, "/same", { "Origin": "http://localhost:4931" } )
+				var crossSite = new "../helpers/WebSocketTestClient"().connect( "localhost", 4931, "/same", { "Origin": "https://evil.example" } )
+				var noOrigin = new "../helpers/WebSocketTestClient"().connect( "localhost", 4931, "/same" )
+				assertAll( [
+					() => expect( sameOrigin ).toInclude( "101" ),
+					() => expect( crossSite ).toInclude( "403" ),
+					() => expect( noOrigin ).withContext( "non-browser clients send no Origin" ).toInclude( "101" )
+				] )
+			} )
+
+			it( "honors origins: * and an explicit list", function() {
+				assertAll( [
+					() => expect( new "../helpers/WebSocketTestClient"().connect( "localhost", 4931, "/any", { "Origin": "https://evil.example" } ) ).toInclude( "101" ),
+					() => expect( new "../helpers/WebSocketTestClient"().connect( "localhost", 4931, "/listed", { "Origin": "https://app.example.com" } ) ).toInclude( "101" ),
+					() => expect( new "../helpers/WebSocketTestClient"().connect( "localhost", 4931, "/listed", { "Origin": "http://localhost:4931" } ) ).withContext( "a list replaces same-origin" ).toInclude( "403" )
+				] )
+			} )
+
+		} )
+
+		describe( "Sessions", function() {
+
+			it( "regenerateSession() moves the data to a new id and forgets the old one", function() {
+				var app = new "../../models/BoxExpress"()
+				app.use( new "../../models/middleware/Session"().session( { resave: false, saveUninitialized: false } ) )
+				app.get( "/visit", ( req, res ) => { req.session.cart = "apples"; res.send( req.sessionID ) } )
+				app.get( "/login", ( req, res ) => { req.regenerateSession(); req.session.user = "ada"; res.send( req.sessionID ) } )
+				app.get( "/me", ( req, res ) => res.json( { user: req.session.user ?: "", cart: req.session.cart ?: "" } ) )
+
+				var visit = app.inject( "/visit" )
+				var login = app.inject( { url: "/login", cookies: visit.cookies } )
+				var withNew = app.inject( { url: "/me", cookies: login.cookies } ).json()
+				var withOld = app.inject( { url: "/me", cookies: visit.cookies } ).json()
+				assertAll( [
+					() => expect( login.body ).notToBe( visit.body ),
+					() => expect( login.cookies[ "connect.sid" ] ).toBe( login.body ),
+					() => expect( withNew ).toBe( { user: "ada", cart: "apples" } ),
+					() => expect( withOld ).withContext( "the pre-login id is dead" ).toBe( { user: "", cart: "" } )
+				] )
+			} )
+
+			it( "stops storing new sessions once maxSessions is reached, without disturbing existing ones", function() {
+				var app = new "../../models/BoxExpress"()
+				app.use( new "../../models/middleware/Session"().session( { maxSessions: 3 } ) )
+				app.get( "/", ( req, res ) => { req.session.n = ( req.session.n ?: 0 ) + 1; res.send( req.session.n ) } )
+
+				var first = app.inject( "/" )
+				app.inject( "/" )
+				app.inject( "/" )
+				var overflow = app.inject( "/" )
+				assertAll( [
+					() => expect( app.inject( { url: "/", cookies: first.cookies } ).body ).withContext( "an existing session still works" ).toBe( "2" ),
+					() => expect( app.inject( { url: "/", cookies: overflow.cookies } ).body ).withContext( "the fourth was never stored" ).toBe( "1" )
+				] )
+			} )
+
+		} )
+
+		describe( "Uploads", function() {
+
+			it( "keeps only a short alphanumeric extension from the client's filename", function() {
+				var dest = variables.scratch & "/uploads-" & createUUID()
+				var app = new "../../models/BoxExpress"()
+				app.use( new "../../models/middleware/Multipart"().upload( { dest: dest } ) )
+				app.post( "/u", ( req, res ) => {
+					var names = []
+					for ( var field in req.files ) {
+						names.append( listLast( req.files[ field ][ 1 ].path, "/\" ) )
+					}
+					res.json( names )
+				} )
+				var crlf = char( 13 ) & char( 10 )
+				var body = ""
+				var tricky = { a: "photo.PNG", b: "page.html/../../x", c: "noext", d: "x.verylongextension" }
+				for ( var field in tricky ) {
+					body &= "--B" & crlf & 'Content-Disposition: form-data; name="#field#"; filename="#tricky[ field ]#"' & crlf & crlf & "data" & crlf
+				}
+				body &= "--B--" & crlf
+				var names = app.inject( { method: "POST", url: "/u", headers: { "Content-Type": "multipart/form-data; boundary=B" }, body: body } ).json()
+				var written = directoryList( dest, false, "name" )
+
+				assertAll( [
+					() => expect( names.len() ).toBe( 4 ),
+					() => expect( names.filter( ( n ) => right( n, 4 ) == ".png" ).len() ).withContext( "lower-cased" ).toBe( 1 ),
+					() => expect( names.filter( ( n ) => find( ".", n ) == 0 ).len() ).withContext( "no extension kept for the other three" ).toBe( 3 ),
+					() => expect( written.len() ).withContext( "everything landed directly in dest" ).toBe( 4 )
+				] )
+			} )
+
+			it( "keeps binary file content byte-for-byte, including CRLF and dashes", function() {
+				var app = new "../../models/BoxExpress"()
+				app.use( new "../../models/middleware/Multipart"().upload() )
+				app.post( "/u", ( req, res ) => res.json( { size: req.files.f[ 1 ].size, hex: binaryEncode( req.files.f[ 1 ].buffer, "hex" ), note: req.body.note } ) )
+
+				var crlf = char( 13 ) & char( 10 )
+				var payload = createObject( "java", "java.io.ByteArrayOutputStream" ).init()
+				payload.write( ( "--B" & crlf & 'Content-Disposition: form-data; name="note"' & crlf & crlf & "héllo" & crlf ).getBytes( "UTF-8" ) )
+				payload.write( ( "--B" & crlf & 'Content-Disposition: form-data; name="f"; filename="x.bin"' & crlf & crlf ).getBytes( "UTF-8" ) )
+				// CR, LF and dashes, but not the real delimiter (CRLF--B), which a
+				// client never lets appear inside a part.
+				var fileBytes = binaryDecode( "00FF0D0A2D2D580D0A7F80", "hex" )
+				payload.write( fileBytes )
+				payload.write( ( crlf & "--B--" & crlf ).getBytes( "UTF-8" ) )
+
+				var result = app.inject( { method: "POST", url: "/u", headers: { "Content-Type": "multipart/form-data; boundary=B" }, body: payload.toByteArray() } ).json()
+				assertAll( [
+					() => expect( result.size ).toBe( 11 ),
+					() => expect( uCase( result.hex ) ).toBe( "00FF0D0A2D2D580D0A7F80" ),
+					() => expect( result.note ).toBe( "héllo" )
+				] )
+			} )
+
+		} )
+
+		describe( "Views", function() {
+
+			it( "explains that .hbs views were removed", function() {
+				var app = new "../../models/BoxExpress"()
+				app.set( "views", expandPath( "tests/fixtures/views" ) )
+				app.get( "/v", ( req, res ) => res.render( "greeting.hbs" ) )
+				app.use( ( err, req, res, next ) => res.status( 500 ).send( err.type ) )
+				expect( app.inject( "/v" ).body ).toBe( "BoxExpress.UnsupportedViewEngine" )
+			} )
+
+		} )
+
+	}
+
+}

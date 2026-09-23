@@ -71,58 +71,68 @@ class {
 	}
 
 	/**
-	 * Splits the raw body on the multipart boundary using ISO-8859-1, which maps every
-	 * byte 0-255 to exactly one char and back losslessly — safe for locating boundary/
-	 * header text without corrupting binary part bodies, which are re-extracted as bytes
-	 * from the same string.
+	 * Locates the parts by searching an ISO-8859-1 view of the body — one char
+	 * per byte, so a char index is also a byte index — and then copies each
+	 * part's content straight out of the original byte array. That keeps the
+	 * work to one search view plus the parts themselves, rather than the
+	 * several whole-body copies a split() and per-part substrings made.
 	 */
 	private function _parseMultipart( bodyBytes, boundary ) {
+		// RFC 2046 caps a boundary at 70 characters; an empty one can't delimit
+		// anything. Either way there's nothing to parse — same lenient outcome
+		// as a body with no parts.
+		if ( !len( boundary ) || len( boundary ) > 70 ) {
+			return { fields: {}, files: {} }
+		}
 		var content = createObject( "java", "java.lang.String" ).init( bodyBytes, "ISO-8859-1" )
+		var arrays = createObject( "java", "java.util.Arrays" )
+		var crlf = char( 13 ) & char( 10 )
 		var delimiter = "--" & boundary
-		var pattern = createObject( "java", "java.util.regex.Pattern" ).quote( delimiter )
-		var rawParts = content.split( pattern )
+		var nextDelimiter = crlf & delimiter
 
 		var fields = {}
 		var files = {}
 
-		for ( var i = 1; i <= rawParts.len(); i++ ) {
-			var rawPart = rawParts[ i ]
+		// regionMatches(), not startsWith( prefix, offset ): the latter doesn't
+		// reach Java's two-argument overload from BoxLang and always compares
+		// from offset 0.
+		var pos = content.indexOf( delimiter )
+		while ( pos >= 0 ) {
+			var partStart = pos + len( delimiter )
+			if ( content.regionMatches( javacast( "int", partStart ), "--", javacast( "int", 0 ), javacast( "int", 2 ) ) ) {
+				// the closing delimiter
+				break
+			}
+			if ( content.regionMatches( javacast( "int", partStart ), crlf, javacast( "int", 0 ), javacast( "int", 2 ) ) ) {
+				partStart += 2
+			}
+			var partEnd = content.indexOf( nextDelimiter, javacast( "int", partStart ) )
+			if ( partEnd < 0 ) {
+				// a truncated body: no closing delimiter for this part
+				break
+			}
+			pos = partEnd + 2
 
-			if ( !len( rawPart ) || rawPart == "--" || rawPart == "--" & char( 13 ) & char( 10 ) ) {
+			var headerEnd = content.indexOf( crlf & crlf, javacast( "int", partStart ) )
+			if ( headerEnd < 0 || headerEnd > partEnd ) {
 				continue
 			}
-
-			// mid(), not left()/right(), throughout this block — a part that's
-			// nothing but a leading CRLF, an empty header block, or an empty
-			// body (a genuinely empty file upload, or a blank field — both
-			// completely ordinary, not edge cases) all produce a zero count
-			// here, which left()/right() throw on but mid() handles fine.
-			var part = rawPart.left( 2 ) == char( 13 ) & char( 10 ) ? rawPart.mid( 3, rawPart.len() - 2 ) : rawPart
-			var headerSep = part.find( char( 13 ) & char( 10 ) & char( 13 ) & char( 10 ) )
-			if ( !headerSep ) {
-				continue
-			}
-
-			var headerBlock = part.mid( 1, headerSep - 1 )
-			var partBody = part.mid( headerSep + 4, part.len() - headerSep - 3 )
-			if ( len( partBody ) >= 2 && partBody.right( 2 ) == char( 13 ) & char( 10 ) ) {
-				partBody = partBody.mid( 1, partBody.len() - 2 )
-			}
-
-			var headers = _parsePartHeaders( headerBlock )
+			var headers = _parsePartHeaders( content.substring( javacast( "int", partStart ), javacast( "int", headerEnd ) ) )
 			var disposition = headers[ "content-disposition" ] ?: ""
 			if ( !len( disposition ) ) {
 				continue
 			}
-
 			var fieldName = _extractDispositionParam( disposition, "name" )
 			var filename = _extractDispositionParam( disposition, "filename" )
+			// An empty part body shares its header terminator's last CRLF with
+			// the next delimiter, which puts headerEnd + 4 past partEnd.
+			var bodyStart = min( headerEnd + 4, partEnd )
 
 			if ( !isNull( filename ) ) {
 				if ( !len( filename ) ) {
 					continue
 				}
-				var fileBytes = partBody.getBytes( "ISO-8859-1" )
+				var fileBytes = arrays.copyOfRange( bodyBytes, javacast( "int", bodyStart ), javacast( "int", partEnd ) )
 				var fileStruct = {
 					fieldName: fieldName,
 					filename: filename,
@@ -135,7 +145,7 @@ class {
 				}
 				files[ fieldName ].append( fileStruct )
 			} else {
-				fields[ fieldName ] = createObject( "java", "java.lang.String" ).init( partBody.getBytes( "ISO-8859-1" ), "UTF-8" )
+				fields[ fieldName ] = createObject( "java", "java.lang.String" ).init( bodyBytes, javacast( "int", bodyStart ), javacast( "int", partEnd - bodyStart ), "UTF-8" )
 			}
 		}
 
@@ -186,9 +196,16 @@ class {
 
 		for ( var fieldName in files ) {
 			for ( var fileStruct in files[ fieldName ] ) {
-				var ext = listLen( fileStruct.filename, "." ) > 1 ? "." & listLast( fileStruct.filename, "." ) : ""
+				// The extension comes from the client, so keep it only if it's a
+				// plain short alphanumeric one — anything else is dropped rather
+				// than written into a filename.
+				var ext = listLen( fileStruct.filename, "." ) > 1 ? listLast( fileStruct.filename, "." ) : ""
+				ext = reFind( "^[A-Za-z0-9]{1,10}$", ext ) ? "." & lCase( ext ) : ""
 				var generatedName = createObject( "java", "java.util.UUID" ).randomUUID().toString() & ext
-				var outPath = destPath.resolve( generatedName )
+				var outPath = destPath.resolve( generatedName ).normalize()
+				if ( !outPath.getParent().equals( destPath ) ) {
+					throw( type = "BoxExpress.MultipartError", message = "Refusing to write an upload outside the destination directory" )
+				}
 				createObject( "java", "java.nio.file.Files" ).write( outPath, fileStruct.buffer )
 				fileStruct.path = outPath.toString()
 			}

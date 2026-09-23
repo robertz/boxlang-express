@@ -12,14 +12,27 @@ class {
 		var realRootPath = rootPath.toRealPath()
 		var indexFile = options.index ?: "index.html"
 		var maxAge = options.maxAge ?: javacast( "null", "" )
+		// "ignore" (default): a path with any segment starting with "." falls
+		// through to next(), as if the file weren't there — so a stray .env or
+		// .git/ in the public directory isn't served. "deny" answers 403
+		// instead; "allow" serves them. /.well-known/ is always allowed, since
+		// ACME challenges and similar standards live there.
+		var dotfiles = lCase( options.dotfiles ?: "ignore" )
+		if ( !listFind( "ignore,deny,allow", dotfiles ) ) {
+			throw( type = "BoxExpress.InvalidOption", message = "boxExpressStatic dotfiles must be ""ignore"", ""deny"" or ""allow"", not ""#dotfiles#""" )
+		}
 		var conditional = new "../ConditionalGet"()
 		var mimeTypes = {
 			html: "text/html; charset=utf-8", htm: "text/html; charset=utf-8",
 			css: "text/css; charset=utf-8", js: "text/javascript; charset=utf-8",
+			mjs: "text/javascript; charset=utf-8", map: "application/json; charset=utf-8",
 			json: "application/json; charset=utf-8", txt: "text/plain; charset=utf-8",
+			xml: "application/xml; charset=utf-8", webmanifest: "application/manifest+json",
 			png: "image/png", jpg: "image/jpeg", jpeg: "image/jpeg", gif: "image/gif",
-			svg: "image/svg+xml", ico: "image/x-icon",
-			woff: "font/woff", woff2: "font/woff2"
+			svg: "image/svg+xml", ico: "image/x-icon", webp: "image/webp", avif: "image/avif",
+			woff: "font/woff", woff2: "font/woff2", ttf: "font/ttf", otf: "font/otf",
+			wasm: "application/wasm", pdf: "application/pdf",
+			mp4: "video/mp4", webm: "video/webm", mp3: "audio/mpeg", ogg: "audio/ogg"
 		}
 
 		return function( req, res, next ) {
@@ -28,6 +41,10 @@ class {
 			}
 
 			var relativePath = req.path.left( 1 ) == "/" ? req.path.mid( 2, req.path.len() - 1 ) : req.path
+
+			if ( dotfiles != "allow" && _hasDotSegment( relativePath ) ) {
+				return dotfiles == "deny" ? res.sendStatus( 403 ) : next()
+			}
 
 			// Mirror express.static(): a request for a directory *without* the
 			// trailing slash (e.g. "/games/void-harvest") gets redirected to the
@@ -90,4 +107,14 @@ class {
 		}
 	}
 
-}
+	private function _hasDotSegment( relativePath ) {
+		var segments = relativePath.listToArray( "/\" )
+			for ( var i = 1; i <= segments.len(); i++ ) {
+				if ( left( segments[ i ], 1 ) == "." && !( i == 1 && segments[ i ] == ".well-known" ) ) {
+					return true
+				}
+			}
+			return false
+		}
+
+	}

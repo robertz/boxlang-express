@@ -57,7 +57,7 @@ class extends="testbox.system.BaseSpec" {
 	 * topology the manual two-process demo used, just both in this one
 	 * process for speed.
 	 */
-	private function _twoNodes( secret1 = "", secret2 = "" ) {
+	private function _twoNodes( secret1 = "shared-cluster-secret-0123456789", secret2 = "shared-cluster-secret-0123456789" ) {
 		variables.app1 = new "../../models/BoxExpress"()
 		variables.app2 = new "../../models/BoxExpress"()
 		var port1 = variables.port1
@@ -261,7 +261,7 @@ class extends="testbox.system.BaseSpec" {
 				// node configured with a different value is exactly the
 				// misconfigured/rogue-node case openRelay()'s handshake
 				// check exists to catch.
-				_twoNodes( "wrong-secret", "correct-secret" )
+				_twoNodes( "wrong-secret-0123456789", "correct-secret-0123456789" )
 
 				var received = []
 				var stomp1 = new "../../models/middleware/Stomp"( { cluster: variables.app1.getClusterManager() } )

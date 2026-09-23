@@ -38,8 +38,8 @@ class extends="testbox.system.BaseSpec" {
 		try {
 			directoryDelete( variables.cacheDir, true )
 		} catch ( any e ) {
-			// Best-effort cleanup only — a leftover temp dir under the
-			// project root isn't worth failing the suite over.
+		// Best-effort cleanup only — a leftover temp dir under the
+		// project root isn't worth failing the suite over.
 		}
 	}
 
@@ -205,9 +205,26 @@ class extends="testbox.system.BaseSpec" {
 
 		describe( "ClusterManager - relay mesh", function() {
 
+			it( "refuses to open the relay without a secretKey of at least 16 characters", function() {
+				var app = new "../../models/BoxExpress"()
+				try {
+					for ( var weak in [ "", "too-short" ] ) {
+						var cm = new "../../models/cluster/ClusterManager"( app, {
+							cluster: { enabled: true, name: "ws://localhost:4979", cacheProvider: variables.cacheName, peerIdleTimeoutSeconds: 30, secretKey: weak }
+						} )
+						expect( () => cm.openRelay( function() {} ) ).withContext( "secret: '" & weak & "'" ).toThrow( "BoxExpress.ClusterConfigError" )
+						cm.shutdown()
+					}
+				} finally {
+					app.close()
+				}
+			} )
+
 			afterEach( function() {
-				variables.relayApp1.close()
-				variables.relayApp2.close()
+				if ( structKeyExists( variables, "relayApp1" ) ) {
+					variables.relayApp1.close()
+					variables.relayApp2.close()
+				}
 			} )
 
 			it( "openRelay() connects to a live peer, and relay() delivers the envelope to the peer's handler", function() {
@@ -219,10 +236,10 @@ class extends="testbox.system.BaseSpec" {
 				var peer2 = "ws://localhost:#port2#"
 
 				var cm1 = new "../../models/cluster/ClusterManager"( variables.relayApp1, {
-					cluster: { enabled: true, name: peer1, cacheProvider: variables.cacheName, peerIdleTimeoutSeconds: 30 }
+					cluster: { enabled: true, name: peer1, cacheProvider: variables.cacheName, peerIdleTimeoutSeconds: 30, secretKey: "relay-spec-secret-0123456789" }
 				} )
 				var cm2 = new "../../models/cluster/ClusterManager"( variables.relayApp2, {
-					cluster: { enabled: true, name: peer2, cacheProvider: variables.cacheName, peerIdleTimeoutSeconds: 30 }
+					cluster: { enabled: true, name: peer2, cacheProvider: variables.cacheName, peerIdleTimeoutSeconds: 30, secretKey: "relay-spec-secret-0123456789" }
 				} )
 
 				var received = []

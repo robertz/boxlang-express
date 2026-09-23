@@ -59,12 +59,13 @@ class {
 				return next()
 			}
 
-			var submitted = req.body[ fieldName ] ?: ""
+			var submitted = ( isStruct( req.body ) && isSimpleValue( req.body[ fieldName ] ?: "" ) ) ? ( req.body[ fieldName ] ?: "" ) : ""
 			if ( !len( submitted ) ) {
 				submitted = req.headers[ headerName ] ?: ""
 			}
 
-			if ( !len( submitted ) || submitted != token ) {
+			// Constant-time and case-sensitive; BoxLang's != on strings is neither.
+			if ( !len( submitted ) || !createObject( "java", "java.security.MessageDigest" ).isEqual( toString( submitted ).getBytes( "UTF-8" ), token.getBytes( "UTF-8" ) ) ) {
 				return res.status( 403 ).json( { error: true, message: "Invalid or missing CSRF token" } )
 			}
 

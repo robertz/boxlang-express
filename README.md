@@ -423,6 +423,20 @@ other control characters, or characters above Latin-1 are refused with a
 500 rather than sent, since Undertow would silently narrow those to
 8 bits.
 
+**Origin check.** A browser sends cookies with the WebSocket handshake
+whichever site the page is on, so without a check any website could open
+an authenticated socket as its visitor (cross-site WebSocket hijacking).
+`app.ws()` routes accept only same-origin pages by default — the page's
+`Origin` must match the `Host` it connected to (or `X-Forwarded-Host` from
+a trusted proxy); others get a `403` before the upgrade. Clients that send
+no `Origin` (servers, CLI tools, the cluster relay) aren't browsers and are
+let through. Change it per route or for all routes:
+
+```js
+app.ws( "/chat", handler, { origins: [ "https://app.example.com" ] } )
+app.set( "wsOrigins", "*" )   // the old allow-everything behavior
+```
+
 Path matching is exact only for now — no `:params`, no mounting under a
 `Router`. An upgrade request to a path with no registered `app.ws()`
 route falls through to the normal HTTP dispatch chain untouched, so it
@@ -858,9 +872,16 @@ startup via BoxLang's own `IObjectStore.isDistributed()` (true for
 `JDBCStore`, false for the in-memory `ConcurrentStore` default), not
 just documented as a risk. A store that reports `isDistributed() ==
 false` can still be allowed explicitly via `allowedObjectStores`.
-`secretKey`, if set, gates the relay mesh's `/__cluster` endpoint —
-every instance must share the same value, sourced from an environment
-variable, never a literal in source. `peerIdleTimeoutSeconds` (default
+`secretKey` gates the relay mesh's `/__cluster` endpoint and is required
+(at least 16 characters) whenever a STOMP broker is given
+`{ cluster: ... }` — the endpoint is on the app's public port, and
+anything that connects to it can publish to every subscriber in the
+cluster. It's compared in constant time. Every instance must share the
+same value, sourced from an environment variable, never a literal in
+source. The secret travels in a handshake header over `ws://`, so keep
+peer traffic on a private network. Clustering used only for
+`app.schedule({ clustered: true })` doesn't open the endpoint and doesn't
+need it. `peerIdleTimeoutSeconds` (default
 `30`) controls how long a missed heartbeat is tolerated before a peer
 is considered gone.
 
@@ -966,17 +987,29 @@ covered by the rest of the API).
 
 `req.ip` is always the direct TCP peer by default — safe, since a client
 can't spoof it, but wrong behind a reverse proxy (it'll report the proxy's
-IP). Opt in to trusting `X-Forwarded-For` with `app.set("trust proxy", true)`,
-same as Express; leave it off (the default) unless you actually control the
-proxy in front of this, since with it on, anyone who can reach the app
-directly can forge their reported IP.
+IP). `app.set( "trust proxy", ... )` says which proxies to believe, with the
+same meanings as Express:
+
+| Value | `req.ip` is |
+|---|---|
+| `false` (default) | the TCP peer |
+| a number, e.g. `1` | the address the nearest *n* proxies saw — counted from the right of `X-Forwarded-For`, where each proxy appends. `1` fits a single load balancer. |
+| addresses: `[ "10.0.0.0/8", "loopback" ]` | walks `X-Forwarded-For` from the right past each trusted address (IPs, CIDR ranges, `loopback`, `linklocal`, `uniquelocal`) and takes the first one that isn't |
+| `true` | the left-most `X-Forwarded-For` entry |
+
+Prefer a hop count or an address list. With `true`, the left-most entry
+is whatever the client put there when its proxy appends rather than
+replaces the header (most do), so a client can choose its own `req.ip` —
+and with it, a fresh rate-limit key per request. An invalid entry fails at
+`app.set()`, and hostnames in the header are never looked up in DNS.
 
 `req.protocol`/`req.secure`/`req.hostname` follow the same trust model.
 BoxExpress's own `HttpServer` never terminates TLS itself, so `req.protocol`
-is always `"http"` (`req.secure` always `false`) unless `trust proxy` is on
-*and* the request carries `X-Forwarded-Proto: https` — the shape you'd see
-behind a TLS-terminating reverse proxy. `req.hostname` is the `Host` header
-(or, with `trust proxy` on, `X-Forwarded-Host` if present) with any `:port`
+is always `"http"` (`req.secure` always `false`) unless the directly
+connected peer is a trusted proxy *and* the request carries
+`X-Forwarded-Proto: https` — the shape you'd see behind a TLS-terminating
+reverse proxy. `req.hostname` is the `Host` header (or, from a trusted
+proxy, `X-Forwarded-Host` if present) with any `:port`
 suffix stripped — an IPv6 host (`[::1]:3000`) is left bracketed rather than
 mangled at the first colon.
 
@@ -1185,8 +1218,8 @@ exchange (`req.rawExchange()`). See [SseEmitter.bx](models/SseEmitter.bx).
 
 ### Views (`res.render`)
 
-Renders a view from a configured views directory and sends the result as
-`text/html`. Two engines, picked by the view file's extension:
+Renders a `.bxm` view from a configured views directory and sends the
+result as `text/html`:
 
 ```js
 app.set( "views", expandPath( "./views" ) )
@@ -1194,13 +1227,9 @@ app.set( "views", expandPath( "./views" ) )
 app.get( "/greet/:name", ( req, res ) => {
 	res.render( "greeting", { name: req.params.name, age: 30 } )        // -> views/greeting.bxm
 } )
-
-app.get( "/greet-hbs/:name", ( req, res ) => {
-	res.render( "greeting.hbs", { data: { name: req.params.name } } )   // -> views/greeting.hbs
-} )
 ```
 
-**`.bxm`** — BoxLang's native server-page format (think `.cfm`), run via
+`.bxm` is BoxLang's native server-page format (think `.cfm`), run via
 `include` + `savecontent`. `views/greeting.bxm`:
 
 ```html
@@ -1213,30 +1242,15 @@ app.get( "/greet-hbs/:name", ( req, res ) => {
 `data` is whatever struct you pass as `render()`'s second argument —
 reference its keys as `data.whatever`. `#var#` interpolation only happens
 inside a `<bx:output>` block, exactly like `<cfoutput>` in classic CFML —
-plain text outside one is left as literal `#...#`, unevaluated.
-
-**`.hbs`** — [Handlebars](https://handlebarsjs.com/) via the bundled
-[handlebars.java](https://github.com/jknack/handlebars.java) (`libs/`, ~1MB —
-vendored in this repo, nothing extra to install). `views/greeting.hbs`:
-
-```handlebars
-<h1>Hello, {{data.name}}!</h1>
-<p>Things: {{#each data.things}}{{this}}{{#unless @last}}, {{/unless}}{{/each}}</p>
-```
-
-Here `data` is whatever you passed to `render()`, but as the Handlebars
-*render context* rather than a magic variable — `{{data.name}}` only works
-because the struct you passed has a top-level `data` key (see the route
-above); pass your view struct directly and reference `{{name}}` instead if
-you'd rather skip that nesting.
-
-A view with no extension gets `.bxm` appended by default — change that with
-`app.set("view engine", "hbs")` to make `.hbs` the default instead, same
-idea as Express's view-engine setting.
+plain text outside one is left as literal `#...#`, unevaluated. Output
+isn't escaped for you: wrap anything that came from a user in
+`encodeForHTML()`. A view name with no extension gets `.bxm` appended.
+Handlebars (`.hbs`) views were removed in 0.2.20; rendering one throws
+`BoxExpress.UnsupportedViewEngine`.
 
 `render()` throws if `app.set("views", ...)` was never called. `view` is
 resolved and checked against the views directory's real (symlink-resolved)
-path before either engine touches the file — a request for
+path before the file is run — a request for
 `res.render(req.query.tpl)` with `tpl=../../etc/passwd` throws instead of
 rendering whatever that resolves to, but treat any user input reaching
 `render()`'s first argument as something to validate yourself regardless;
@@ -1330,6 +1344,16 @@ handler. `boxExpressStatic()`/`StaticFiles.serve()` resolve requested files
 against the real (symlink-resolved) served directory, so a symlink placed
 inside it can't be used to read files from outside it.
 
+Static files ignore dotfiles by default: a path with any segment starting
+with `.` (`/.env`, `/.git/config`) falls through to the next handler as if
+the file weren't there, so a stray secret in the public directory isn't
+served. `{ dotfiles: "deny" }` answers `403` instead, and
+`{ dotfiles: "allow" }` serves them; `/.well-known/` is always served.
+Files are streamed from disk rather than read into memory, so a large file
+costs the same memory as a small one, `HEAD` never reads the file, and
+files over 2 GB (including `Range` requests into them) work — the same
+applies to `res.sendFile()` and `res.download()`.
+
 #### File uploads (`boxExpressUpload()` / `Multipart`)
 
 Opt-in `multipart/form-data` parsing, mirroring [multer](https://github.com/expressjs/multer)'s
@@ -1363,7 +1387,10 @@ sent — never trust it as a disk path), `contentType`, `size`, and `buffer`
 (the raw bytes, in memory). `path` is only present when `dest` was given —
 the file is saved there under a generated UUID name, never the client's own
 filename, so there's nothing for a malicious filename to path-traverse or
-collide with. Like the other parsers, the whole body is capped at 10MB by
+collide with. The extension is kept only if it's 1–10 letters or digits
+(lower-cased); anything else is dropped. Don't put `dest` inside a
+directory `boxExpressStatic()` serves: an uploaded `.html` or `.svg` would
+then be served back as a page on your origin. Like the other parsers, the whole body is capped at 10MB by
 default — override with `{ limit: bytes }`; an oversized upload gets a `413`
 before your handler runs.
 
@@ -1399,6 +1426,18 @@ saved automatically (no explicit `req.session.save()` call, since BoxLang
 structs are references: the same struct instance backs the store entry).
 `req.sessionID` is the current session's ID. Call `req.destroySession()` to
 log a user out — it removes the server-side data and expires the cookie.
+
+Call `req.regenerateSession()` when a user logs in (or gains privileges):
+it moves the session's data to a new id, deletes the old one, and sends the
+new cookie. Without it, a session id an attacker managed to plant in the
+victim's browser before login would become an authenticated session
+(session fixation).
+
+The built-in in-memory store holds at most `maxSessions` sessions (default
+`100000`); past that, new sessions aren't stored — existing ones keep
+working — and a warning is logged, so a flood of cookieless requests can't
+exhaust memory. With the default `saveUninitialized: true` every new
+visitor counts, so set it to `false` if you can.
 
 The default store is in-memory on the `Session` instance (so it doesn't
 survive a restart and isn't shared across processes) — swap in something
@@ -1603,7 +1642,7 @@ app.use( boxExpressCors( { origin: [ "https://a.com", "https://b.com" ], credent
 | `methods` | `GET,HEAD,PUT,PATCH,POST,DELETE` | `Access-Control-Allow-Methods` on a preflight response |
 | `allowedHeaders` | *(reflects the preflight's own request)* | `Access-Control-Allow-Headers` on a preflight response |
 | `exposedHeaders` | *(none)* | `Access-Control-Expose-Headers` on every response |
-| `credentials` | `false` | sets `Access-Control-Allow-Credentials: true` when `true` |
+| `credentials` | `false` | sets `Access-Control-Allow-Credentials: true` when `true`. Requires an explicit `origin` (a string or array): combined with `origin: true` or `"*"` it throws, since reflecting any origin with credentials lets every website make authenticated requests as your visitors |
 | `maxAge` | *(none)* | `Access-Control-Max-Age` (seconds) on a preflight response |
 | `preflightContinue` | `false` | call `next()` for a preflight instead of answering it directly |
 | `optionsSuccessStatus` | `204` | status code for a handled preflight |
@@ -1648,7 +1687,7 @@ trade-off most minimal in-memory rate limiters make — a client can get up
 to 2x `max` requests through right at a window boundary, in exchange for
 O(1) bookkeeping per request instead of a timestamp log per key. The
 default key is `req.ip` — same caveat as `req.ip` itself applies: behind a
-reverse proxy without `app.set("trust proxy", true)`, every request shares
+reverse proxy without `app.set("trust proxy", 1)` (or a list of the proxies' addresses), every request shares
 the proxy's own IP as the key, rate-limiting the whole app together rather
 than per client. By default the store is in-memory on each `RateLimit`
 instance (same trade-off as `Session`'s default `MemoryStore` — fine for a
@@ -1790,6 +1829,61 @@ Two more BoxLang-specific things that shaped how these are written:
   rather than `../fixtures/...`.
 
 ## Changelog
+
+**0.2.20** — security and performance pass. Several defaults changed; see
+**Behavior changes** below before upgrading.
+- **Routing:** skipping routes no longer recurses once per skipped layer.
+  An app with ~550 routes and middleware overflowed the stack on any 404
+  (500 error); 3,000+ now work, and a 404 past 500 routes went from 258 ms
+  to about 22 ms.
+- **Static files:** dotfiles are ignored by default (`/.env` was served);
+  `dotfiles: "deny" | "allow"`; `/.well-known/` always served. Added
+  `.mjs`, `.webp`, `.wasm`, `.map` and other common types (ES modules were
+  served as `application/octet-stream`).
+- **Streamed file responses:** `res.sendFile()`, `res.download()` and
+  static files stream from disk instead of reading the whole file into
+  memory per request (`HEAD` included). Range offsets past 2 GB were
+  clamped to the same wrong position; fixed.
+- **`trust proxy`** takes a hop count or a list of proxy addresses/CIDRs,
+  as in Express, so `req.ip` (and the rate-limit key) can't be picked by a
+  client behind a proxy that appends to `X-Forwarded-For`.
+  `X-Forwarded-Proto`/`-Host` are believed only from a trusted peer.
+- **Cluster relay:** `secretKey` (16+ characters) is now required to relay
+  STOMP messages — an unset one used to leave `/__cluster` open to anyone
+  who could reach the port. Compared in constant time, case-sensitively.
+- **CSRF:** the token is compared in constant time and case-sensitively
+  (BoxLang's `!=` is neither); a JSON array body no longer errors.
+- **WebSockets:** same-origin check on `app.ws()` handshakes, with
+  `{ origins }` per route and `app.set("wsOrigins")`.
+- **CORS:** `credentials: true` with `origin: true` or `"*"` now throws;
+  `Vary: Origin` is sent whenever the response depends on `Origin`.
+- **Sessions:** `req.regenerateSession()` for login; the in-memory store
+  is capped by `maxSessions` (default 100,000) and sweeps expired entries
+  at most every 30 seconds instead of scanning on every 100th write.
+- **Uploads:** the stored extension is kept only if alphanumeric and
+  ≤10 characters, with a containment check on the written path. The
+  parser copies part contents straight from the request bytes instead of
+  making several whole-body copies.
+- **Conditional GET:** `If-None-Match` handles lists, `*`, and weak tags,
+  and compares case-sensitively.
+- **Removed Handlebars views** (`.hbs`) and the vendored
+  `handlebars-4.3.1.jar`, which carried an unrelated advisory.
+- `Response` builds its status and MIME tables once per class instead of
+  per request.
+- **Behavior changes:**
+  - `.hbs` views throw `BoxExpress.UnsupportedViewEngine`; convert them to
+    `.bxm`.
+  - Dotfiles under `boxExpressStatic()` are no longer served (use
+    `dotfiles: "allow"` if you relied on it).
+  - `app.ws()` refuses cross-site browser origins (use `origins` or
+    `app.set("wsOrigins", "*")`).
+  - A clustered STOMP broker won't start without a 16+ character
+    `secretKey`.
+  - `boxExpressCors({ credentials: true })` without an explicit origin
+    throws.
+  - `trust proxy: 1` (or any number) now means one hop, as in Express, not
+    "trust everything".
+- Full suite: 403/403.
 
 **0.2.19**
 - **Request IDs:** `app.set( "requestId", true )` — `req.id`, an

@@ -25,15 +25,32 @@ class {
 		var preflightContinue = options.preflightContinue ?: false
 		var optionsSuccessStatus = options.optionsSuccessStatus ?: 204
 
+		// origin: true reflects whatever Origin a request sends. With
+		// credentials, that lets any website make authenticated requests with
+		// the visitor's cookies and read the responses — refuse the combination.
+		if ( credentials && isBoolean( originOption ) && !isNumeric( originOption ) && originOption ) {
+			throw(
+				type = "BoxExpress.InvalidOption",
+				message = "boxExpressCors: credentials: true needs an explicit origin (a string or an array of allowed origins), not origin: true, which would allow every site to make credentialed requests."
+			)
+		}
+		if ( credentials && isSimpleValue( originOption ) && originOption == "*" ) {
+			throw(
+				type = "BoxExpress.InvalidOption",
+				message = "boxExpressCors: credentials: true can't be combined with origin: ""*"" — browsers reject it; list the allowed origins instead."
+			)
+		}
+
 		return function( req, res, next ) {
 			var requestOrigin = req.headers[ "Origin" ] ?: ""
 			var allowedOrigin = _resolveOrigin( originOption, requestOrigin )
 
 			if ( len( allowedOrigin ) ) {
 				res.set( "Access-Control-Allow-Origin", allowedOrigin )
-				if ( allowedOrigin != "*" ) {
-					res.set( "Vary", "Origin" )
-				}
+			}
+			// Whenever the answer depends on the request's Origin, caches must key on it.
+			if ( !( isSimpleValue( originOption ) && originOption == "*" ) ) {
+				res.set( "Vary", "Origin" )
 			}
 
 			if ( credentials ) {

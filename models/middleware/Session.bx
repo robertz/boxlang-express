@@ -57,6 +57,9 @@ class {
 	function init() {
 		variables.entries = createObject( "java", "java.util.concurrent.ConcurrentHashMap" ).init()
 		variables.writesSinceSweep = 0
+		variables.lastSweepMs = 0
+		variables.lastFullWarningMs = 0
+		variables.maxSessions = 100000
 		return this
 	}
 
@@ -67,13 +70,19 @@ class {
 		var store = options.store ?: this
 		// options.cache is shorthand for { store: boxExpressCacheStore( name ) }
 		if ( !structKeyExists( options, "store" ) && len( options.cache ?: "" ) ) {
-		store = new "../stores/CacheStore"( options.cache, {
-		fallback: options.fallback ?: true,
-		requireDurable: options.requireDurable ?: false
-		} )
+			store = new "../stores/CacheStore"( options.cache, {
+				fallback: options.fallback ?: true,
+				requireDurable: options.requireDurable ?: false
+			} )
 		}
 		var resave = options.resave ?: true
 		var saveUninitialized = options.saveUninitialized ?: true
+		// Only bounds the built-in in-memory store: once this many sessions are
+		// held, NEW ones aren't stored (existing sessions keep working), so a
+		// flood of cookieless requests can't grow memory without limit.
+		if ( structKeyExists( options, "maxSessions" ) ) {
+			variables.maxSessions = options.maxSessions
+		}
 
 		return function( req, res, next ) {
 			var sessionId = req.cookies[ cookieName ] ?: ""
@@ -104,6 +113,19 @@ class {
 				wasDestroyed = true
 				store.destroy( sessionId )
 				res.cookie( cookieName, "", { path: cookiePath, maxAge: 0 } )
+			}
+
+			// Call at login (or any privilege change): moves the session's data
+			// to a new, unguessable id and deletes the old one, so an id an
+			// attacker managed to plant in the victim's browser before login
+			// (session fixation) never becomes an authenticated session.
+			var forceSave = false
+			req.regenerateSession = function() {
+				store.destroy( sessionId )
+				sessionId = _generateId()
+				req.sessionID = sessionId
+				forceSave = true
+				return sessionId
 			}
 
 			var hasChanged = function() {
@@ -168,9 +190,9 @@ class {
 					// when the option in front of it is actually false — with the
 					// historical always-save defaults, the boolean short-circuits
 					// before ever touching it.
-					var shouldSave = isNewSession
+					var shouldSave = forceSave || ( isNewSession
 						? ( ( saveUninitialized != false ) || hasChanged() )
-						: ( ( resave != false ) || hasChanged() )
+						: ( ( resave != false ) || hasChanged() ) )
 					if ( shouldSave ) {
 						store.set( sessionId, req.session, maxAge )
 					}
@@ -188,15 +210,26 @@ class {
 	}
 
 	function set( sessionId, data, maxAge ) {
+		if ( variables.maxSessions > 0 && variables.entries.size() >= variables.maxSessions && !variables.entries.containsKey( sessionId ) ) {
+			_sweep( true )
+			if ( variables.entries.size() >= variables.maxSessions ) {
+				var now = _now()
+				if ( now - variables.lastFullWarningMs > 60000 ) {
+					variables.lastFullWarningMs = now
+					println( "[BoxExpress] session store is full (#variables.maxSessions# sessions) — new sessions aren't being stored. Raise maxSessions, or use a cache-backed store." )
+				}
+				return
+			}
+		}
 		variables.entries.put( sessionId, { data: data, expiresAt: _now() + ( maxAge * 1000 ) } )
 
-		// Cheap amortized cleanup instead of a background thread: every 100th
-		// write sweeps expired entries so an abandoned MemoryStore doesn't
-		// grow unbounded.
+		// Cheap amortized cleanup instead of a background thread: at most one
+		// full scan every 30 seconds, triggered by writes — a scan per 100
+		// writes made cleanup cost grow with the store's size under load.
 		variables.writesSinceSweep++
 		if ( variables.writesSinceSweep >= 100 ) {
 			variables.writesSinceSweep = 0
-			_sweep()
+			_sweep( false )
 		}
 	}
 
@@ -214,8 +247,16 @@ class {
 		return rawId.replace( "-", "", "all" )
 	}
 
-	private function _sweep() {
+	private function _sweep( force ) {
 		var now = _now()
+		if ( !force && now - variables.lastSweepMs < 30000 ) {
+			return
+		}
+		// Even when forced (the store is full), don't rescan more than once a second.
+		if ( force && now - variables.lastSweepMs < 1000 ) {
+			return
+		}
+		variables.lastSweepMs = now
 		for ( var key in variables.entries.keySet().toArray() ) {
 			var entry = variables.entries.get( key )
 			if ( !isNull( entry ) && entry.expiresAt < now ) {

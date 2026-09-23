@@ -1,0 +1,169 @@
+/**
+ * Decides which X-Forwarded-* values to believe, from app.set( "trust proxy", ... ):
+ *
+ *   false (default)  trust nothing — req.ip is the TCP peer.
+ *   true             trust every hop — req.ip is the left-most X-Forwarded-For
+ *                    entry. Only safe if nothing can reach the app except
+ *                    through a proxy that overwrites the header; a proxy that
+ *                    appends to it (most do) lets the client pick req.ip.
+ *   a number n       trust the n proxies closest to the app — req.ip is the
+ *                    address the n-th of them saw, counted from the right of
+ *                    X-Forwarded-For. `1` is right for a single load balancer.
+ *   addresses        a list (array or comma-separated string) of IPs, CIDR
+ *                    ranges, or "loopback" / "linklocal" / "uniquelocal":
+ *                    walk X-Forwarded-For from the right while each hop is a
+ *                    trusted address; req.ip is the first one that isn't.
+ *
+ * Same meanings as Express's "trust proxy" setting. X-Forwarded-Proto and
+ * X-Forwarded-Host are believed only when the TCP peer itself is trusted.
+ * Entries that aren't literal IP addresses are never resolved through DNS.
+ */
+class {
+
+	function init( setting = false ) {
+		variables.mode = "none"
+		variables.hops = 0
+		variables.rules = []
+
+		if ( isNull( setting ) ) {
+			return this
+		}
+		if ( isSimpleValue( setting ) && setting.getClass().getSimpleName() == "Boolean" ) {
+			variables.mode = setting ? "all" : "none"
+		} else if ( isSimpleValue( setting ) && isNumeric( setting ) ) {
+			variables.hops = int( setting )
+			variables.mode = variables.hops > 0 ? "hops" : "none"
+		} else if ( isSimpleValue( setting ) && listFindNoCase( "true,false", trim( setting ) ) ) {
+			variables.mode = trim( setting ) == "true" ? "all" : "none"
+		} else {
+			var entries = isArray( setting ) ? setting : listToArray( setting, "," )
+			for ( var entry in entries ) {
+				if ( len( trim( entry ) ) ) {
+					variables.rules.append( _parseRule( trim( entry ) ) )
+				}
+			}
+			variables.mode = variables.rules.len() ? "list" : "none"
+		}
+		return this
+	}
+
+	function isEnabled() {
+		return variables.mode != "none"
+	}
+
+	/**
+	 * Whether the directly-connected peer is one of our proxies — the gate for
+	 * believing X-Forwarded-Proto / X-Forwarded-Host.
+	 */
+	function trustsPeer( socketAddress ) {
+		switch ( variables.mode ) {
+			case "all": return true
+			case "hops": return variables.hops >= 1
+			case "list": return _isTrusted( socketAddress )
+		}
+		return false
+	}
+
+	function clientIp( socketAddress, forwardedFor ) {
+		if ( variables.mode == "none" ) {
+			return socketAddress
+		}
+		// Nearest hop first: the TCP peer, then X-Forwarded-For right to left.
+		var addresses = [ socketAddress ]
+		var forwarded = listToArray( forwardedFor ?: "", "," )
+		for ( var i = forwarded.len(); i >= 1; i-- ) {
+			if ( len( trim( forwarded[ i ] ) ) ) {
+				addresses.append( trim( forwarded[ i ] ) )
+			}
+		}
+
+		if ( variables.mode == "all" ) {
+			return addresses[ addresses.len() ]
+		}
+		if ( variables.mode == "hops" ) {
+			return addresses[ min( variables.hops, addresses.len() - 1 ) + 1 ]
+		}
+		var index = 1
+		while ( index < addresses.len() && _isTrusted( addresses[ index ] ) ) {
+			index++
+		}
+		return addresses[ index ]
+	}
+
+	private function _parseRule( entry ) {
+		if ( listFindNoCase( "loopback,linklocal,uniquelocal", entry ) ) {
+			return { keyword: lCase( entry ) }
+		}
+		var address = listFirst( entry, "/" )
+		var parsed = _toAddress( address )
+		if ( isNull( parsed ) ) {
+			throw( type = "BoxExpress.InvalidOption", message = "trust proxy: ""#entry#"" is not an IP address, a CIDR range, or loopback/linklocal/uniquelocal" )
+		}
+		var bytes = parsed.getAddress()
+		var prefix = listLen( entry, "/" ) > 1 ? listLast( entry, "/" ) : bytes.len() * 8
+		if ( !isNumeric( prefix ) || prefix < 0 || prefix > bytes.len() * 8 ) {
+			throw( type = "BoxExpress.InvalidOption", message = "trust proxy: ""#entry#"" has an invalid prefix length" )
+		}
+		return { bytes: bytes, prefix: int( prefix ) }
+	}
+
+	private function _isTrusted( address ) {
+		var parsed = _toAddress( address )
+		if ( isNull( parsed ) ) {
+			return false
+		}
+		var bytes = parsed.getAddress()
+		for ( var rule in variables.rules ) {
+			if ( structKeyExists( rule, "keyword" ) ) {
+				if ( rule.keyword == "loopback" && parsed.isLoopbackAddress() ) return true
+				if ( rule.keyword == "linklocal" && parsed.isLinkLocalAddress() ) return true
+				if ( rule.keyword == "uniquelocal" && ( parsed.isSiteLocalAddress() || ( bytes.len() == 16 && bitAnd( _unsigned( bytes[ 1 ] ), 254 ) == 252 ) ) ) return true
+			} else if ( _inRange( bytes, rule.bytes, rule.prefix ) ) {
+				return true
+			}
+		}
+		return false
+	}
+
+	private function _inRange( bytes, ruleBytes, prefix ) {
+		if ( bytes.len() != ruleBytes.len() ) {
+			return false
+		}
+		var remaining = prefix
+		for ( var i = 1; i <= bytes.len() && remaining > 0; i++ ) {
+			var bits = min( 8, remaining )
+			var mask = bitAnd( bitSHLN( 255, 8 - bits ), 255 )
+			if ( bitAnd( _unsigned( bytes[ i ] ), mask ) != bitAnd( _unsigned( ruleBytes[ i ] ), mask ) ) {
+				return false
+			}
+			remaining -= bits
+		}
+		return true
+	}
+
+	private function _unsigned( byteValue ) {
+		return byteValue < 0 ? byteValue + 256 : byteValue
+	}
+
+	/**
+	 * A literal IPv4/IPv6 address as an InetAddress, or null. The shape check
+	 * comes first so a hostname in a forged header never triggers a DNS lookup.
+	 */
+	private function _toAddress( value ) {
+		var candidate = trim( value )
+		if ( left( candidate, 1 ) == "[" && right( candidate, 1 ) == "]" ) {
+			candidate = mid( candidate, 2, len( candidate ) - 2 )
+		}
+		var isV4 = reFind( "^[0-9]{1,3}(\.[0-9]{1,3}){3}$", candidate ) > 0
+		var isV6 = find( ":", candidate ) > 0 && reFind( "^[0-9A-Fa-f:.]+$", candidate ) > 0
+		if ( !isV4 && !isV6 ) {
+			return javacast( "null", "" )
+		}
+		try {
+			return createObject( "java", "java.net.InetAddress" ).getByName( candidate )
+		} catch ( any e ) {
+			return javacast( "null", "" )
+		}
+	}
+
+}

@@ -151,44 +151,49 @@ class {
 				return
 			}
 
-			if ( idx >= stackRef.len() ) {
-				if ( !isNull( finalNext ) ) {
-					isNull( err ) ? finalNext() : finalNext( err )
-				} else {
-					isNull( err ) ? self._final( javacast( "null", "" ), req, res ) : self._final( err, req, res )
+			// Layers that don't apply are skipped in this loop rather than by
+			// calling next() again — recursing once per skipped layer made the
+			// stack grow with the size of the route table, and a 404 in an app
+			// with a few hundred routes overflowed it.
+			var layer = ""
+			var isErrorLayer = false
+			var matchResult = ""
+			var reqSegments = ""
+			while ( true ) {
+				if ( idx >= stackRef.len() ) {
+					if ( !isNull( finalNext ) ) {
+						isNull( err ) ? finalNext() : finalNext( err )
+					} else {
+						isNull( err ) ? self._final( javacast( "null", "" ), req, res ) : self._final( err, req, res )
+					}
+					return
 				}
-				return
-			}
 
-			idx++
-			var layer = stackRef[ idx ]
-			var isErrorLayer = layer.isRouter ? false : layer.isErrorHandler
+				idx++
+				layer = stackRef[ idx ]
+				isErrorLayer = layer.isRouter ? false : layer.isErrorHandler
 
-			if ( !isNull( err ) && !isErrorLayer ) {
-				return next( err )
-			}
-			if ( isNull( err ) && isErrorLayer ) {
-				return next()
-			}
+				if ( isNull( err ) == isErrorLayer ) {
+					continue
+				}
 
-			// A HEAD request also matches a GET-registered layer (same handler
-			// Express reuses for HEAD) — a layer registered with app.head() still
-			// wins if it comes first in the stack, since that's a plain exact match.
-			var methodMatches = ( layer.method == req.method ) || ( req.method == "HEAD" && layer.method == "GET" )
-			if ( layer.method != "USE" && layer.method != "ALL" && !methodMatches ) {
-				return isNull( err ) ? next() : next( err )
-			}
+				// A HEAD request also matches a GET-registered layer (same handler
+				// Express reuses for HEAD) — a layer registered with app.head() still
+				// wins if it comes first in the stack, since that's a plain exact match.
+				var methodMatches = ( layer.method == req.method ) || ( req.method == "HEAD" && layer.method == "GET" )
+				if ( layer.method != "USE" && layer.method != "ALL" && !methodMatches ) {
+					continue
+				}
 
-			var exactMatch = ( layer.method != "USE" )
-			if ( isNull( cachedPath ) || cachedPath != req.path ) {
-				cachedPath = req.path
-				cachedSegments = _splitPath( req.path )
-			}
-			var reqSegments = cachedSegments
-			var matchResult = _matchPath( layer.pattern.segments, reqSegments, exactMatch )
-
-			if ( !matchResult.matched ) {
-				return isNull( err ) ? next() : next( err )
+				if ( isNull( cachedPath ) || compare( cachedPath, req.path ) != 0 ) {
+					cachedPath = req.path
+					cachedSegments = _splitPath( req.path )
+				}
+				reqSegments = cachedSegments
+				matchResult = _matchPath( layer.pattern.segments, reqSegments, layer.method != "USE" )
+				if ( matchResult.matched ) {
+					break
+				}
 			}
 
 			for ( var paramName in matchResult.params ) {
@@ -287,7 +292,7 @@ class {
 					return doneFn( err )
 				}
 				self._runParamHandlers( names, position + 1, req, res, doneFn )
-			}, value )
+				}, value )
 		} catch ( any e ) {
 			doneFn( e )
 		}

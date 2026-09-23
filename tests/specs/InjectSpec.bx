@@ -171,7 +171,7 @@ class extends="testbox.system.BaseSpec" {
 
 				it( "renders a view", function() {
 					var app = _app()
-					app.get( "/greet/:name", ( req, res ) => res.render( "greeting.hbs", { data: { name: req.params.name, things: [ "a" ] } } ) )
+					app.get( "/greet/:name", ( req, res ) => res.render( "greeting", { name: req.params.name, age: 30 } ) )
 					var res = app.inject( "/greet/Grace" )
 					assertAll( [
 						() => expect( res.statusCode ).toBe( 200 ),

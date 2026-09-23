@@ -12,6 +12,7 @@ class {
 		this.locals = {}
 		variables.router = new Router( this.settings )
 		variables.wsRoutes = {}
+		variables.wsOrigins = {}
 		variables.undertowServer = javacast( "null", "" )
 		variables.running = false
 		variables.reloadWatcher = javacast( "null", "" )
@@ -86,8 +87,22 @@ class {
 	 *       connection.onMessage( ( text ) => connection.send( "echo:" & text ) )
 	 *   } )
 	 */
-	function ws( path, handler ) {
+	/**
+	 * options.origins decides which web pages may open this socket from a
+	 * browser: "same-origin" (the default — the page's Origin must match the
+	 * Host it connected to), "*" (any), or an array of exact origins
+	 * ("https://app.example.com"). A browser sends cookies with the handshake
+	 * whichever site the page is on, so without this check any website could
+	 * open an authenticated socket as its visitor (cross-site WebSocket
+	 * hijacking). Clients that send no Origin header — servers, CLI tools,
+	 * the cluster relay — aren't browsers and are let through.
+	 * app.set( "wsOrigins", ... ) sets the default for every route.
+	 */
+	function ws( path, handler, options = {} ) {
 		variables.wsRoutes[ path ] = handler
+		if ( structKeyExists( options, "origins" ) ) {
+			variables.wsOrigins[ path ] = options.origins
+		}
 		return this
 	}
 
@@ -164,6 +179,10 @@ class {
 
 	function set( name, value ) {
 		this.settings[ name ] = value
+		// Parsed once here, not per request — and an invalid entry fails at startup.
+		if ( lCase( name ) == "trust proxy" ) {
+			this.settings[ "trust proxy compiled" ] = new ProxyTrust( value )
+		}
 		// Response.render() does a plain `include` on an absolute path it has already
 		// canonicalized and verified is inside this directory (its own path-traversal
 		// check). BoxLang core no longer resolves an absolute include path unless it's
@@ -275,7 +294,11 @@ class {
 			wsHandshakes.add( createObject( "java", "io.undertow.websockets.core.protocol.version13.Hybi13Handshake" ).init( wsSubprotocols, false ) )
 			var wsHandshakeHandler = createObject( "java", "io.undertow.websockets.WebSocketProtocolHandshakeHandler" ).init( wsHandshakes, wsCallbackProxy )
 
-			var upgradeRouter = new adapters.WsUpgradeRouter( wsHandshakeHandler, variables.wsRoutes, proxy )
+			var routeOrigins = {}
+			for ( var wsPath in variables.wsRoutes ) {
+				routeOrigins[ wsPath ] = variables.wsOrigins[ wsPath ] ?: ( this.settings.wsOrigins ?: "same-origin" )
+			}
+			var upgradeRouter = new adapters.WsUpgradeRouter( wsHandshakeHandler, variables.wsRoutes, proxy, routeOrigins, this.settings )
 			rootProxy = createDynamicProxy( upgradeRouter, [ "io.undertow.server.HttpHandler" ] )
 		}
 

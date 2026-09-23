@@ -25,7 +25,9 @@ class extends="testbox.system.BaseSpec" {
 				handler( _fakeReq( "GET", {} ), res, function() {} )
 
 				expect( res.getHeaders()[ "Access-Control-Allow-Origin" ] ).toBe( "*" )
-				expect( res.getHeaders().keyExists( "Vary" ) ).toBeFalse()
+				// The answer still depends on Origin (a request with one gets it
+				// reflected), so a shared cache must key on it either way.
+				expect( res.getHeaders()[ "Vary" ] ).toBe( "Origin" )
 			} )
 
 			it( "sets no Access-Control-Allow-Origin header at all when origin: false", function() {
@@ -51,11 +53,21 @@ class extends="testbox.system.BaseSpec" {
 			} )
 
 			it( "sets Access-Control-Allow-Credentials only when credentials: true", function() {
-				var handler = new "../../models/middleware/Cors"().cors( { credentials: true } )
+				var handler = new "../../models/middleware/Cors"().cors( { origin: "https://example.com", credentials: true } )
 				var res = _fakeRes()
 				handler( _fakeReq( "GET", { "Origin": "https://example.com" } ), res, function() {} )
 
 				expect( res.getHeaders()[ "Access-Control-Allow-Credentials" ] ).toBe( "true" )
+			} )
+
+			it( "refuses credentials combined with a reflect-anything or wildcard origin", function() {
+				var cors = new "../../models/middleware/Cors"()
+				assertAll( [
+					() => expect( () => cors.cors( { credentials: true } ) ).withContext( "default origin: true" ).toThrow( "BoxExpress.InvalidOption" ),
+					() => expect( () => cors.cors( { origin: true, credentials: true } ) ).toThrow( "BoxExpress.InvalidOption" ),
+					() => expect( () => cors.cors( { origin: "*", credentials: true } ) ).toThrow( "BoxExpress.InvalidOption" ),
+					() => expect( () => cors.cors( { origin: [ "https://a.com" ], credentials: true } ) ).notToThrow()
+				] )
 			} )
 
 			it( "answers a preflight OPTIONS request directly with 204 and does not call next()", function() {

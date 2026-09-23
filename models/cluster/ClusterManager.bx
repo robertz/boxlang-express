@@ -84,11 +84,24 @@ class {
 		if ( !variables.config.enabled || variables.relayOpened ) {
 			return
 		}
+		// The relay endpoint lives on the app's own public port, and anything
+		// that connects to it can publish to every subscriber in the cluster —
+		// so it is never opened without a shared secret. (Clustering used only
+		// for scheduler election doesn't open it and doesn't need one.)
+		if ( len( variables.config.secretKey ) < 16 ) {
+			throw(
+				type: "BoxExpress.ClusterConfigError",
+				message: "cluster.secretKey must be set (at least 16 characters, the same value on every node) to relay STOMP messages between instances — without it, anyone who can reach /__cluster could publish to every subscriber."
+			)
+		}
 		variables.relayOpened = true
 		variables.relayMessageHandler = messageHandler
+		var expectedSecret = variables.config.secretKey.getBytes( "UTF-8" )
 
 		variables.app.ws( "/__cluster", function( connection ) {
-			if ( len( variables.config.secretKey ) && connection.get( "x-boxexpress-cluster-secret" ) != variables.config.secretKey ) {
+			var presented = ( connection.get( "x-boxexpress-cluster-secret" ) ?: "" ).getBytes( "UTF-8" )
+			// Constant-time and case-sensitive — BoxLang's != on strings is neither.
+			if ( !createObject( "java", "java.security.MessageDigest" ).isEqual( presented, expectedSecret ) ) {
 				connection.close()
 				return
 			}

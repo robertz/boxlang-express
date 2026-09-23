@@ -57,7 +57,7 @@ class {
 			if ( !len( endPart ) || !reFind( "^[0-9]+$", endPart ) ) {
 				return { type: "full" }
 			}
-			var suffixLength = int( endPart )
+			var suffixLength = _toLong( endPart )
 			if ( suffixLength <= 0 ) {
 				return { type: "full" }
 			}
@@ -67,8 +67,8 @@ class {
 			if ( !reFind( "^[0-9]+$", startPart ) ) {
 				return { type: "full" }
 			}
-			start = int( startPart )
-			end = ( len( endPart ) && reFind( "^[0-9]+$", endPart ) ) ? int( endPart ) : totalSize - 1
+			start = _toLong( startPart )
+			end = ( len( endPart ) && reFind( "^[0-9]+$", endPart ) ) ? _toLong( endPart ) : totalSize - 1
 		}
 
 		if ( totalSize == 0 || start > end || start >= totalSize ) {
@@ -80,6 +80,19 @@ class {
 		}
 
 		return { type: "satisfiable", start: start, end: end }
+	}
+
+	/**
+	 * int() clamps at 2^31 - 1, which silently turned every offset in a file over
+	 * 2 GB into the same wrong position. Digits past 18 can't be a real offset;
+	 * treat them as "as large as possible", which the caller's bounds then reject
+	 * (for a start) or clamp (for an end).
+	 */
+	private function _toLong( digits ) {
+		if ( len( digits ) > 18 ) {
+			return createObject( "java", "java.lang.Long" ).MAX_VALUE
+		}
+		return createObject( "java", "java.lang.Long" ).parseLong( digits )
 	}
 
 }

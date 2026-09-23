@@ -27,7 +27,18 @@ class {
 	 */
 	function isNotModified( ifNoneMatch, ifModifiedSince, etag, file ) {
 		if ( len( ifNoneMatch ) ) {
-			return ifNoneMatch == etag
+			// A list of tags, or "*"; compared case-sensitively (BoxLang's == isn't),
+			// and weakly — a W/ prefix on either side doesn't prevent a match.
+			if ( trim( ifNoneMatch ) == "*" ) {
+				return true
+			}
+			var bare = reReplace( etag, "^W/", "" )
+			for ( var candidate in listToArray( ifNoneMatch, "," ) ) {
+				if ( compare( reReplace( trim( candidate ), "^W/", "" ), bare ) == 0 ) {
+					return true
+				}
+			}
+			return false
 		}
 
 		if ( !len( ifModifiedSince ) ) {
