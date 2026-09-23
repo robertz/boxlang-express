@@ -1,0 +1,308 @@
+/**
+ * Edge cases for the 0.2.20 hardening work that HardeningSpec doesn't
+ * reach: ProxyTrust's address rules, the WebSocket same-origin check behind
+ * a trusted proxy, the in-memory session store's sweep and full-store
+ * warning, malformed multipart bodies, and a client dropping a streamed
+ * download partway through.
+ */
+class extends="testbox.system.BaseSpec" {
+
+	function beforeAll() {
+		variables.scratch = expandPath( "./tmp-hardening-edge-spec-" & createUUID() )
+		directoryCreate( variables.scratch, true, true )
+	}
+
+	function afterAll() {
+		try {
+			directoryDelete( variables.scratch, true )
+		} catch ( any e ) {
+		}
+	}
+
+	private function _trust( setting ) {
+		return new "../../models/ProxyTrust"( setting )
+	}
+
+	private function _multipart( app, body, boundary = "B" ) {
+		return app.inject( { method: "POST", url: "/u", headers: { "Content-Type": "multipart/form-data; boundary=" & boundary }, body: body } )
+	}
+
+	function run() {
+
+		describe( "ProxyTrust address rules", function() {
+
+			it( "uniquelocal covers IPv4 private ranges and IPv6 fc00::/7, not public addresses", function() {
+				var trust = _trust( "uniquelocal" )
+				assertAll( [
+					() => expect( trust.trustsPeer( "10.1.2.3" ) ).toBeTrue(),
+					() => expect( trust.trustsPeer( "172.16.0.9" ) ).toBeTrue(),
+					() => expect( trust.trustsPeer( "192.168.1.1" ) ).toBeTrue(),
+					() => expect( trust.trustsPeer( "fd00::1" ) ).toBeTrue(),
+					() => expect( trust.trustsPeer( "fc12:3456::1" ) ).toBeTrue(),
+					() => expect( trust.trustsPeer( "8.8.8.8" ) ).toBeFalse(),
+					() => expect( trust.trustsPeer( "2001:db8::1" ) ).toBeFalse(),
+					() => expect( trust.trustsPeer( "172.32.0.1" ) ).withContext( "just outside 172.16/12" ).toBeFalse()
+				] )
+			} )
+
+			it( "linklocal and loopback cover their IPv4 and IPv6 forms", function() {
+				assertAll( [
+					() => expect( _trust( "linklocal" ).trustsPeer( "169.254.10.20" ) ).toBeTrue(),
+					() => expect( _trust( "linklocal" ).trustsPeer( "fe80::1" ) ).toBeTrue(),
+					() => expect( _trust( "linklocal" ).trustsPeer( "10.0.0.1" ) ).toBeFalse(),
+					() => expect( _trust( "loopback" ).trustsPeer( "127.0.0.1" ) ).toBeTrue(),
+					() => expect( _trust( "loopback" ).trustsPeer( "::1" ) ).toBeTrue(),
+					() => expect( _trust( "loopback" ).trustsPeer( "0:0:0:0:0:0:0:1" ) ).toBeTrue()
+				] )
+			} )
+
+			it( "matches IPv6 CIDR ranges, bracketed addresses, and IPv4-mapped IPv6", function() {
+				var v6 = _trust( "2001:db8::/32" )
+				var v4 = _trust( "10.0.0.0/8" )
+				assertAll( [
+					() => expect( v6.trustsPeer( "2001:db8:ffff::1" ) ).toBeTrue(),
+					() => expect( v6.trustsPeer( "[2001:db8::5]" ) ).toBeTrue(),
+					() => expect( v6.trustsPeer( "2001:db9::1" ) ).toBeFalse(),
+					() => expect( v6.trustsPeer( "10.0.0.1" ) ).withContext( "an IPv4 address never matches an IPv6 range" ).toBeFalse(),
+					() => expect( v4.trustsPeer( "::ffff:10.9.9.9" ) ).toBeTrue()
+				] )
+			} )
+
+			it( "matches a range whose prefix isn't a whole number of bytes", function() {
+				var trust = _trust( "192.168.4.0/22" )
+				assertAll( [
+					() => expect( trust.trustsPeer( "192.168.4.1" ) ).toBeTrue(),
+					() => expect( trust.trustsPeer( "192.168.7.254" ) ).toBeTrue(),
+					() => expect( trust.trustsPeer( "192.168.8.1" ) ).toBeFalse(),
+					() => expect( trust.trustsPeer( "192.168.3.255" ) ).toBeFalse()
+				] )
+			} )
+
+			it( "reads settings as Express does: strings, zero, lists with blanks, and an array", function() {
+				assertAll( [
+					() => expect( _trust( "true" ).clientIp( "10.0.0.1", "1.1.1.1, 2.2.2.2" ) ).toBe( "1.1.1.1" ),
+					() => expect( _trust( "false" ).clientIp( "10.0.0.1", "1.1.1.1" ) ).toBe( "10.0.0.1" ),
+					() => expect( _trust( 0 ).isEnabled() ).toBeFalse(),
+					() => expect( _trust( "2" ).clientIp( "10.0.0.1", "1.1.1.1, 2.2.2.2, 3.3.3.3" ) ).toBe( "2.2.2.2" ),
+					() => expect( _trust( "10.0.0.0/8, , loopback" ).clientIp( "127.0.0.1", "9.9.9.9, 10.0.0.2" ) ).toBe( "9.9.9.9" ),
+					() => expect( _trust( [ "10.0.0.1" ] ).clientIp( "10.0.0.1", "9.9.9.9" ) ).toBe( "9.9.9.9" ),
+					() => expect( _trust( "" ).isEnabled() ).withContext( "an empty list trusts nothing" ).toBeFalse()
+				] )
+			} )
+
+			it( "stops at the far end of a chain shorter than the hop count, and skips blank entries", function() {
+				assertAll( [
+					() => expect( _trust( 5 ).clientIp( "10.0.0.1", "1.1.1.1, 2.2.2.2" ) ).toBe( "1.1.1.1" ),
+					() => expect( _trust( 1 ).clientIp( "10.0.0.1", " , 2.2.2.2 ,, " ) ).toBe( "2.2.2.2" )
+				] )
+			} )
+
+			it( "treats a garbage or non-literal peer address as untrusted", function() {
+				var trust = _trust( "10.0.0.0/8" )
+				assertAll( [
+					() => expect( trust.trustsPeer( "" ) ).toBeFalse(),
+					() => expect( trust.trustsPeer( "localhost" ) ).toBeFalse(),
+					() => expect( trust.trustsPeer( "999.1.1.1" ) ).toBeFalse(),
+					() => expect( trust.clientIp( "10.0.0.1", "not an ip, 10.0.0.2" ) ).toBe( "not an ip" )
+				] )
+			} )
+
+		} )
+
+		describe( "WebSocket origin check behind a proxy", function() {
+
+			afterEach( function() {
+				variables.proxyWsApp.close()
+			} )
+
+			it( "accepts an Origin that matches X-Forwarded-Host only when the connecting peer is a trusted proxy", function() {
+				variables.proxyWsApp = new "../../models/BoxExpress"()
+				variables.proxyWsApp.set( "log", false )
+				variables.proxyWsApp.set( "trust proxy", "loopback" )
+				variables.proxyWsApp.ws( "/w", ( connection ) => {} )
+				variables.proxyWsApp.listen( port = 4932, options = { block: false } )
+				sleep( 300 )
+
+				var client = () => new "../helpers/WebSocketTestClient"()
+				assertAll( [
+					() => expect( client().connect( "localhost", 4932, "/w", { "Origin": "https://public.example", "X-Forwarded-Host": "public.example" } ) ).toInclude( "101" ),
+					() => expect( client().connect( "localhost", 4932, "/w", { "Origin": "https://evil.example", "X-Forwarded-Host": "public.example" } ) ).toInclude( "403" ),
+					() => expect( client().connect( "localhost", 4932, "/w", { "Origin": "https://public.example", "X-Forwarded-Host": "public.example, internal.local" } ) ).withContext( "first entry of a list" ).toInclude( "101" )
+				] )
+			} )
+
+			it( "ignores X-Forwarded-Host when trust proxy is off", function() {
+				variables.proxyWsApp = new "../../models/BoxExpress"()
+				variables.proxyWsApp.set( "log", false )
+				variables.proxyWsApp.ws( "/w", ( connection ) => {} )
+				variables.proxyWsApp.listen( port = 4933, options = { block: false } )
+				sleep( 300 )
+
+				var status = new "../helpers/WebSocketTestClient"().connect( "localhost", 4933, "/w", { "Origin": "https://public.example", "X-Forwarded-Host": "public.example" } )
+				expect( status ).toInclude( "403" )
+			} )
+
+		} )
+
+		describe( "In-memory session store housekeeping", function() {
+
+			it( "sweeps expired entries at most every 30 seconds, not on every 100th write", function() {
+				var store = prepareMock( new "../../models/middleware/Session"() )
+				var entries = store.$getProperty( "entries", "variables" )
+
+				store.set( "expired-1", {}, -1 )
+				for ( var i = 1; i <= 100; i++ ) {
+					store.set( "live-a" & i, {}, 60 )
+				}
+				var firstSweepRemoved = !entries.containsKey( "expired-1" )
+
+				store.set( "expired-2", {}, -1 )
+				for ( var i = 1; i <= 100; i++ ) {
+					store.set( "live-b" & i, {}, 60 )
+				}
+				assertAll( [
+					() => expect( firstSweepRemoved ).withContext( "the first 100 writes sweep" ).toBeTrue(),
+					() => expect( entries.containsKey( "expired-2" ) ).withContext( "the next 100, seconds later, don't" ).toBeTrue(),
+					() => expect( isNull( store.get( "expired-2" ) ) ).withContext( "but an expired entry is never returned" ).toBeTrue()
+				] )
+			} )
+
+			it( "frees space from expired sessions before refusing a new one when full", function() {
+				var store = new "../../models/middleware/Session"()
+				store.session( { maxSessions: 2 } )
+				store.set( "old-1", { n: 1 }, -1 )
+				store.set( "old-2", { n: 2 }, -1 )
+				store.set( "new", { n: 3 }, 60 )
+				expect( store.get( "new" ).n ).toBe( 3 )
+			} )
+
+			it( "logs the full-store warning once, not on every refused session", function() {
+				// BoxLang's println() writes to a stream captured at startup, so
+				// System.setOut() can't intercept it; the throttle's own timestamp
+				// shows how many times the warning fired instead.
+				var store = prepareMock( new "../../models/middleware/Session"() )
+				store.session( { maxSessions: 1 } )
+				store.set( "kept", {}, 60 )
+				store.set( "refused1", {}, 60 )
+				var firstWarningAt = store.$getProperty( "lastFullWarningMs", "variables" )
+				sleep( 20 )
+				for ( var i = 2; i <= 5; i++ ) {
+					store.set( "refused" & i, {}, 60 )
+				}
+				assertAll( [
+					() => expect( firstWarningAt ).withContext( "warned on the first refusal" ).toBeGT( 0 ),
+					() => expect( store.$getProperty( "lastFullWarningMs", "variables" ) ).withContext( "and not again within the minute" ).toBe( firstWarningAt ),
+					() => expect( isNull( store.get( "refused3" ) ) ).toBeTrue(),
+					() => expect( isNull( store.get( "kept" ) ) ).toBeFalse()
+				] )
+			} )
+
+		} )
+
+		describe( "Malformed multipart bodies", function() {
+
+			beforeEach( function() {
+				variables.uploadApp = new "../../models/BoxExpress"()
+				variables.uploadApp.use( new "../../models/middleware/Multipart"().upload() )
+				variables.uploadApp.post( "/u", ( req, res ) => res.json( { fields: req.body, files: structKeyArray( req.files ) } ) )
+			} )
+
+			it( "keeps the complete parts of a body cut off before its closing boundary", function() {
+				var crlf = char( 13 ) & char( 10 )
+				var body = "--B" & crlf & 'Content-Disposition: form-data; name="first"' & crlf & crlf & "one" & crlf
+					& "--B" & crlf & 'Content-Disposition: form-data; name="second"' & crlf & crlf & "two" & crlf
+					& "--B" & crlf & 'Content-Disposition: form-data; name="cut"; filename="x.bin"' & crlf & crlf & "partial da"
+				var res = _multipart( variables.uploadApp, body )
+				assertAll( [
+					() => expect( res.statusCode ).toBe( 200 ),
+					() => expect( res.json().fields ).toBe( { first: "one", second: "two" } ),
+					() => expect( res.json().files ).toBeEmpty()
+				] )
+			} )
+
+			it( "treats a boundary over 70 characters as a body with no parts", function() {
+				var boundary = repeatString( "b", 71 )
+				var crlf = char( 13 ) & char( 10 )
+				var body = "--" & boundary & crlf & 'Content-Disposition: form-data; name="a"' & crlf & crlf & "x" & crlf & "--" & boundary & "--" & crlf
+				var res = _multipart( variables.uploadApp, body, boundary )
+				assertAll( [
+					() => expect( res.statusCode ).toBe( 200 ),
+					() => expect( res.json().fields ).toBeEmpty()
+				] )
+			} )
+
+			it( "accepts a boundary of exactly 70 characters", function() {
+				var boundary = repeatString( "b", 70 )
+				var crlf = char( 13 ) & char( 10 )
+				var body = "--" & boundary & crlf & 'Content-Disposition: form-data; name="a"' & crlf & crlf & "x" & crlf & "--" & boundary & "--" & crlf
+				expect( _multipart( variables.uploadApp, body, boundary ).json().fields ).toBe( { a: "x" } )
+			} )
+
+			it( "skips a part with no header terminator, or no Content-Disposition, and keeps the rest", function() {
+				var crlf = char( 13 ) & char( 10 )
+				var body = "--B" & crlf & "Content-Type: text/plain" & crlf & crlf & "no disposition" & crlf
+					& "--B" & crlf & "garbage with no blank line" & crlf
+					& "--B" & crlf & 'Content-Disposition: form-data; name="good"' & crlf & crlf & "yes" & crlf
+					& "--B--" & crlf
+				var res = _multipart( variables.uploadApp, body )
+				assertAll( [
+					() => expect( res.statusCode ).toBe( 200 ),
+					() => expect( res.json().fields ).toBe( { good: "yes" } )
+				] )
+			} )
+
+			it( "ignores a body that never contains the boundary at all", function() {
+				var res = _multipart( variables.uploadApp, "just some bytes with no delimiter" )
+				assertAll( [
+					() => expect( res.statusCode ).toBe( 200 ),
+					() => expect( res.json().fields ).toBeEmpty()
+				] )
+			} )
+
+		} )
+
+		describe( "A client dropping a streamed download", function() {
+
+			it( "frees the request and keeps serving when the client disconnects partway through a large file", function() {
+				var dir = variables.scratch & "/public"
+				directoryCreate( dir, true, true )
+				var raf = createObject( "java", "java.io.RandomAccessFile" ).init( dir & "/big.bin", "rw" )
+				raf.setLength( javacast( "long", 268435456 ) )   // 256 MiB, sparse
+				raf.close()
+
+				var app = new "../../models/BoxExpress"()
+				app.set( "log", false )
+				app.use( new "../../models/middleware/StaticFiles"().serve( dir ) )
+				app.get( "/ping", ( req, res ) => res.send( "pong" ) )
+				app.listen( port = 4934, options = { block: false } )
+				sleep( 300 )
+				try {
+					var socket = createObject( "java", "java.net.Socket" ).init( "localhost", 4934 )
+					var crlf = char( 13 ) & char( 10 )
+					socket.getOutputStream().write( ( "GET /big.bin HTTP/1.1" & crlf & "Host: localhost" & crlf & crlf ).getBytes( "UTF-8" ) )
+					socket.getOutputStream().flush()
+					var received = socket.getInputStream().readNBytes( javacast( "int", 65536 ) )
+					socket.close()
+
+					var waited = 0
+					while ( app.getConnectorStatistics().getActiveRequests() > 0 && waited < 10000 ) {
+						sleep( 100 )
+						waited += 100
+					}
+					var ping = new "../helpers/HttpClient"().get( "http://localhost:4934/ping" )
+					assertAll( [
+						() => expect( received.len() ).withContext( "the download had started" ).toBe( 65536 ),
+						() => expect( app.getConnectorStatistics().getActiveRequests() ).withContext( "the aborted download is no longer in flight" ).toBe( 0 ),
+						() => expect( ping.statusCode ).toBe( 200 ),
+						() => expect( ping.body ).toBe( "pong" )
+					] )
+				} finally {
+					app.close()
+				}
+			} )
+
+		} )
+
+	}
+
+}
