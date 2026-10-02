@@ -3,7 +3,7 @@ name: Tests
 # Runs the TestBox suite against pinned BoxLang releases, not just "whatever
 # :cli currently floats to" — a BoxLang 1.17.0 release changed template-path
 # resolution behavior in a way that broke every res.render() call downstream
-# (see the 0.2.3 changelog entry in README.md), and nothing caught it until
+# (see the 0.2.3 changelog entry in CHANGELOG.md), and nothing caught it until
 # it reached production. This matrix would have failed on that PR.
 on:
   push:

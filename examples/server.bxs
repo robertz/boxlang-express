@@ -1,7 +1,7 @@
 /**
  * Runnable demo of the whole BoxExpress API surface. Start it with:
  *   boxlang examples/server.bxs
- * then exercise it with curl (see README.md for the full list of commands).
+ * then exercise it with curl (see docs/development.md for the full list of commands).
  */
 app = new "../models/BoxExpress"()
 bodyParsers = new "../models/middleware/BodyParsers"()

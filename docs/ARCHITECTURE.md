@@ -252,7 +252,7 @@ path), and hands the connection to that handler before resuming receives.
 `models/adapters/WsUpgradeRouter.bx` is the pre-filter in front of
 Undertow's dispatch that decides, per request, whether to route to the
 WebSocket handshake handler or straight through to the unchanged HTTP
-chain — see the `app.ws()` section of the README for the request-flow
+chain — see [websockets.md](websockets.md) for the request-flow
 details; this is the architectural "why," not a repeat of the "what."
 
 `models/middleware/Stomp.bx` is STOMP 1.2 pub/sub built entirely as a
@@ -458,7 +458,7 @@ you real debugging time:
 
 `ModuleConfig.bx`'s `this.version` tracks the **next unreleased**
 version — bumped as part of the PR that adds the feature/fix it
-describes, alongside a new heading in the README's Changelog section.
+describes, alongside a new heading in CHANGELOG.md.
 `box.json`'s version only changes via `box bump`/`box forgebox publish`,
 run separately, when an actual release happens — the two are allowed to
 be out of sync in between. Every changelog entry names the file(s)
@@ -497,8 +497,10 @@ read backward through it before asking.
 
 ## Where to look next
 
-- `README.md` — full API reference, plus the complete changelog (the
-  primary record of *why*, chronologically).
+- `README.md` — install and quickstart, plus the index of the per-feature
+  API reference pages in `docs/`.
+- `CHANGELOG.md` — the complete changelog (the primary record of *why*,
+  chronologically).
 - `plans/` — scoped-but-not-built feature designs (WebSockets, compression)
   kept as reference for when/if they're picked back up.
 - `models/` — read `BoxExpress.bx` and `Router.bx` first; everything else

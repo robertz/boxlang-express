@@ -132,10 +132,10 @@ A useful template, since it's the most common kind of contribution:
    server (`app.listen(... block: false)`), not mocks, unless the thing
    under test never touches a real exchange (see `RouterSpec.bx` for
    the one exception).
-4. A new section in **README.md** — usage example, options, and any
-   deliberate non-goals/scope limits, same shape as the existing
-   Middleware sections.
-5. A **changelog entry** in README.md under the next unreleased version
+4. A new page under **docs/** (linked from README.md's API reference
+   list) — usage example, options, and any deliberate non-goals/scope
+   limits, same shape as the existing middleware pages.
+5. A **changelog entry** in CHANGELOG.md under the next unreleased version
    heading, plus a matching bump to `ModuleConfig.bx`'s `this.version`
    (see "Versioning" below). Explain the *why*, not just the *what* —
    the changelog is the primary record of decision rationale in this
