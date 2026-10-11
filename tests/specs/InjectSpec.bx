@@ -148,6 +148,23 @@ class extends="testbox.system.BaseSpec" {
 					expect( res.statusCode ).toBe( 413 )
 				} )
 
+				it( "answers a malformed JSON body with a 400, before the route or error handler runs", function() {
+					var app = _app()
+					var seen = { handler: false, errorHandler: false }
+					app.use( new "../../models/middleware/BodyParsers"().json() )
+					app.post( "/echo", ( req, res ) => { seen.handler = true; res.json( req.body ) } )
+					app.use( ( err, req, res, next ) => { seen.errorHandler = true; res.status( 500 ).json( { error: true } ) } )
+
+					var res = app.inject( { method: "POST", url: "/echo", body: "{""unterminated"": ", headers: { "Content-Type": "application/json" } } )
+					assertAll( [
+						() => expect( res.statusCode ).toBe( 400 ),
+						() => expect( res.json().error ).toBeTrue(),
+						() => expect( res.json().message ).toBe( "Malformed JSON body" ),
+						() => expect( seen.handler ).toBeFalse(),
+						() => expect( seen.errorHandler ).toBeFalse()
+					] )
+				} )
+
 			} )
 
 			describe( "responses", function() {

@@ -58,7 +58,10 @@ app.use( boxExpressJSON( { limit: 5000000 } ) )  // 5MB
 ```
 
 A body over the limit gets a `413` response and never reaches your route
-handler. `boxExpressStatic()`/`StaticFiles.serve()` resolve requested files
+handler. A JSON body that doesn't parse gets a `400`
+(`{ error: true, message: "Malformed JSON body" }`), answered directly like
+the `413` rather than passed to error-handling middleware.
+`boxExpressStatic()`/`StaticFiles.serve()` resolve requested files
 against the real (symlink-resolved) served directory, so a symlink placed
 inside it can't be used to read files from outside it.
 

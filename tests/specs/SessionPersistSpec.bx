@@ -1,0 +1,128 @@
+/**
+ * When the session middleware writes to its store. With an out-of-process
+ * store, a write that only happens after the response has gone out can lose
+ * a race with the client's next request (fetch a CSRF token, then log in),
+ * so a changed session is written before the headers flush.
+ */
+class extends="testbox.system.BaseSpec" {
+
+	private function _app( store, options = {} ) {
+		var app = new "../../models/BoxExpress"()
+		app.use( new "../../models/middleware/Session"().session( { store: store }.append( options ) ) )
+		return app
+	}
+
+	function run() {
+
+		describe( "Session store writes", function() {
+
+			it( "writes a changed session to the store before the response is sent", function() {
+				var store = new "../helpers/RecordingSessionStore"()
+				var seen = {}
+				var app = _app( store )
+				app.post( "/login", ( req, res ) => {
+					req.session.user = "ada"
+					res.json( { ok: true } )
+					seen.writesOnceSent = store.getWrites()
+				} )
+
+				var login = app.inject( { method: "POST", url: "/login" } )
+				assertAll( [
+					() => expect( login.statusCode ).toBe( 200 ),
+					() => expect( seen.writesOnceSent ).withContext( "written while res.json() was sending" ).toBe( 1 ),
+					() => expect( store.getWrites() ).withContext( "not written again after next()" ).toBe( 1 ),
+					() => expect( store.stored( login.cookies[ "connect.sid" ] ).user ).toBe( "ada" )
+				] )
+			} )
+
+			it( "writes once per request with the default resave and saveUninitialized", function() {
+				var store = new "../helpers/RecordingSessionStore"()
+				var app = _app( store )
+				app.get( "/visit", ( req, res ) => {
+					req.session.views = ( req.session.views ?: 0 ) + 1
+					res.json( { views: req.session.views } )
+				} )
+				app.get( "/peek", ( req, res ) => res.send( "ok" ) )
+
+				var first = app.inject( "/visit" )
+				app.inject( { url: "/peek", cookies: first.cookies } )
+				expect( store.getWrites() ).toBe( 2 )
+			} )
+
+			it( "still saves a change made after the response was sent", function() {
+				var store = new "../helpers/RecordingSessionStore"()
+				var app = _app( store )
+				app.get( "/late", ( req, res ) => {
+					req.session.early = "yes"
+					res.send( "ok" )
+					req.session.late = "yes"
+				} )
+
+				var result = app.inject( "/late" )
+				var saved = store.stored( result.cookies[ "connect.sid" ] )
+				assertAll( [
+					() => expect( saved.early ).toBe( "yes" ),
+					() => expect( saved.late ).toBe( "yes" ),
+					() => expect( store.getWrites() ).toBe( 2 )
+				] )
+			} )
+
+			it( "notices a change that only differs in case after the response was sent", function() {
+				var store = new "../helpers/RecordingSessionStore"()
+				var app = _app( store )
+				app.get( "/case", ( req, res ) => {
+					req.session.token = "abc"
+					res.send( "ok" )
+					req.session.token = "ABC"
+				} )
+
+				var result = app.inject( "/case" )
+				expect( compare( store.stored( result.cookies[ "connect.sid" ] ).token, "ABC" ) ).toBe( 0 )
+			} )
+
+			it( "still sends the response when the store fails before send, and retries the save after it", function() {
+				var store = new "../helpers/RecordingSessionStore"( failingSets = 1 )
+				var app = _app( store )
+				app.get( "/login", ( req, res ) => {
+					req.session.user = "ada"
+					res.json( { ok: true } )
+				} )
+
+				var result = app.inject( "/login" )
+				assertAll( [
+					() => expect( result.statusCode ).toBe( 200 ),
+					() => expect( result.json().ok ).toBeTrue(),
+					() => expect( store.getWrites() ).toBe( 2 ),
+					() => expect( store.stored( result.cookies[ "connect.sid" ] ).user ).toBe( "ada" )
+				] )
+			} )
+
+			it( "doesn't write a new, untouched session with saveUninitialized: false", function() {
+				var store = new "../helpers/RecordingSessionStore"()
+				var app = _app( store, { saveUninitialized: false } )
+				app.get( "/look", ( req, res ) => res.send( req.session.user ?: "nobody" ) )
+
+				var result = app.inject( "/look" )
+				assertAll( [
+					() => expect( store.getWrites() ).toBe( 0 ),
+					() => expect( result.cookies ).notToHaveKey( "connect.sid" )
+				] )
+			} )
+
+			it( "doesn't bring back a destroyed session", function() {
+				var store = new "../helpers/RecordingSessionStore"()
+				var app = _app( store )
+				app.get( "/login", ( req, res ) => { req.session.user = "ada"; res.send( "in" ) } )
+				app.get( "/logout", ( req, res ) => { req.destroySession(); res.send( "out" ) } )
+
+				var login = app.inject( "/login" )
+				var sessionId = login.cookies[ "connect.sid" ]
+				app.inject( { url: "/logout", cookies: login.cookies } )
+				expect( store.stored( sessionId ) ).toBeEmpty()
+			} )
+
+		} )
+
+	}
+
+}

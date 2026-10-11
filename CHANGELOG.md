@@ -1,5 +1,24 @@
 # Changelog
 
+**0.2.21**
+- **Sessions** (`models/middleware/Session.bx`): a changed session is
+  written to the store in `res.onBeforeSend()`, before the response goes
+  out, not only after `next()` returns. With an out-of-process store the
+  old order raced the client's next request: fetch a CSRF token, then POST
+  the login form, and the POST could load the session before the token
+  was written. Feedhouse carried a workaround middleware for this. The
+  after-`next()` save stays for a chain that sent nothing, a store that
+  failed before send (logged, not thrown, since the response is already
+  marked sent), and a change made after sending, which is now compared
+  case-sensitively. Still one write per request otherwise.
+- **JSON bodies** (`models/middleware/BodyParsers.bx`): a body that
+  doesn't parse gets a `400` (`{ error: true, message: "Malformed JSON
+  body" }`) directly, like the `413` beside it, instead of passing the
+  parse exception to `next()`, where it became a `500`.
+- **Behavior change:** error-handling middleware no longer sees malformed
+  JSON; an app that turned it into its own `400` can drop that.
+- New `SessionPersistSpec`, and a malformed-body case in `InjectSpec`.
+
 **0.2.20** — security and performance pass. Several defaults changed; see
 **Behavior changes** below before upgrading.
 - **Routing:** skipping routes no longer recurses once per skipped layer.

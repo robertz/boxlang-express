@@ -1,0 +1,41 @@
+/**
+ * A session store double that copies on write, like any out-of-process store
+ * (a database, Redis) would — so a later mutation of req.session is NOT
+ * visible through it, unlike the built-in in-memory store — and counts its
+ * writes. failingSets makes that many set() calls throw first.
+ */
+class {
+
+	function init( failingSets = 0 ) {
+		variables.entries = {}
+		variables.writes = 0
+		variables.failingSets = failingSets
+		return this
+	}
+
+	function get( sessionId ) {
+		return structKeyExists( variables.entries, sessionId ) ? duplicate( variables.entries[ sessionId ] ) : javacast( "null", "" )
+	}
+
+	function set( sessionId, data, maxAge ) {
+		variables.writes++
+		if ( variables.failingSets > 0 ) {
+			variables.failingSets--
+			throw( type = "Test.StoreUnavailable", message = "store unavailable" )
+		}
+		variables.entries[ sessionId ] = duplicate( data )
+	}
+
+	function destroy( sessionId ) {
+		structDelete( variables.entries, sessionId )
+	}
+
+	function getWrites() {
+		return variables.writes
+	}
+
+	function stored( sessionId ) {
+		return structKeyExists( variables.entries, sessionId ) ? duplicate( variables.entries[ sessionId ] ) : {}
+	}
+
+}

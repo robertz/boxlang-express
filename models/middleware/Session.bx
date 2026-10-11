@@ -75,6 +75,7 @@ class {
 				requireDurable: options.requireDurable ?: false
 			} )
 		}
+		var usesMemoryStore = !structKeyExists( options, "store" ) && !len( options.cache ?: "" )
 		var resave = options.resave ?: true
 		var saveUninitialized = options.saveUninitialized ?: true
 		// Only bounds the built-in in-memory store: once this many sessions are
@@ -155,6 +156,41 @@ class {
 				} )
 			} )
 
+			var shouldSave = function() {
+				return forceSave || ( isNewSession
+					? ( ( saveUninitialized != false ) || hasChanged() )
+					: ( ( resave != false ) || hasChanged() ) )
+			}
+			var savedBeforeSend = false
+			var sentSnapshot = ""
+
+			// Saved here, before the headers flush, and not only after
+			// next() returns: by then the response has already reached the
+			// client, and with an out-of-process store a quick follow-up request
+			// (fetch a CSRF token, then POST the login form) can arrive before
+			// the write lands and load a session without the token. Registered
+			// after the cookie callback above, so it runs second. A store that
+			// throws here must not take the response down with it — _end() has
+			// already marked it sent, so an error handler couldn't answer — so
+			// the failure is logged and the save is retried after next().
+			res.onBeforeSend( function() {
+				if ( wasDestroyed || !shouldSave() ) {
+					return
+				}
+				try {
+					store.set( sessionId, req.session, maxAge )
+					savedBeforeSend = true
+					// The in-memory store holds req.session itself, so later
+					// mutations are already in it; only an out-of-process store
+					// needs the snapshot to notice them.
+					if ( !usesMemoryStore ) {
+						sentSnapshot = JSONSerialize( req.session )
+					}
+				} catch ( any e ) {
+					println( "[BoxExpress] session save before send failed, retrying after the response: " & e.message )
+				}
+			} )
+
 			// Persisted *after* the rest of the chain runs, not before — next()
 			// runs every downstream middleware/handler synchronously, and
 			// req.session is commonly mutated during that (boxExpressCsrf()
@@ -182,6 +218,11 @@ class {
 			// removed, using whatever req.session held right before the
 			// destroy — the store.destroy() call would have no lasting
 			// effect at all.
+			//
+			// Usually the onBeforeSend() save above has already written it; this
+			// covers a chain that ended without a response going out, a failed
+			// save before send, and a handler that changed req.session after
+			// sending (compared case-sensitively — BoxLang's != isn't).
 			try {
 				next()
 			} finally {
@@ -190,10 +231,11 @@ class {
 					// when the option in front of it is actually false — with the
 					// historical always-save defaults, the boolean short-circuits
 					// before ever touching it.
-					var shouldSave = forceSave || ( isNewSession
-						? ( ( saveUninitialized != false ) || hasChanged() )
-						: ( ( resave != false ) || hasChanged() ) )
-					if ( shouldSave ) {
+					if ( !savedBeforeSend ) {
+						if ( shouldSave() ) {
+							store.set( sessionId, req.session, maxAge )
+						}
+					} else if ( !usesMemoryStore && compare( JSONSerialize( req.session ), sentSnapshot ) != 0 ) {
 						store.set( sessionId, req.session, maxAge )
 					}
 				}

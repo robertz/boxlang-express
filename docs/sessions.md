@@ -28,6 +28,10 @@ app.use( session.session( { maxAge: 3600 } ) )
 `req.session` is a plain struct — read and write whatever you like on it, it's
 saved automatically (no explicit `req.session.save()` call, since BoxLang
 structs are references: the same struct instance backs the store entry).
+A changed session is written to the store just before the response is
+sent, so the client's next request finds it even with a database-backed
+store; a change made after the response has gone out is written once the
+request finishes.
 `req.sessionID` is the current session's ID. Call `req.destroySession()` to
 log a user out — it removes the server-side data and expires the cookie.
 

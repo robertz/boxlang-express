@@ -22,10 +22,13 @@ class {
 			}
 
 			if ( len( rawBody ) ) {
+				// The client's mistake, so a 400 in the same shape as the 413
+				// above — passed on with next( e ), the parse exception reached
+				// the app's error handler (or the default) as a 500.
 				try {
 					req.body = JSONDeserialize( rawBody )
 				} catch ( any e ) {
-					return next( e )
+					return res.status( 400 ).json( { error: true, message: "Malformed JSON body" } )
 				}
 			}
 			next()
