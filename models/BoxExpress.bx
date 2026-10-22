@@ -16,6 +16,9 @@ class {
 		variables.undertowServer = javacast( "null", "" )
 		variables.running = false
 		variables.reloadWatcher = javacast( "null", "" )
+		variables.reloadChild = javacast( "null", "" )
+		variables.reloadLock = javacast( "null", "" )
+		variables.reloadCommand = []
 		variables.shutdownHook = javacast( "null", "" )
 		variables.scheduler = javacast( "null", "" )
 		variables.clusterManager = javacast( "null", "" )
@@ -239,6 +242,10 @@ class {
 	 * getConnectorStatistics() below actually return something instead of null.
 	 */
 	function listen( port, callback, options = {} ) {
+		if ( ( this.settings[ "reloadOnChange" ] ?: false ) && !_isReloadChild() ) {
+			return _superviseReloads( options )
+		}
+
 		var backlog = options.backlog ?: 1024
 		var bridge = new HttpBridge( variables.router, this.settings, this.locals, variables.metricsRegistry )
 
@@ -328,8 +335,8 @@ class {
 		variables.running = true
 		_registerShutdownHook()
 
-		if ( this.settings[ "reloadOnChange" ] ?: false ) {
-			_startReloadWatcher()
+		if ( _isReloadChild() ) {
+			_exitWithSupervisor()
 		}
 
 		if ( !isNull( callback ) ) {
@@ -673,6 +680,15 @@ class {
 			variables.reloadWatcher = javacast( "null", "" )
 		}
 
+		if ( !isNull( variables.reloadLock ) ) {
+			variables.reloadLock.lock()
+			try {
+				_stopChild()
+			} finally {
+				variables.reloadLock.unlock()
+			}
+		}
+
 		if ( !isNull( variables.scheduler ) ) {
 			variables.scheduler.shutdown()
 			variables.scheduler = javacast( "null", "" )
@@ -735,11 +751,14 @@ class {
 	 */
 	private function _registerShutdownHook() {
 		var app = this
+		// A reload child is stopped on every save, so it doesn't wait for
+		// long-lived responses (an open SSE stream) unless asked to.
+		var defaultTimeoutMs = _isReloadChild() ? 0 : 5000
 		var runnable = createDynamicProxy(
 			new ThreadRunnable( function() {
 				// SIGTERM/Ctrl-C drain in-flight requests first; app.set(
 				// "shutdownTimeoutMs", 0) restores the old immediate stop.
-				app.shutdown( { timeoutMs: app.settings.shutdownTimeoutMs ?: 5000 } )
+				app.shutdown( { timeoutMs: app.settings.shutdownTimeoutMs ?: defaultTimeoutMs } )
 			} ),
 			[ "java.lang.Runnable" ]
 		)
@@ -748,53 +767,80 @@ class {
 	}
 
 	/**
-	 * Dev-mode convenience: app.set("reloadOnChange", true) watches the
-	 * current working directory for .bx/.bxs changes (via FileWatcher) and
-	 * restarts the process on save — .bxm views aren't watched, since
-	 * render()'s bx:include re-reads the template from disk on every
-	 * request, so a view edit already takes effect on the next request
-	 * with no restart needed. Deliberately separate from
-	 * app.set("env", "development") — the two are orthogonal settings, so
-	 * either can be used without the other.
+	 * Dev-mode convenience: with app.set("reloadOnChange", true), listen()
+	 * in the original process never binds the port. That process becomes a
+	 * supervisor: it starts the real server as a child process (the same
+	 * JVM invocation, marked with BOXEXPRESS_RELOAD_CHILD), watches the
+	 * working directory for .bx/.bxs changes, and on a change stops the
+	 * child and starts a new one. .bxm views aren't watched — render()
+	 * re-reads a template on every request, so a view edit needs no restart.
+	 *
+	 * The supervisor stays alive for the whole session, which is what an
+	 * earlier design (spawn a replacement, then exit) got wrong: the
+	 * process a shell, IDE or container started exited on the first save,
+	 * so Ctrl+C no longer reached the server, a supervisor saw a clean exit,
+	 * and a startup error in the new code left nothing watching for the fix.
+	 * Now the old child has exited before the new one starts, so the port
+	 * is always free, and a child that crashes is reported and replaced on
+	 * the next save.
+	 *
+	 * The script runs up to listen() in the supervisor too. Route
+	 * registration there is harmless; scheduled jobs and the cluster manager
+	 * are shut down here so they only run in the child.
 	 */
-	private function _startReloadWatcher() {
-		variables.reloadWatcher = new FileWatcher( expandPath( "." ) )
+	private function _superviseReloads( options ) {
+		if ( !isNull( variables.scheduler ) ) {
+			variables.scheduler.shutdown()
+			variables.scheduler = javacast( "null", "" )
+		}
+		if ( !isNull( variables.clusterManager ) ) {
+			variables.clusterManager.shutdown()
+			variables.clusterManager = javacast( "null", "" )
+		}
 
-		var runnable = createDynamicProxy(
-			new ThreadRunnable( function() {
-				variables.reloadWatcher.watch( function( changedPath ) {
-					println( variables.color.cyan( "[reloadOnChange] #changedPath# changed — restarting..." ) )
-					_restartProcess()
-				} )
-			} ),
-			[ "java.lang.Runnable" ]
-		)
+		variables.reloadCommand = _currentCommand()
+		variables.reloadLock = createObject( "java", "java.util.concurrent.locks.ReentrantLock" ).init()
+		variables.running = true
+		_registerShutdownHook()
 
-		var thread = createObject( "java", "java.lang.Thread" ).init( runnable )
-		thread.setDaemon( true )
-		thread.start()
+		var watchDir = expandPath( "." )
+		variables.reloadWatcher = new FileWatcher( watchDir )
+		println( variables.color.cyan( "[reloadOnChange] watching #watchDir# for .bx/.bxs changes" ) )
+		_startChild()
+
+		_startDaemon( function() {
+			variables.reloadWatcher.watch( function( changedPath ) {
+				println( variables.color.cyan( "[reloadOnChange] #changedPath# changed — restarting..." ) )
+				_restartChild()
+			} )
+		} )
+		_startDaemon( function() {
+			while ( variables.running ) {
+				sleep( 500 )
+				_reportChildExit()
+			}
+		} )
+
+		if ( options.block ?: true ) {
+			while ( variables.running ) {
+				sleep( 1000 )
+			}
+		}
+		return this
+	}
+
+	private function _isReloadChild() {
+		return !isNull( createObject( "java", "java.lang.System" ).getenv( "BOXEXPRESS_RELOAD_CHILD" ) )
 	}
 
 	/**
-	 * Replays the exact original JVM invocation (ProcessHandle.current()) to
-	 * relaunch the app, rather than assuming a fixed "boxlang <script>"
-	 * shape — this way it works whatever the entry script is named and
-	 * however it was launched (bvm-managed boxlang, a raw java -jar, custom
-	 * JVM flags, etc).
-	 *
-	 * pb.start() only has to launch the new OS process — it doesn't wait for
-	 * BoxLang to boot or the new process to bind the port, so it's safe to
-	 * call before close() releases this server. That ordering matters: if
-	 * launching the replacement fails (bad command, a transient OS resource
-	 * limit, whatever), the current server is left running and a clear error
-	 * is logged, rather than close() + exit() already having torn it down
-	 * with nothing left to replace it — previously an uncaught exception
-	 * here (on this daemon thread) silently killed the server with no
-	 * replacement and no visible explanation tying the two together.
+	 * Replays the exact original JVM invocation (ProcessHandle.current())
+	 * rather than assuming a fixed "boxlang <script>" shape, so it works
+	 * whatever the entry script is named and however it was launched
+	 * (bvm-managed boxlang, a raw java -jar, custom JVM flags).
 	 */
-	private function _restartProcess() {
+	private function _currentCommand() {
 		var info = createObject( "java", "java.lang.ProcessHandle" ).current().info()
-
 		var command = []
 		command.append( info.command().isPresent() ? info.command().get() : "boxlang" )
 		if ( info.arguments().isPresent() ) {
@@ -802,18 +848,93 @@ class {
 		} else {
 			command.append( getBaseTemplatePath() )
 		}
+		return command
+	}
 
+	private function _startChild() {
 		try {
-			var pb = createObject( "java", "java.lang.ProcessBuilder" ).init( command )
+			var pb = createObject( "java", "java.lang.ProcessBuilder" ).init( variables.reloadCommand )
 			pb.inheritIO()
-			pb.start()
+			pb.environment().put( "BOXEXPRESS_RELOAD_CHILD", "1" )
+			variables.reloadChild = pb.start()
 		} catch ( any e ) {
-			println( variables.color.red( "[reloadOnChange] Failed to restart: #e.message# — keeping the current server running." ) )
+			println( variables.color.red( "[reloadOnChange] Failed to start the app: #e.message# — waiting for a file change to retry." ) )
+		}
+	}
+
+	/**
+	 * SIGTERM first, so the child's own shutdown hook closes the server;
+	 * force-kill only if it hasn't exited 10 seconds later. Callers hold
+	 * reloadLock.
+	 */
+	private function _stopChild() {
+		if ( isNull( variables.reloadChild ) ) {
 			return
 		}
+		var child = variables.reloadChild
+		variables.reloadChild = javacast( "null", "" )
+		if ( !child.isAlive() ) {
+			return
+		}
+		var seconds = createObject( "java", "java.util.concurrent.TimeUnit" ).SECONDS
+		child.destroy()
+		if ( !child.waitFor( javacast( "long", 10 ), seconds ) ) {
+			child.destroyForcibly()
+			child.waitFor( javacast( "long", 5 ), seconds )
+		}
+	}
 
-		close()
-		createObject( "java", "java.lang.System" ).exit( 0 )
+	private function _restartChild() {
+		variables.reloadLock.lock()
+		try {
+			_stopChild()
+			if ( variables.running ) {
+				_startChild()
+			}
+		} finally {
+			variables.reloadLock.unlock()
+		}
+	}
+
+	private function _reportChildExit() {
+		variables.reloadLock.lock()
+		try {
+			if ( variables.running && !isNull( variables.reloadChild ) && !variables.reloadChild.isAlive() ) {
+				println( variables.color.yellow( "[reloadOnChange] app exited with code #variables.reloadChild.exitValue()# — waiting for a file change to restart." ) )
+				variables.reloadChild = javacast( "null", "" )
+			}
+		} finally {
+			variables.reloadLock.unlock()
+		}
+	}
+
+	/**
+	 * In a reload child: exit if the supervisor goes away (kill -9, a
+	 * crashed IDE), so a dev server is never left running with nothing
+	 * able to stop it. System.exit() runs the shutdown hook, which closes
+	 * the server.
+	 */
+	private function _exitWithSupervisor() {
+		var parent = createObject( "java", "java.lang.ProcessHandle" ).current().parent()
+		if ( !parent.isPresent() ) {
+			return
+		}
+		var supervisor = parent.get()
+		_startDaemon( function() {
+			while ( variables.running ) {
+				sleep( 1000 )
+				if ( !supervisor.isAlive() ) {
+					println( variables.color.yellow( "[reloadOnChange] supervisor process is gone — stopping." ) )
+					createObject( "java", "java.lang.System" ).exit( 0 )
+				}
+			}
+		} )
+	}
+
+	private function _startDaemon( fn ) {
+		var thread = createObject( "java", "java.lang.Thread" ).init( createDynamicProxy( new ThreadRunnable( fn ), [ "java.lang.Runnable" ] ) )
+		thread.setDaemon( true )
+		thread.start()
 	}
 
 }

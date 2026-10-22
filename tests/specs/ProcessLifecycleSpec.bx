@@ -4,10 +4,10 @@
  * they involve a real OS process boundary — a clean exit on a port conflict
  * (System.exit(1), which would kill the test runner itself if triggered
  * in-process), a real SIGTERM releasing the listening socket, and
- * reloadOnChange actually replacing the running process on a file change.
+ * reloadOnChange's supervisor restarting its child server on a file change.
  *
  * Each test spawns `boxlang` as a real subprocess (replaying the current JVM's
- * own command line, the same trick BoxExpress._restartProcess() uses) against
+ * own command line, the same trick BoxExpress._currentCommand() uses) against
  * a small generated .bxs script, and asserts on its stdout/exit code/the
  * actual TCP port — never on internal state, since these are black-box,
  * OS-level behaviors.
@@ -92,45 +92,23 @@ class extends="testbox.system.BaseSpec" {
 				}
 			} )
 
-			it( "reloadOnChange restarts the process and picks up the edited source when a watched file changes", function() {
+			it( "reloadOnChange restarts the child server with the edited source while the supervisor process stays alive", function() {
 				var port = 4403
 				var marker = "reload-test-" & createUUID()
-				var scriptPath = _writeScratchScript( marker, '
-					app = boxExpress()
-					app.set( "reloadOnChange", true )
-					app.get( "/version", ( req, res ) => res.json( { version: 1 } ) )
-					app.listen( #port#, ( p ) => println( "LISTENING_OK" ) )
-				' )
+				var scriptPath = _writeScratchScript( marker, _reloadScript( port, 1 ) )
 				var logPath = scriptPath & ".log"
 				var proc = _spawnBoxlangScript( scriptPath, logPath )
 
 				try {
-					var cameUp = _waitUntil( function() {
-						return fileExists( logPath ) && fileRead( logPath ).contains( "LISTENING_OK" )
-					}, 8000 )
-					expect( cameUp ).toBeTrue( "subprocess should have reported LISTENING_OK within 8s" )
-
+					expect( _waitForLog( logPath, "LISTENING_OK", 15000 ) ).toBeTrue( "child should have reported LISTENING_OK within 15s" )
 					var initial = _httpGetJson( "http://localhost:#port#/version" )
 					expect( initial.version ).toBe( 1 )
+					expect( initial.pid ).notToBe( proc.pid(), "the server should run in a child, not the supervisor" )
 
-					// Rewrite the watched script with a behavior change — this is the
-					// same file FileWatcher registered a watch key for, since it lives
-					// directly in the watched rootDir (the subprocess's working directory).
-					fileWrite( scriptPath, '
-						app = boxExpress()
-						app.set( "reloadOnChange", true )
-						app.get( "/version", ( req, res ) => res.json( { version: 2 } ) )
-						app.listen( #port#, ( p ) => println( "LISTENING_OK" ) )
-					' )
+					fileWrite( scriptPath, _reloadScript( port, 2 ) )
 
-					var reloaded = _waitUntil( function() {
-						try {
-							return _httpGetJson( "http://localhost:#port#/version" ).version == 2
-						} catch ( any e ) {
-							return false // port briefly unbound mid-restart — keep polling
-						}
-					}, 15000, 400 )
-					expect( reloaded ).toBeTrue( "server should serve the updated route within 15s of the file change" )
+					expect( _waitForVersion( port, 2 ) ).toBeTrue( "server should serve the updated route within 20s of the file change" )
+					expect( proc.isAlive() ).toBeTrue( "the supervisor (the process we started) must survive a reload" )
 
 					var logContents = fileRead( logPath )
 					expect( logContents ).toInclude( "[reloadOnChange]" )
@@ -140,7 +118,80 @@ class extends="testbox.system.BaseSpec" {
 				}
 			} )
 
+			it( "reloadOnChange survives a save that crashes the app at startup and recovers on the next save", function() {
+				var port = 4404
+				var marker = "reload-crash-" & createUUID()
+				var scriptPath = _writeScratchScript( marker, _reloadScript( port, 1 ) )
+				var logPath = scriptPath & ".log"
+				var proc = _spawnBoxlangScript( scriptPath, logPath )
+
+				try {
+					expect( _waitForLog( logPath, "LISTENING_OK", 15000 ) ).toBeTrue( "child should have reported LISTENING_OK within 15s" )
+
+					fileWrite( scriptPath, 'throw( "BOOM_AT_STARTUP" )' )
+					expect( _waitForLog( logPath, "app exited with code", 20000 ) ).toBeTrue( "supervisor should report the crashed child" )
+					expect( proc.isAlive() ).toBeTrue( "the supervisor must keep running after the app crashes" )
+
+					fileWrite( scriptPath, _reloadScript( port, 3 ) )
+					expect( _waitForVersion( port, 3 ) ).toBeTrue( "fixing the file should bring the server back within 20s" )
+				} finally {
+					_destroyAllMatching( marker )
+				}
+			} )
+
+			it( "SIGTERM to the reloadOnChange supervisor stops its child and releases the port", function() {
+				var port = 4405
+				var marker = "reload-sigterm-" & createUUID()
+				var scriptPath = _writeScratchScript( marker, _reloadScript( port, 1 ) )
+				var logPath = scriptPath & ".log"
+				var proc = _spawnBoxlangScript( scriptPath, logPath )
+
+				try {
+					expect( _waitForLog( logPath, "LISTENING_OK", 15000 ) ).toBeTrue( "child should have reported LISTENING_OK within 15s" )
+
+					proc.destroy() // SIGTERM to the supervisor only
+
+					var exited = proc.waitFor( 15, createObject( "java", "java.util.concurrent.TimeUnit" ).SECONDS )
+					expect( exited ).toBeTrue( "supervisor should exit within 15s of SIGTERM" )
+					expect( _waitUntil( function() {
+						return _isPortFree( port )
+					}, 5000 ) ).toBeTrue( "the child should have released the port" )
+					expect( _countMatching( marker ) ).toBe( 0, "no process for this script should be left running" )
+				} finally {
+					_destroyAllMatching( marker )
+				}
+			} )
+
 		} )
+	}
+
+	private function _reloadScript( port, version ) {
+		return '
+			app = boxExpress()
+			app.set( "reloadOnChange", true )
+			app.get( "/version", ( req, res ) => res.json( { version: #version#, pid: createObject( "java", "java.lang.ProcessHandle" ).current().pid() } ) )
+			app.listen( #port#, ( p ) => println( "LISTENING_OK" ) )
+		'
+	}
+
+	private function _waitForLog( logPath, text, timeoutMs ) {
+		var logFile = logPath
+		var needle = text
+		return _waitUntil( function() {
+			return fileExists( logFile ) && fileRead( logFile ).contains( needle )
+		}, timeoutMs )
+	}
+
+	private function _waitForVersion( port, version ) {
+		var versionUrl = "http://localhost:#port#/version"
+		var expected = version
+		return _waitUntil( function() {
+			try {
+				return _httpGetJson( versionUrl ).version == expected
+			} catch ( any e ) {
+				return false // port briefly unbound mid-restart — keep polling
+			}
+		}, 20000, 400 )
 	}
 
 	private function _writeScratchScript( name, content ) {
@@ -152,7 +203,7 @@ class extends="testbox.system.BaseSpec" {
 	/**
 	 * Spawns `boxlang <scriptPath>` by replaying the current JVM's own command
 	 * line with the trailing script argument swapped out — the same approach
-	 * BoxExpress._restartProcess() uses — so this works with however the test
+	 * BoxExpress._currentCommand() uses — so this works with however the test
 	 * suite itself was launched (bvm-managed boxlang, a raw java invocation,
 	 * custom JVM flags) without hardcoding a "boxlang" executable path.
 	 */
@@ -207,13 +258,26 @@ class extends="testbox.system.BaseSpec" {
 	}
 
 	/**
-	 * reloadOnChange replaces the process (close the old one, spawn a new one,
-	 * System.exit(0)) — our held Process handle for the *original* subprocess
-	 * exits along the way, orphaning the replacement (reparented to the OS,
-	 * same as any detached dev-server process). We can't reach it via the old
-	 * Process object, so find it by its unique marker in the command line
-	 * instead of relying on a parent/child handle.
+	 * Best-effort cleanup for a reloadOnChange test: our Process handle is the
+	 * supervisor, and its child server carries the same unique marker in its
+	 * command line, so match on that to catch both even if a test failed
+	 * part-way through a restart.
 	 */
+	private function _countMatching( marker ) {
+		var count = 0
+		var allProcs = createObject( "java", "java.lang.ProcessHandle" ).allProcesses().toArray()
+		for ( var i = 1; i <= arrayLen( allProcs ); i++ ) {
+			try {
+				var cmdLine = allProcs[ i ].info().commandLine()
+				if ( cmdLine.isPresent() && cmdLine.get().contains( marker ) && allProcs[ i ].isAlive() ) {
+					count++
+				}
+			} catch ( any e ) {
+			}
+		}
+		return count
+	}
+
 	private function _destroyAllMatching( marker ) {
 		try {
 			var allProcs = createObject( "java", "java.lang.ProcessHandle" ).allProcesses()

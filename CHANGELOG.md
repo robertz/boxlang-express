@@ -1,5 +1,36 @@
 # Changelog
 
+**0.2.22**
+- **`reloadOnChange` runs a supervisor** (`models/BoxExpress.bx`): the
+  process you start now stays alive and runs your app as a child process,
+  restarting the child on a `.bx`/`.bxs` change. Before, a restart spawned
+  a replacement and exited, so the process a shell, IDE or container
+  started was gone after the first save: Ctrl+C no longer reached the
+  server, a supervisor saw a clean exit (a container, where it was PID 1,
+  stopped outright), and a startup error in the saved code left
+  nothing watching for the fix. Now:
+  - the old child has exited before the new one starts, so the port
+    handoff no longer depends on BoxLang booting slower than `close()`;
+  - a child that crashes is reported (`app exited with code N`) and
+    started again on the next save;
+  - `SIGTERM` or Ctrl+C to the supervisor stops the child, and a child
+    whose supervisor is killed outright exits within a second;
+  - `app.schedule()` jobs and the cluster manager started before
+    `listen()` are shut down in the supervisor, so they run only in the
+    child;
+  - a reload child stops immediately on restart by default
+    (`shutdownTimeoutMs` still overrides it), so an open SSE stream
+    doesn't hold up every save.
+- **Behavior changes:** dev mode now runs two JVMs; code before
+  `app.listen()` runs in both (code after it, and the `listen()`
+  callback, only in the child). The docs also correct the watch root:
+  it is the entry script's directory, not the working directory.
+- **Docs** (`docs/auto-restart.md`): how the supervisor behaves, and
+  using `watchexec`, `nodemon` or `entr` instead of `reloadOnChange`.
+- `ProcessLifecycleSpec`: the reload test now checks the supervisor
+  survives the restart, plus new cases for crash-then-fix recovery and
+  `SIGTERM` to the supervisor.
+
 **0.2.21**
 - **Sessions** (`models/middleware/Session.bx`): a changed session is
   written to the store in `res.onBeforeSend()`, before the response goes

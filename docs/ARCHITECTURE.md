@@ -439,8 +439,8 @@ you real debugging time:
   a real exchange anyway).
 - **Subprocess tests for anything that needs a real OS boundary**
   (`ProcessLifecycleSpec.bx`) — a clean exit on port conflict, `SIGTERM`
-  releasing the socket, `reloadOnChange` actually replacing the running
-  process. These can't be tested in-process because `listen()` calls
+  releasing the socket, the `reloadOnChange` supervisor restarting and
+  stopping its child server. These can't be tested in-process because `listen()` calls
   `System.exit(1)` on a port conflict, which would kill the test runner
   itself if triggered in the same JVM — a mistake made and caught more
   than once while building this suite; if you write a new test touching

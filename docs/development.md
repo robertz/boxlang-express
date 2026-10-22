@@ -70,8 +70,9 @@ or a `pretest` script). Structure:
 - `tests/specs/ProcessLifecycleSpec.bx` — the handful of behaviors that need
   a real OS process boundary rather than an in-process `block: false`
   server: a clean exit (not a raw stack trace) on a port conflict, a real
-  `SIGTERM` releasing the socket, and `reloadOnChange` actually replacing
-  the running process. Spawns `boxlang` as a real subprocess against a
+  `SIGTERM` releasing the socket, and the `reloadOnChange` supervisor
+  restarting its child server, recovering from a crash, and stopping on
+  `SIGTERM`. Spawns `boxlang` as a real subprocess against a
   generated script and asserts on its stdout/exit code.
 - `tests/fixtures/` — a static file and a `.bxm` view the integration specs
   serve/render.
