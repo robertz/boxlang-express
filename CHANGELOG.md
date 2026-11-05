@@ -1,5 +1,13 @@
 # Changelog
 
+**0.2.23**
+- **Dependencies:** bumped the vendored `libs/undertow-core-*.jar` from
+  2.4.3.Final to 2.4.4.Final, and `wildfly-common` from 1.5.4.Final to
+  2.0.1, the version Undertow 2.4.4 is built against. wildfly-common 2.x
+  needs `smallrye-common-expression`, `-net`, `-os` and `-ref`, now
+  vendored at 2.14.0 alongside the existing smallrye-common jars. The
+  WebSocket shim is rebuilt against the new Undertow.
+
 **0.2.22**
 - **`reloadOnChange` runs a supervisor** (`models/BoxExpress.bx`): the
   process you start now stays alive and runs your app as a child process,
