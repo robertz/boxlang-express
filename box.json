@@ -28,7 +28,7 @@
     },
     "scripts":{
         "preVersion":"!boxlang run-tests.bxs",
-        "postPublish":"!git push --follow-tags"
+        "postPublish":"!git push --follow-tags && bash scripts/release.sh"
     },
     "installPaths":{
         "testbox":"testbox/"
@@ -39,6 +39,7 @@
         "examples/**",
         "run-tests.bxs",
         "testbox/**",
-        "java-src/**"
+        "java-src/**",
+        "scripts/**"
     ]
 }
