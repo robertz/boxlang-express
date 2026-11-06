@@ -1,5 +1,45 @@
 # Changelog
 
+**0.2.24**
+- **Scheduler fixes** (`models/Scheduler.bx`):
+  - A run the stall watchdog gave up on could, when it finally returned,
+    mark the job idle while its replacement was still running, so the
+    next tick started a third run alongside it — the overlap guard was
+    off for as long as that lasted. Each run now owns the job by id and
+    only the current owner can release it.
+  - A job that cancelled itself during its first `immediate: true` run
+    could beat `schedule()` to storing the timer's future; `cancel()`
+    then failed, was logged as a job failure, and the job kept running.
+    Cancellation now works whichever side gets there first.
+  - `intervalMs` is validated: anything but a whole number of
+    milliseconds, 1 or more, throws `BoxExpress.InvalidArgument`. Before,
+    the JDK rejected it only after the job was registered, leaving a
+    dead job in `getScheduledJobs()` and metrics.
+  - Job ids come from an atomic counter. Two concurrent `schedule()`
+    calls could get the same id, and the second overwrote the first,
+    leaving its timer ticking with no way to cancel it.
+  - Two concurrent first calls to `app.schedule()` could each create a
+    `Scheduler`, and jobs registered on the one that lost were never
+    reachable by `getScheduledJobs()`, metrics or `close()`. The lazy
+    creation (and `app.getClusterManager()`'s) is now locked.
+  - New `options.stallThresholdMs` overrides the stall threshold.
+  - `running` (in `getScheduledJobs()` and the
+    `boxexpress_scheduler_job_running` metric) counts runs actually in
+    flight.
+- **Cluster manager election** (`models/cluster/ClusterManager.bx`): the
+  manager claim was only written when no live manager was found and never
+  renewed, so it expired every `peerIdleTimeoutSeconds * 3` and went to
+  whichever instance checked next, and two instances checking at once
+  could both claim it and both run a clustered job. Now a live manager
+  keeps the role and renews its claim on each check and heartbeat, and
+  with no live manager every instance picks the same winner — the
+  lowest-named live election candidate — and only it writes the claim.
+  Only instances that have checked (ones with clustered jobs) are
+  candidates. See "How the manager is elected" in `docs/cluster.md`.
+- **Heartbeat interval** is a third of `peerIdleTimeoutSeconds` with a 1s
+  minimum, down from a 5s minimum that made any idle timeout under 15s
+  expire live peers between heartbeats.
+
 **0.2.23**
 - **Dependencies:** bumped the vendored `libs/undertow-core-*.jar` from
   2.4.3.Final to 2.4.4.Final, and `wildfly-common` from 1.5.4.Final to

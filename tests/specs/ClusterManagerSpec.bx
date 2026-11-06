@@ -203,6 +203,109 @@ class extends="testbox.system.BaseSpec" {
 
 		} )
 
+		describe( "ClusterManager - manager election", function() {
+
+			// Each test gets its own cache, so a manager claim or heartbeat
+			// left by another test can't influence the election.
+			beforeEach( function() {
+				variables.electionCacheName = "clusterElectionCache" & createUUID().replace( "-", "", "all" )
+				variables.electionCacheDir = expandPath( "./tmp-cluster-election-cache-" & createUUID() )
+				cacheService().createCache( variables.electionCacheName, "BoxCacheProvider", {
+					objectStore: "FileSystemStore",
+					directory: variables.electionCacheDir
+				} )
+				variables.electionApps = []
+				variables.electionCms = []
+			} )
+
+			afterEach( function() {
+				for ( var cm in variables.electionCms ) {
+					cm.shutdown()
+				}
+				for ( var app in variables.electionApps ) {
+					app.close()
+				}
+				try {
+					directoryDelete( variables.electionCacheDir, true )
+				} catch ( any e ) {
+				}
+			} )
+
+			private function _peer( name, idleTimeoutSeconds = 2 ) {
+				var app = new "../../models/BoxExpress"()
+				var cm = new "../../models/cluster/ClusterManager"( app, {
+					cluster: {
+						enabled: true, name: name, cacheProvider: variables.electionCacheName,
+						peerIdleTimeoutSeconds: idleTimeoutSeconds
+					}
+				} )
+				variables.electionApps.append( app )
+				variables.electionCms.append( cm )
+				return cm
+			}
+
+			it( "with no manager claim, a higher-named candidate defers to the lowest live candidate instead of claiming the role", function() {
+				var suffix = createUUID()
+				var low = _peer( "a-#suffix#" )
+				var high = _peer( "b-#suffix#" )
+				// Both become candidates; then drop the claim so both are
+				// deciding with no manager — the moment two instances used to
+				// both claim the role.
+				low.getManagerNode()
+				high.getManagerNode()
+				cache( variables.electionCacheName ).clear( "boxexpress-cluster-manager" )
+
+				expect( high.getManagerNode() ).toBe( "a-#suffix#" )
+				expect( high.isManager() ).toBeFalse()
+				expect( low.getManagerNode() ).toBe( "a-#suffix#" )
+				expect( low.isManager() ).toBeTrue()
+			} )
+
+			it( "an instance that has never checked who the manager is is never elected", function() {
+				var suffix = createUUID()
+				var neverChecks = _peer( "a-#suffix#" )
+				var checks = _peer( "b-#suffix#" )
+
+				expect( checks.isManager() ).toBeTrue()
+				expect( checks.getManagerNode() ).toBe( "b-#suffix#" )
+			} )
+
+			it( "a healthy manager keeps the role past the claim's expiry and when a lower-named candidate joins", function() {
+				var suffix = createUUID()
+				// 1s idle timeout: the claim expires after 3s unless renewed.
+				var manager = _peer( "b-#suffix#", 1 )
+				expect( manager.isManager() ).toBeTrue()
+
+				var other = _peer( "c-#suffix#", 1 )
+				var deadline = getTickCount() + 4000
+				var managerSeen = []
+				while ( getTickCount() < deadline ) {
+					managerSeen.append( other.getManagerNode() )
+					sleep( 200 )
+				}
+				for ( var seen in managerSeen ) {
+					expect( seen ).withContext( "manager as seen by the other instance while the manager never checked" ).toBe( "b-#suffix#" )
+				}
+
+				var lowerNamed = _peer( "a-#suffix#", 1 )
+				expect( lowerNamed.getManagerNode() ).toBe( "b-#suffix#" )
+				expect( lowerNamed.isManager() ).toBeFalse()
+			} )
+
+			it( "a peer name differing only by case is a different peer", function() {
+				var suffix = createUUID()
+				var upper = _peer( "Peer-#suffix#" )
+				var lower = _peer( "peer-#suffix#" )
+				expect( upper.getPeers() ).toInclude( "peer-#suffix#" )
+				expect( lower.getPeers() ).toInclude( "Peer-#suffix#" )
+
+				upper.getManagerNode()
+				lower.getManagerNode()
+				expect( upper.isManager() && lower.isManager() ).toBeFalse()
+			} )
+
+		} )
+
 		describe( "ClusterManager - relay mesh", function() {
 
 			it( "refuses to open the relay without a secretKey of at least 16 characters", function() {

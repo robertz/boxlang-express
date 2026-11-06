@@ -34,6 +34,13 @@ skipped entirely (not queued, not delayed) rather than letting an
 occasionally-slow job (a slow query, a network call) pile up an
 unbounded number of concurrent runs — pass `allowOverlap: true` for a
 job that's actually safe to run concurrently with itself.
+`options.clustered` runs the job on only one instance of a cluster (see
+below). `options.stallThresholdMs` overrides how long a run may stay
+active before it's treated as hung (see below).
+
+`intervalMs` must be a whole number of milliseconds, 1 or more; anything
+else throws `BoxExpress.InvalidArgument` and nothing is scheduled.
+`schedule()` is safe to call from concurrent requests.
 
 Every job's tick is driven by one shared `ScheduledExecutorService` per
 app, but each tick's actual callback runs on its own virtual thread
@@ -44,16 +51,26 @@ future ticks of that job or any other.
 
 `app.getScheduledJobs()` is an introspection getter, same pattern as
 `Stomp.bx`'s `getConnections()`/`getSubscriptions()` — a struct of live
-job state (`name`, `allowOverlap`, `running`), not a stable data API to
+job state (`name`, `allowOverlap`, `clustered`, `running`), not a stable data API to
 build app logic against. `app.close()` cancels every job and shuts the
 scheduler down, the same teardown block that already stops the reload
 watcher and the HTTP server.
 
 A job body that never returns at all (blocks forever with no timeout of
-its own) would otherwise leave that job's overlap flag stuck permanently,
-silently skipping every future tick — a watchdog forces the flag open
-again once a run has been "still active" for longer than 10x that job's
-own interval (30s floor), so one wedged run can't stall a job forever.
+its own) would otherwise leave that job marked active permanently,
+silently skipping every future tick. Once a run has been active for
+longer than its stall threshold (`options.stallThresholdMs`, default 10x
+the job's interval with a 30s minimum), the next tick logs it and starts
+a new run in its place. If the hung run does return later, it doesn't
+clear the new run's active state, so the overlap guard still holds.
+
+A job's handle can be cancelled at any time, including from inside its
+first `immediate: true` run, before `schedule()` has returned.
+
+Metrics (see [Observability](observability.md)) report each job's runs,
+failures, skipped ticks, whether it's running, and its last success.
+Skipped ticks count only overlap skips; a non-manager instance passing
+over a clustered job doesn't count as a skip.
 
 Explicit non-goals for this first version: **no cron-expression
 parsing** (fixed-interval only), **no persistence across restarts**

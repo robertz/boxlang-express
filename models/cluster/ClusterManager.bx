@@ -41,6 +41,11 @@ class {
 		variables.relayMessageHandler = javacast( "null", "" )
 		variables.presenceProvider = javacast( "null", "" )
 		variables.lastManagerSeen = ""
+		// Set the first time this instance asks who the manager is (see
+		// getManagerNode()) and published on its heartbeat, so only
+		// instances that actually run election checks — the ones with
+		// clustered jobs — are ever elected.
+		variables.electionCandidate = false
 		variables.peerConnections = {}   // peerName -> ClusterPeer, outbound only
 
 		if ( variables.config.enabled ) {
@@ -50,11 +55,16 @@ class {
 			// itself, or peer discovery would stop working the moment
 			// there's more than one node (see plans/cluster-support.md's
 			// "Open questions" on this exact point). Also reconciles the
-			// peer connection mesh once openRelay() has been called.
+			// peer connection mesh once openRelay() has been called. A third
+			// of the idle timeout, so a live peer always heartbeats well
+			// within it — a 5s floor here once made any timeout under 15s
+			// expire live peers between heartbeats, and peers that keep
+			// flickering dead split the manager election.
 			variables.reconcileJob = variables.app.schedule(
-				max( 5000, int( variables.peerIdleTimeoutSeconds * 1000 / 3 ) ),
+				max( 1000, int( variables.peerIdleTimeoutSeconds * 1000 / 3 ) ),
 				function( job ) {
 					_heartbeat()
+					_renewManagerClaim()
 					if ( variables.relayOpened ) {
 						_reconcilePeerConnections()
 					}
@@ -323,7 +333,7 @@ class {
 	 * race with another node doing the same thing for its own key.
 	 */
 	function _heartbeat() {
-		var entry = { name: variables.myPeerName, heartbeat: getEpochSeconds() }
+		var entry = { name: variables.myPeerName, heartbeat: getEpochSeconds(), candidate: variables.electionCandidate }
 		if ( !isNull( variables.presenceProvider ) ) {
 			try {
 				entry.presence = variables.presenceProvider()
@@ -357,28 +367,8 @@ class {
 	 */
 	function getPeerPresence() {
 		var result = {}
-		if ( !variables.config.enabled ) {
-			return result
-		}
-		var provider = _cacheProvider()
-		var prefixLen = len( variables.PEER_KEY_PREFIX )
-		var nowSeconds = getEpochSeconds()
-		for ( var key in provider.getKeys() ) {
-			if ( left( key, prefixLen ) != variables.PEER_KEY_PREFIX ) {
-				continue
-			}
-			try {
-				var entryResult = provider.get( key )
-				if ( !entryResult.isPresent() ) {
-					continue
-				}
-				var entry = entryResult.get()
-				if ( entry.name != variables.myPeerName && ( nowSeconds - entry.heartbeat ) <= variables.peerIdleTimeoutSeconds ) {
-					result[ entry.name ] = entry.presence ?: []
-				}
-			} catch ( any e ) {
-				println( "[ClusterManager] transient error reading peer presence, skipping: " & e.message )
-			}
+		for ( var entry in _getLivePeerEntries() ) {
+			result[ entry.name ] = entry.presence ?: []
 		}
 		return result
 	}
@@ -390,6 +380,20 @@ class {
 	 * an explicit list (see this class's own docblock for why).
 	 */
 	function getPeers() {
+		var peers = []
+		for ( var entry in _getLivePeerEntries() ) {
+			peers.append( entry.name )
+		}
+		return peers
+	}
+
+	/**
+	 * The heartbeat entries ({ name, heartbeat, candidate, presence? }) of
+	 * every live peer other than this instance. An array, not a struct
+	 * keyed by name: struct keys are case-insensitive, and two peer names
+	 * differing only by case are still two peers.
+	 */
+	function _getLivePeerEntries() {
 		if ( !variables.config.enabled ) {
 			return []
 		}
@@ -397,7 +401,7 @@ class {
 		var provider = _cacheProvider()
 		var prefixLen = len( variables.PEER_KEY_PREFIX )
 		var nowSeconds = getEpochSeconds()
-		var peers = []
+		var entries = []
 
 		for ( var key in provider.getKeys() ) {
 			if ( left( key, prefixLen ) != variables.PEER_KEY_PREFIX ) {
@@ -409,11 +413,11 @@ class {
 					continue
 				}
 				var entry = entryResult.get()
-				if ( entry.name == variables.myPeerName ) {
+				if ( compare( entry.name, variables.myPeerName ) == 0 ) {
 					continue
 				}
 				if ( ( nowSeconds - entry.heartbeat ) <= variables.peerIdleTimeoutSeconds ) {
-					peers.append( entry.name )
+					entries.append( entry )
 				}
 			} catch ( any e ) {
 				// A store like FileSystemStore can throw a transient read
@@ -428,7 +432,7 @@ class {
 			}
 		}
 
-		return peers
+		return entries
 	}
 
 	/**
@@ -445,12 +449,30 @@ class {
 	}
 
 	/**
-	 * Best-effort, racy by construction (cache().set() is a plain
-	 * overwrite, no compare-and-set — see plans/cluster-support.md's
-	 * "shared primitive" section) but self-correcting: every node
-	 * re-checks on its own next call, and a stale claim gets overwritten
-	 * once its writer's heartbeat expires. Mirrors ClusterManager.cfc's
-	 * getManagerNode() exactly.
+	 * Who the manager is, from this instance's point of view.
+	 *
+	 * The cache has no compare-and-set (see plans/cluster-support.md's
+	 * "shared primitive" section), so election can't be a "first writer
+	 * wins" claim on the manager key: two instances that both found it
+	 * empty would both write it and both run that tick of every clustered
+	 * job. Instead:
+	 *
+	 * 1. A manager whose heartbeat is still live keeps the role (sticky —
+	 *    a new instance joining doesn't take it over), and the manager
+	 *    renews the key's expiry on every check of its own, so the role
+	 *    doesn't lapse and get re-elected while its holder is healthy.
+	 * 2. With no live manager, every instance computes the same winner
+	 *    from the same heartbeat data — the lowest name, by case-sensitive
+	 *    comparison, among live election candidates — and only the winner
+	 *    writes the key. Two instances only disagree if their views of who
+	 *    is live differ, which narrows a double-run to the moment a peer's
+	 *    heartbeat crosses the idle timeout, instead of any simultaneous
+	 *    check.
+	 *
+	 * Calling this marks the instance an election candidate (published on
+	 * its heartbeat right away), so an instance that never checks — one
+	 * with no clustered jobs — is never elected and left holding a role it
+	 * never acts on.
 	 */
 	function getManagerNode() {
 		if ( !variables.config.enabled ) {
@@ -458,33 +480,78 @@ class {
 		}
 
 		try {
+			if ( !variables.electionCandidate ) {
+				variables.electionCandidate = true
+				_heartbeat()
+			}
+
 			var provider = _cacheProvider()
+			var managerTtlSeconds = variables.peerIdleTimeoutSeconds * 3
 			var currentManagerResult = provider.get( variables.MANAGER_KEY )
 			var currentManager = currentManagerResult.isPresent() ? currentManagerResult.get() : ""
-			var managerIsLive = len( currentManager ) &&
-			( currentManager == variables.myPeerName || getPeers().contains( currentManager ) )
 
-			if ( !managerIsLive ) {
-				provider.set( variables.MANAGER_KEY, variables.myPeerName, variables.peerIdleTimeoutSeconds * 3 )
+			if ( len( currentManager ) && compare( currentManager, variables.myPeerName ) == 0 ) {
+				provider.set( variables.MANAGER_KEY, variables.myPeerName, managerTtlSeconds )
 				variables.lastManagerSeen = variables.myPeerName
 				return variables.myPeerName
 			}
 
-			variables.lastManagerSeen = currentManager
-			return currentManager
+			var livePeers = _getLivePeerEntries()
+			var candidates = [ variables.myPeerName ]
+			for ( var entry in livePeers ) {
+				if ( len( currentManager ) && compare( entry.name, currentManager ) == 0 ) {
+					variables.lastManagerSeen = currentManager
+					return currentManager
+				}
+				if ( entry.candidate ?: false ) {
+					candidates.append( entry.name )
+				}
+			}
+
+			var winner = candidates[ 1 ]
+			for ( var name in candidates ) {
+				if ( compare( name, winner ) < 0 ) {
+					winner = name
+				}
+			}
+			if ( compare( winner, variables.myPeerName ) == 0 ) {
+				provider.set( variables.MANAGER_KEY, variables.myPeerName, managerTtlSeconds )
+			}
+			variables.lastManagerSeen = winner
+			return winner
 		} catch ( any e ) {
-			// Same transient-store-error concern as getPeers() above,
-			// against the one key every instance in the cluster reads
-			// and writes. Fail safe: a transient error here must never
-			// read as "I'm definitely the manager" — that's exactly the
-			// scenario a clustered job's double-run guarantee depends on
-			// not happening. Returning "" guarantees
-			// isManager()'s `getManagerNode() == myPeerName` comes back
-			// false (myPeerName is validated non-empty at construction),
-			// so the worst case is a clustered job skips one tick, not a
-			// mistaken election.
+			// Same transient-store-error concern as _getLivePeerEntries()
+			// above, against the one key every instance in the cluster
+			// reads and writes. Fail safe: a transient error here must
+			// never read as "I'm definitely the manager" — that's exactly
+			// the scenario a clustered job's double-run guarantee depends
+			// on not happening. Returning "" guarantees isManager()'s
+			// comparison against myPeerName comes back false (myPeerName
+			// is validated non-empty at construction), so the worst case
+			// is a clustered job skips one tick, not a mistaken election.
 			println( "[ClusterManager] transient error reading/writing the manager key, treating as not-manager this round: " & e.message )
 			return ""
+		}
+	}
+
+	/**
+	 * Runs from the heartbeat job, so a manager whose clustered jobs run
+	 * less often than the manager key's expiry (an hourly job) still keeps
+	 * the role between checks. Only renews a claim this instance still
+	 * holds — never overwrites another instance's.
+	 */
+	function _renewManagerClaim() {
+		if ( !variables.electionCandidate ) {
+			return
+		}
+		try {
+			var provider = _cacheProvider()
+			var currentManagerResult = provider.get( variables.MANAGER_KEY )
+			if ( currentManagerResult.isPresent() && compare( currentManagerResult.get(), variables.myPeerName ) == 0 ) {
+				provider.set( variables.MANAGER_KEY, variables.myPeerName, variables.peerIdleTimeoutSeconds * 3 )
+			}
+		} catch ( any e ) {
+			println( "[ClusterManager] transient error renewing the manager key: " & e.message )
 		}
 	}
 
@@ -498,7 +565,7 @@ class {
 		if ( !variables.config.enabled ) {
 			return true
 		}
-		return getManagerNode() == variables.myPeerName
+		return compare( getManagerNode(), variables.myPeerName ) == 0
 	}
 
 	/**
@@ -520,7 +587,7 @@ class {
 			metrics.append( {
 				name: "boxexpress_cluster_is_manager", type: "gauge",
 				help: "1 if this instance was the elected manager at the last election check.",
-				samples: [ { labels: {}, value: variables.lastManagerSeen == variables.myPeerName ? 1 : 0 } ]
+				samples: [ { labels: {}, value: compare( variables.lastManagerSeen, variables.myPeerName ) == 0 ? 1 : 0 } ]
 			} )
 		}
 		return metrics

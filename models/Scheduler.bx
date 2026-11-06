@@ -40,7 +40,11 @@ class {
 		variables.tickExecutor = createObject( "java", "java.util.concurrent.Executors" ).newSingleThreadScheduledExecutor()
 		variables.taskExecutor = createObject( "java", "java.util.concurrent.Executors" ).newVirtualThreadPerTaskExecutor()
 		variables.jobs = {}
-		variables.jobCounter = 0
+		// Atomic so two requests calling app.schedule() at the same moment
+		// can't both be handed the same job id — the second would overwrite
+		// the first's entry and orphan its timer, leaving it ticking with no
+		// way to cancel it.
+		variables.jobCounter = createObject( "java", "java.util.concurrent.atomic.AtomicLong" ).init( 0 )
 		return this
 	}
 
@@ -64,7 +68,7 @@ class {
 	 * options.allowOverlap (default false) — by default, a tick is
 	 * skipped entirely (not queued, not delayed — just skipped) if the
 	 * previous run of this same job hasn't finished yet, claimed
-	 * atomically via an AtomicBoolean so the tick thread and whichever
+	 * atomically via a compare-and-set on the job's current run id so the tick thread and whichever
 	 * virtual thread is still running the previous job body can't both
 	 * think they own the same tick. Skip-by-default exists so a job that
 	 * occasionally runs long (a slow query, a network call) doesn't pile
@@ -79,10 +83,23 @@ class {
 	 * "run until some condition, then stop" job) doesn't need to hang
 	 * onto the return value of schedule() to do it. A callback declared
 	 * with no parameters just ignores it.
+	 *
+	 * options.stallThresholdMs overrides how long a run may stay active
+	 * before the next tick treats it as hung and starts a new run in its
+	 * place (default 10x intervalMs, 30s minimum) — see _runTick.
+	 *
+	 * intervalMs must be a whole number of milliseconds, 1 or more, and
+	 * stallThresholdMs 1 or more — anything else throws
+	 * BoxExpress.InvalidArgument before the job is registered.
 	 */
 	function schedule( intervalMs, callback, options = {} ) {
-		variables.jobCounter++
-		var jobId = "job-" & variables.jobCounter
+		if ( !isNumeric( intervalMs ) || intervalMs < 1 || intervalMs != int( intervalMs ) ) {
+			throw( type = "BoxExpress.InvalidArgument", message = "schedule() intervalMs must be a whole number of milliseconds, 1 or more, not ""#isSimpleValue( intervalMs ) ? intervalMs : "[complex value]"#""" )
+		}
+		if ( structKeyExists( options, "stallThresholdMs" ) && ( !isNumeric( options.stallThresholdMs ) || options.stallThresholdMs < 1 ) ) {
+			throw( type = "BoxExpress.InvalidArgument", message = "schedule() options.stallThresholdMs must be a number of milliseconds, 1 or more" )
+		}
+		var jobId = "job-" & variables.jobCounter.incrementAndGet()
 		var jobName = options.name ?: jobId
 		var allowOverlap = options.allowOverlap ?: false
 		var immediate = options.immediate ?: false
@@ -102,7 +119,22 @@ class {
 			allowOverlap: allowOverlap,
 			clustered: clustered,
 			handle: handle,
-			runningFlag: createObject( "java", "java.util.concurrent.atomic.AtomicBoolean" ).init( false ),
+			// Id of the run that currently owns this job (0 = idle), for the
+			// non-overlap guard. A run only releases ownership if it still
+			// holds it (compareAndSet( myRunId, 0 )), so a run the stall
+			// watchdog in _runTick gave up on can't, when it finally returns,
+			// mark the job idle while its replacement is still going.
+			currentRunId: createObject( "java", "java.util.concurrent.atomic.AtomicLong" ).init( 0 ),
+			nextRunId: createObject( "java", "java.util.concurrent.atomic.AtomicLong" ).init( 0 ),
+			// Runs actually in flight — what getJobs()/getMetrics() report as
+			// "running", accurate even with allowOverlap or a stalled run.
+			activeRuns: createObject( "java", "java.util.concurrent.atomic.AtomicInteger" ).init( 0 ),
+			// cancel() can run before scheduleAtFixedRate() has returned the
+			// future — an immediate: true job that cancels itself on its first
+			// run. Both sides are volatile so either cancel() sees the future,
+			// or schedule() sees the cancelled flag and cancels it itself.
+			cancelled: createObject( "java", "java.util.concurrent.atomic.AtomicBoolean" ).init( false ),
+			futureRef: createObject( "java", "java.util.concurrent.atomic.AtomicReference" ).init(),
 			// Counters for getMetrics() — AtomicLongs, since a job with allowOverlap
 			// can update them from several virtual threads at once.
 			runs: createObject( "java", "java.util.concurrent.atomic.AtomicLong" ).init( 0 ),
@@ -114,12 +146,12 @@ class {
 			// A job body that never returns (blocks forever on some call with
 			// no timeout of its own — the exact way a stalled WebSocket send
 			// has actually been observed to hang, see _runTick's watchdog
-			// below) would otherwise leave runningFlag stuck true forever,
+			// below) would otherwise leave the job marked active forever,
 			// silently skipping every future tick permanently. Scaled off
 			// this job's own interval (so an hourly job isn't declared
 			// stuck after 30s of genuine work) with a floor so a
 			// sub-second job still gets a reasonable grace window.
-			stallThresholdMs: max( intervalMs * 10, 30000 )
+			stallThresholdMs: options.stallThresholdMs ?: max( intervalMs * 10, 30000 )
 		}
 
 		var tickRunnable = createDynamicProxy(
@@ -129,13 +161,18 @@ class {
 			[ "java.lang.Runnable" ]
 		)
 
+		var job = variables.jobs[ jobId ]
 		var initialDelayMs = immediate ? 0 : intervalMs
-		variables.jobs[ jobId ].future = variables.tickExecutor.scheduleAtFixedRate(
+		var future = variables.tickExecutor.scheduleAtFixedRate(
 			tickRunnable,
 			javacast( "long", initialDelayMs ),
 			javacast( "long", intervalMs ),
 			createObject( "java", "java.util.concurrent.TimeUnit" ).MILLISECONDS
 		)
+		job.futureRef.set( future )
+		if ( job.cancelled.get() ) {
+			future.cancel( false )
+		}
 
 		return handle
 	}
@@ -165,31 +202,29 @@ class {
 			return
 		}
 
-		if ( !job.allowOverlap && !job.runningFlag.compareAndSet( false, true ) ) {
+		var runId = job.nextRunId.incrementAndGet()
+		if ( !job.allowOverlap && !job.currentRunId.compareAndSet( 0, runId ) ) {
 			// The previous run is still marked active. Normally that just
 			// means it's still working — skip this tick, same as always.
 			// But a run whose body never returns at all (proven to happen
 			// in practice: a WebSocket send blocking forever on a peer that
 			// vanished mid-write, with no timeout of its own — see
 			// WebSocketConnection.bx's send()) never reaches its own
-			// finally block below, so runningFlag would otherwise stay
-			// stuck true PERMANENTLY, silently skipping every future tick
-			// forever. A run that's been "still active" for longer than
-			// this job's own stall threshold is indistinguishable from one
-			// that's never coming back, so treat it the same way: force
-			// the flag open so the job isn't wedged forever. If the old
-			// run does eventually finish, its own finally still fires and
-			// harmlessly resets a flag that's already been reset.
+			// finally block below, so the job would otherwise stay "active"
+			// PERMANENTLY, silently skipping every future tick forever. A
+			// run that's been active for longer than this job's own stall
+			// threshold is indistinguishable from one that's never coming
+			// back, so this run takes ownership from it. If the old run
+			// does eventually finish, its finally no longer owns the job
+			// and leaves it alone — it can't mark the job idle while this
+			// replacement is still going.
 			var runningForMs = getTickCount() - job.startedAt
 			if ( runningForMs < job.stallThresholdMs ) {
 				job.skipped.incrementAndGet()
 				return
 			}
-			println( "[Scheduler] job '" & job.name & "' has been running for " & runningForMs & "ms (stall threshold " & job.stallThresholdMs & "ms) — forcing it open so future ticks aren't blocked forever" )
-			job.runningFlag.set( true )
-		}
-		if ( job.allowOverlap ) {
-			job.runningFlag.set( true )
+			println( "[Scheduler] job '" & job.name & "' has been running for " & runningForMs & "ms (stall threshold " & job.stallThresholdMs & "ms) — starting a new run in its place so future ticks aren't blocked forever" )
+			job.currentRunId.set( runId )
 		}
 		job.startedAt = getTickCount()
 
@@ -204,6 +239,7 @@ class {
 			variables.taskExecutor.submit( createDynamicProxy(
 				new ThreadRunnable( function() {
 					var startedNs = createObject( "java", "java.lang.System" ).nanoTime()
+					job.activeRuns.incrementAndGet()
 					job.runs.incrementAndGet()
 					try {
 						job.callback( job.handle )
@@ -220,17 +256,18 @@ class {
 						// traffic logging, never an actual caught failure.
 						println( "[Scheduler] job '" & job.name & "' threw: " & e.message )
 					} finally {
-						job.runningFlag.set( false )
+						job.activeRuns.decrementAndGet()
+						job.currentRunId.compareAndSet( runId, 0 )
 					}
 				} ),
 				[ "java.lang.Runnable" ]
 			) )
 		} catch ( any e ) {
 			// Submission itself failed before the inner finally above ever
-			// got a chance to run — reset the flag here or this job would
+			// got a chance to run — release ownership here or this job would
 			// otherwise "skip forever" thinking a previous run is still in
 			// flight.
-			job.runningFlag.set( false )
+			job.currentRunId.compareAndSet( runId, 0 )
 			println( "[Scheduler] job '" & job.name & "' failed to submit: " & e.message )
 		}
 	}
@@ -240,15 +277,18 @@ class {
 		if ( isNull( job ) ) {
 			return
 		}
-		job.future.cancel( false )
+		job.cancelled.set( true )
 		structDelete( variables.jobs, jobId )
+		if ( !isNull( job.futureRef.get() ) ) {
+			job.futureRef.get().cancel( false )
+		}
 	}
 
 	/**
 	 * Live introspection, same pattern as Stomp.bx's getConnections()/
 	 * getSubscriptions() — reads current state, not a stable data API to
 	 * build app logic against. running reflects the AtomicBoolean at the
-	 * moment of the call, not a snapshot guaranteed to still be accurate
+	 * moment of the call (any run of the job in flight), not a snapshot guaranteed to still be accurate
 	 * by the time a caller looks at it.
 	 */
 	function getJobs() {
@@ -259,7 +299,7 @@ class {
 				name: job.name,
 				allowOverlap: job.allowOverlap,
 				clustered: job.clustered,
-				running: job.runningFlag.get()
+				running: job.activeRuns.get() > 0
 			}
 		}
 		return result
@@ -287,7 +327,7 @@ class {
 			runs.append( { labels: labels, value: job.runs.get() } )
 			failures.append( { labels: labels, value: job.failures.get() } )
 			skipped.append( { labels: labels, value: job.skipped.get() } )
-			running.append( { labels: labels, value: job.runningFlag.get() ? 1 : 0 } )
+			running.append( { labels: labels, value: job.activeRuns.get() > 0 ? 1 : 0 } )
 			if ( job.lastSuccessMs.get() > 0 ) {
 				lastSuccess.append( { labels: labels, value: job.lastSuccessMs.get() / 1000 } )
 				lastDuration.append( { labels: labels, value: job.lastDurationNanos.get() / 1000000000 } )

@@ -12,8 +12,9 @@ consumers are built on top of it:
   actually runs a clustered job's tick; every other instance does
   nothing for it, not even the overlap bookkeeping a normal job gets.
   Failover is passive: if the elected instance goes down, the next
-  instance to check discovers its heartbeat has gone stale and promotes
-  itself, within roughly one heartbeat cycle.
+  instance to check discovers its heartbeat has gone stale and a new
+  manager is chosen, within roughly one heartbeat cycle. See
+  [How the manager is elected](#how-the-manager-is-elected) below.
 - **`boxExpressStomp({ cluster: app.getClusterManager() })`** — see
   [STOMP](stomp.md). Opens a mesh of
   outbound WebSocket connections to every live peer; a `SEND`/
@@ -68,6 +69,32 @@ peer traffic on a private network. Clustering used only for
 need it. `peerIdleTimeoutSeconds` (default
 `30`) controls how long a missed heartbeat is tolerated before a peer
 is considered gone.
+
+## How the manager is elected
+
+The shared cache has no compare-and-set, so election isn't "first
+instance to write the manager key wins" — two instances that both found
+it empty would both win. Instead:
+
+- An instance becomes an **election candidate** the first time it checks
+  who the manager is (a clustered job's tick does this), and says so on
+  its heartbeat. An instance with no clustered jobs is never elected.
+- A manager whose heartbeat is live **keeps the role**; a new instance
+  joining doesn't take it over. The manager renews its claim on every
+  check and on every heartbeat, so the role doesn't lapse while it's
+  healthy, even if its clustered jobs run less often than the claim's
+  expiry.
+- With no live manager, every instance picks the **same winner from the
+  same heartbeat data** — the live candidate with the lowest name
+  (case-sensitive) — and only the winner writes the claim.
+
+Two instances can only both act as manager if they disagree about who is
+live, which happens briefly as a peer's heartbeat crosses
+`peerIdleTimeoutSeconds`. That makes a double-run rare, not impossible:
+a clustered job is at-most-almost-once, so don't use one where a
+double-run is unacceptable (charging a customer, a one-time notification
+that matters). Heartbeats are written every third of
+`peerIdleTimeoutSeconds` (1s minimum).
 
 `app.getClusterManager().getClusterMembers()` returns every live peer
 plus this instance's own name — the "who's actually in the cluster"

@@ -161,6 +161,75 @@ class extends="testbox.system.BaseSpec" {
 				expect( names ).toInclude( "cleanup" )
 			} )
 
+
+			it( "a hung run that returns after the stall watchdog replaced it doesn't let a third run start alongside the replacement", function() {
+				variables.app = new "../../models/BoxExpress"()
+				var startCount = createObject( "java", "java.util.concurrent.atomic.AtomicInteger" ).init( 0 )
+				var secondRunDone = createObject( "java", "java.util.concurrent.atomic.AtomicBoolean" ).init( false )
+				var thirdRunStarted = createObject( "java", "java.util.concurrent.atomic.AtomicBoolean" ).init( false )
+				var thirdRunSawSecondDone = createObject( "java", "java.util.concurrent.atomic.AtomicBoolean" ).init( false )
+
+				// Stall threshold 300ms: the first run (450ms) is replaced at
+				// ~300ms by a second run (250ms, under the threshold, so it's
+				// never itself replaced). The first run returns at ~450ms,
+				// while the second is still going until ~550ms — a third run
+				// must not start before then.
+				variables.app.schedule( 20, () => {
+					var n = startCount.incrementAndGet()
+					if ( n == 1 ) {
+						sleep( 450 )
+					} else if ( n == 2 ) {
+						sleep( 250 )
+						secondRunDone.set( true )
+					} else if ( n == 3 ) {
+						thirdRunSawSecondDone.set( secondRunDone.get() )
+						thirdRunStarted.set( true )
+					}
+				}, { stallThresholdMs: 300 } )
+
+				_waitUntil( () => thirdRunStarted.get(), 2000 )
+				expect( thirdRunStarted.get() ).withContext( "the job should keep running after the stall" ).toBeTrue()
+				expect( thirdRunSawSecondDone.get() ).withContext( "third run started while the replacement run was still active" ).toBeTrue()
+			} )
+
+			it( "an immediate job that cancels itself on its first run runs exactly once and is removed", function() {
+				variables.app = new "../../models/BoxExpress"()
+				var totalRuns = createObject( "java", "java.util.concurrent.atomic.AtomicInteger" ).init( 0 )
+				for ( var i = 1; i <= 20; i++ ) {
+					variables.app.schedule( 20, ( job ) => {
+						totalRuns.incrementAndGet()
+						job.cancel()
+					}, { immediate: true, name: "self-cancel-#i#" } )
+				}
+
+				sleep( 200 )
+				expect( totalRuns.get() ).withContext( "20 jobs, each running once then cancelling" ).toBe( 20 )
+				expect( variables.app.getScheduledJobs() ).toBeEmpty()
+			} )
+
+			it( "rejects an intervalMs that isn't a whole number of milliseconds, 1 or more, and registers nothing", function() {
+				variables.app = new "../../models/BoxExpress"()
+				for ( var bad in [ 0, -5, 1.5, "abc" ] ) {
+					expect( () => variables.app.schedule( bad, () => {} ) ).withContext( "intervalMs: #bad#" ).toThrow( "BoxExpress.InvalidArgument" )
+				}
+				expect( () => variables.app.schedule( 100, () => {}, { stallThresholdMs: 0 } ) ).toThrow( "BoxExpress.InvalidArgument" )
+				expect( variables.app.getScheduledJobs() ).toBeEmpty()
+			} )
+
+			it( "concurrent schedule() calls each register their own job", function() {
+				variables.app = new "../../models/BoxExpress"()
+				var app = variables.app
+				var indexes = []
+				for ( var i = 1; i <= 50; i++ ) {
+					indexes.append( i )
+				}
+				arrayEach( indexes, ( i ) => {
+					app.schedule( 60000, () => {}, { name: "concurrent-#i#" } )
+				}, true, 16 )
+
+				expect( structCount( variables.app.getScheduledJobs() ) ).toBe( 50 )
+			} )
+
 		} )
 	}
 

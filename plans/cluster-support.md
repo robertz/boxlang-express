@@ -357,9 +357,15 @@ Holds:
   known limitation, the same honesty `Scheduler.bx` already applies to
   "no missed-run catch-up."
 - **This is at-most-almost-once, not exactly-once.** No CAS on the cache
-  write means two nodes can both briefly believe they're the manager in
-  the narrow window right after a failover, and both run one tick of a
-  clustered job before the next check reconciles. Fine for a job that's
+  write means election can't be "first writer wins". As implemented
+  (0.2.24): a live manager keeps the role and renews its claim on every
+  check and heartbeat; with no live manager, every node deterministically
+  picks the lowest-named live election candidate (a node becomes a
+  candidate the first time it checks), and only that node writes the
+  claim. Two nodes can still both believe they're the manager when their
+  views of who is live differ, as a heartbeat crosses the idle timeout,
+  and both run one tick of a clustered job before the next check
+  reconciles. Fine for a job that's
   naturally idempotent (a rollup that overwrites the same row) or where an
   occasional double-run is a shrug, not an incident. **Explicitly not fine
   for anything where a double-run is unacceptable** (charging a customer,

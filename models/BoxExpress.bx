@@ -22,6 +22,11 @@ class {
 		variables.shutdownHook = javacast( "null", "" )
 		variables.scheduler = javacast( "null", "" )
 		variables.clusterManager = javacast( "null", "" )
+		// Guards the lazy creation of the Scheduler and ClusterManager, so
+		// concurrent first calls can't each build one and leave jobs or
+		// heartbeats running on an instance nothing references. Reentrant:
+		// ClusterManager's constructor calls schedule() on the same thread.
+		variables.lazyInitLock = createObject( "java", "java.util.concurrent.locks.ReentrantLock" ).init()
 		variables.closed = false
 		variables.draining = false
 		variables.metricsRegistry = ""    // "" until app.metrics() is called — see HttpBridge.init()
@@ -121,11 +126,20 @@ class {
 	 *   app.schedule( 60000, ( job ) => { ... }, { name: "cleanup", immediate: true } )
 	 *
 	 * Returns a job handle ({ cancel(), name }) — see Scheduler.bx's
-	 * schedule() for the full options (name/immediate/allowOverlap).
+	 * schedule() for the full options (name/immediate/allowOverlap/
+	 * clustered/stallThresholdMs). Throws BoxExpress.InvalidArgument for an
+	 * intervalMs that isn't a whole number of milliseconds, 1 or more.
 	 */
 	function schedule( intervalMs, callback, options = {} ) {
 		if ( isNull( variables.scheduler ) ) {
-			variables.scheduler = new Scheduler( this.settings, this )
+			variables.lazyInitLock.lock()
+			try {
+				if ( isNull( variables.scheduler ) ) {
+					variables.scheduler = new Scheduler( this.settings, this )
+				}
+			} finally {
+				variables.lazyInitLock.unlock()
+			}
 		}
 		return variables.scheduler.schedule( intervalMs, callback, options )
 	}
@@ -146,7 +160,14 @@ class {
 	 */
 	function getClusterManager() {
 		if ( isNull( variables.clusterManager ) ) {
-			variables.clusterManager = new cluster.ClusterManager( this, this.settings )
+			variables.lazyInitLock.lock()
+			try {
+				if ( isNull( variables.clusterManager ) ) {
+					variables.clusterManager = new cluster.ClusterManager( this, this.settings )
+				}
+			} finally {
+				variables.lazyInitLock.unlock()
+			}
 		}
 		return variables.clusterManager
 	}
