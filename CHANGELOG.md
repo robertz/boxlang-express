@@ -1,5 +1,42 @@
 # Changelog
 
+**0.2.25**
+- **Lazy init vs. teardown** (`models/BoxExpress.bx`): `close()` and the
+  reload supervisor nulled the `Scheduler` and `ClusterManager` without
+  the lazy-init lock, so a concurrent `schedule()` could hit a null or
+  build a replacement nothing ever shut down (its non-daemon tick thread
+  kept the JVM alive). Teardown now detaches both under the lock, and
+  `schedule()`/`getClusterManager()` after `close()` throw
+  `BoxExpress.AppClosed`. `getScheduledJobs()` and `metrics()` read them
+  under the lock too.
+- **Clustered job ticks** (`models/Scheduler.bx`): the election check
+  ran outside any try, so a `ClusterManager` that failed to build
+  cancelled the job's future ticks with nothing logged; it's now caught
+  and the tick skipped. The tick no longer blocks on another thread
+  building the `ClusterManager`, and a clustered `schedule()` builds it
+  up front so config errors throw at the call.
+- **Cluster election** (`models/cluster/ClusterManager.bx`):
+  - A manager whose own heartbeat is stale (older than half of
+    `peerIdleTimeoutSeconds`) steps down and stops renewing its claim,
+    so it can't keep acting as manager, or overwrite a successor's
+    claim, after its peers have elected someone else.
+  - Only a live election candidate keeps the role; a holder that
+    restarted without clustered jobs left clustered jobs running nowhere
+    until the claim expired.
+  - Heartbeats carry a millisecond timestamp. Whole-second comparison
+    expired live peers on scheduling jitter at a 1s idle timeout.
+    Entries from older nodes are still read. The heartbeat interval floor
+    is now 250ms, and `peerIdleTimeoutSeconds` under 1 is rejected.
+  - The manager no longer rewrites its claim on every election check;
+    the heartbeat renewal covers it.
+  - `getPeerPresence()` and the relay connection mesh are keyed
+    case-sensitively, so peers whose names differ only by case no longer
+    collide.
+  - A cache read that lands mid-write (FileSystemStore rewrites files in
+    place) is retried before a peer is treated as gone, and an election
+    check that still can't read every peer counts as not-manager for that
+    round instead of electing from a partial view.
+
 **0.2.24**
 - **Scheduler fixes** (`models/Scheduler.bx`):
   - A run the stall watchdog gave up on could, when it finally returned,

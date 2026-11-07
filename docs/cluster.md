@@ -67,8 +67,8 @@ source. The secret travels in a handshake header over `ws://`, so keep
 peer traffic on a private network. Clustering used only for
 `app.schedule({ clustered: true })` doesn't open the endpoint and doesn't
 need it. `peerIdleTimeoutSeconds` (default
-`30`) controls how long a missed heartbeat is tolerated before a peer
-is considered gone.
+`30`, 1 minimum) controls how long a missed heartbeat is tolerated
+before a peer is considered gone.
 
 ## How the manager is elected
 
@@ -79,22 +79,35 @@ it empty would both win. Instead:
 - An instance becomes an **election candidate** the first time it checks
   who the manager is (a clustered job's tick does this), and says so on
   its heartbeat. An instance with no clustered jobs is never elected.
-- A manager whose heartbeat is live **keeps the role**; a new instance
-  joining doesn't take it over. The manager renews its claim on every
-  check and on every heartbeat, so the role doesn't lapse while it's
-  healthy, even if its clustered jobs run less often than the claim's
-  expiry.
+- A manager that is still a live candidate **keeps the role**; a new
+  instance joining doesn't take it over. The manager renews its claim on
+  every heartbeat, so the role doesn't lapse while it's healthy, even if
+  its clustered jobs run less often than the claim's expiry. A holder
+  that restarted without clustered jobs is no longer a candidate and
+  loses the role straight away.
+- A manager whose own last successful heartbeat is more than half of
+  `peerIdleTimeoutSeconds` old **steps down**: it stops running clustered
+  jobs and stops renewing its claim. Peers only elect a replacement once
+  that heartbeat is a full `peerIdleTimeoutSeconds` old, so the old and
+  new manager don't overlap.
 - With no live manager, every instance picks the **same winner from the
   same heartbeat data** — the live candidate with the lowest name
   (case-sensitive) — and only the winner writes the claim.
 
 Two instances can only both act as manager if they disagree about who is
-live, which happens briefly as a peer's heartbeat crosses
-`peerIdleTimeoutSeconds`. That makes a double-run rare, not impossible:
+live: briefly, as a candidate's heartbeat crosses `peerIdleTimeoutSeconds`
+while no manager holds the claim, or when the nodes' clocks differ by
+more than half of `peerIdleTimeoutSeconds`. That makes a double-run rare,
+not impossible:
 a clustered job is at-most-almost-once, so don't use one where a
 double-run is unacceptable (charging a customer, a one-time notification
 that matters). Heartbeats are written every third of
-`peerIdleTimeoutSeconds` (1s minimum).
+`peerIdleTimeoutSeconds` (250ms minimum), with a millisecond timestamp.
+
+A clustered `app.schedule()` builds the cluster manager on the calling
+thread, so a misconfigured cluster throws `BoxExpress.ClusterConfigError`
+there. After `app.close()`, `app.schedule()` and `app.getClusterManager()`
+throw `BoxExpress.AppClosed`.
 
 `app.getClusterManager().getClusterMembers()` returns every live peer
 plus this instance's own name — the "who's actually in the cluster"

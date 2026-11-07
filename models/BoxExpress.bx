@@ -131,17 +131,24 @@ class {
 	 * intervalMs that isn't a whole number of milliseconds, 1 or more.
 	 */
 	function schedule( intervalMs, callback, options = {} ) {
-		if ( isNull( variables.scheduler ) ) {
-			variables.lazyInitLock.lock()
-			try {
-				if ( isNull( variables.scheduler ) ) {
-					variables.scheduler = new Scheduler( this.settings, this )
-				}
-			} finally {
-				variables.lazyInitLock.unlock()
-			}
+		// Built here, on the caller's thread, rather than on the first tick:
+		// a misconfigured cluster then fails this call loudly instead of
+		// silently on the shared tick thread.
+		if ( options.clustered ?: false ) {
+			getClusterManager()
 		}
-		return variables.scheduler.schedule( intervalMs, callback, options )
+		var scheduler = ""
+		variables.lazyInitLock.lock()
+		try {
+			_assertNotClosed( "schedule()" )
+			if ( isNull( variables.scheduler ) ) {
+				variables.scheduler = new Scheduler( this.settings, this )
+			}
+			scheduler = variables.scheduler
+		} finally {
+			variables.lazyInitLock.unlock()
+		}
+		return scheduler.schedule( intervalMs, callback, options )
 	}
 
 	/**
@@ -159,17 +166,91 @@ class {
 	 *   stomp = boxExpressStomp( { cluster: app.getClusterManager() } )
 	 */
 	function getClusterManager() {
+		var clusterManager = ""
+		variables.lazyInitLock.lock()
+		try {
+			clusterManager = _clusterManagerLocked()
+		} finally {
+			variables.lazyInitLock.unlock()
+		}
+		return clusterManager
+	}
+
+	/**
+	 * For Scheduler.bx's clustered-job tick, which runs on the one thread
+	 * every job shares: returns "" instead of waiting when another thread
+	 * holds the lock (building the ClusterManager, or tearing down), so the
+	 * tick is skipped rather than stalling every other job.
+	 */
+	function _tryGetClusterManager() {
+		if ( !variables.lazyInitLock.tryLock() ) {
+			return ""
+		}
+		try {
+			return _clusterManagerLocked()
+		} finally {
+			variables.lazyInitLock.unlock()
+		}
+	}
+
+	private function _clusterManagerLocked() {
+		_assertNotClosed( "getClusterManager()" )
 		if ( isNull( variables.clusterManager ) ) {
-			variables.lazyInitLock.lock()
-			try {
-				if ( isNull( variables.clusterManager ) ) {
-					variables.clusterManager = new cluster.ClusterManager( this, this.settings )
-				}
-			} finally {
-				variables.lazyInitLock.unlock()
-			}
+			variables.clusterManager = new cluster.ClusterManager( this, this.settings )
 		}
 		return variables.clusterManager
+	}
+
+	private function _assertNotClosed( what ) {
+		if ( variables.closed ) {
+			throw( type = "BoxExpress.AppClosed", message = what & " called after close() — a Scheduler or ClusterManager built now would never be shut down" )
+		}
+	}
+
+	/**
+	 * Detaches the Scheduler and ClusterManager under lazyInitLock, so no
+	 * thread can be handed one mid-teardown or build a replacement that
+	 * nothing would ever shut down, then shuts them down outside it: a job
+	 * body still running may call schedule(), and must not deadlock on it.
+	 */
+	private function _backgroundServices() {
+		var services = { scheduler: "", clusterManager: "" }
+		variables.lazyInitLock.lock()
+		try {
+			if ( !isNull( variables.scheduler ) ) {
+				services.scheduler = variables.scheduler
+			}
+			if ( !isNull( variables.clusterManager ) ) {
+				services.clusterManager = variables.clusterManager
+			}
+		} finally {
+			variables.lazyInitLock.unlock()
+		}
+		return services
+	}
+
+	private function _stopBackgroundServices() {
+		var schedulerToStop = ""
+		var clusterManagerToStop = ""
+		variables.lazyInitLock.lock()
+		try {
+			if ( !isNull( variables.scheduler ) ) {
+				schedulerToStop = variables.scheduler
+				variables.scheduler = javacast( "null", "" )
+			}
+			if ( !isNull( variables.clusterManager ) ) {
+				clusterManagerToStop = variables.clusterManager
+				variables.clusterManager = javacast( "null", "" )
+			}
+		} finally {
+			variables.lazyInitLock.unlock()
+		}
+		if ( !isSimpleValue( schedulerToStop ) ) {
+			schedulerToStop.shutdown()
+		}
+		if ( !isSimpleValue( clusterManagerToStop ) ) {
+			clusterManagerToStop.shutdown()
+		}
 	}
 
 	/**
@@ -178,7 +259,8 @@ class {
 	 * call, since there's no Scheduler instance yet to ask.
 	 */
 	function getScheduledJobs() {
-		return isNull( variables.scheduler ) ? {} : variables.scheduler.getJobs()
+		var services = _backgroundServices()
+		return isSimpleValue( services.scheduler ) ? {} : services.scheduler.getJobs()
 	}
 
 	/**
@@ -627,11 +709,12 @@ class {
 		out.append( { name: "boxexpress_draining", type: "gauge", help: "1 while the app is shutting down.", samples: [ { labels: {}, value: variables.draining ? 1 : 0 } ] } )
 
 		var producers = []
-		if ( !isNull( variables.scheduler ) ) {
-			producers.append( variables.scheduler )
+		var services = _backgroundServices()
+		if ( !isSimpleValue( services.scheduler ) ) {
+			producers.append( services.scheduler )
 		}
-		if ( !isNull( variables.clusterManager ) ) {
-			producers.append( variables.clusterManager )
+		if ( !isSimpleValue( services.clusterManager ) ) {
+			producers.append( services.clusterManager )
 		}
 		for ( var extra in variables.metricsSources ) {
 			producers.append( extra )
@@ -710,15 +793,7 @@ class {
 			}
 		}
 
-		if ( !isNull( variables.scheduler ) ) {
-			variables.scheduler.shutdown()
-			variables.scheduler = javacast( "null", "" )
-		}
-
-		if ( !isNull( variables.clusterManager ) ) {
-			variables.clusterManager.shutdown()
-			variables.clusterManager = javacast( "null", "" )
-		}
+		_stopBackgroundServices()
 
 		if ( !isNull( variables.shutdownHook ) ) {
 			try {
@@ -810,14 +885,7 @@ class {
 	 * are shut down here so they only run in the child.
 	 */
 	private function _superviseReloads( options ) {
-		if ( !isNull( variables.scheduler ) ) {
-			variables.scheduler.shutdown()
-			variables.scheduler = javacast( "null", "" )
-		}
-		if ( !isNull( variables.clusterManager ) ) {
-			variables.clusterManager.shutdown()
-			variables.clusterManager = javacast( "null", "" )
-		}
+		_stopBackgroundServices()
 
 		variables.reloadCommand = _currentCommand()
 		variables.reloadLock = createObject( "java", "java.util.concurrent.locks.ReentrantLock" ).init()

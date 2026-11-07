@@ -304,6 +304,68 @@ class extends="testbox.system.BaseSpec" {
 				expect( upper.isManager() && lower.isManager() ).toBeFalse()
 			} )
 
+			it( "presence from two peers whose names differ only by case is kept apart", function() {
+				var suffix = createUUID()
+				var upper = _peer( "Peer-#suffix#" )
+				var lower = _peer( "peer-#suffix#" )
+				var observer = _peer( "observer-#suffix#" )
+				upper.setPresenceProvider( () => [ "upper-login" ] )
+				lower.setPresenceProvider( () => [ "lower-login" ] )
+
+				var presence = observer.getPeerPresence()
+				expect( presence[ "Peer-#suffix#" ] ).toBe( [ "upper-login" ] )
+				expect( presence[ "peer-#suffix#" ] ).toBe( [ "lower-login" ] )
+			} )
+
+			it( "a live holder of the manager key that is no longer a candidate doesn't keep the role", function() {
+				var suffix = createUUID()
+				var nonCandidate = _peer( "a-#suffix#" )
+				var candidate = _peer( "b-#suffix#" )
+				cache( variables.electionCacheName ).set( "boxexpress-cluster-manager", "a-#suffix#", 60 )
+
+				expect( candidate.getManagerNode() ).toBe( "b-#suffix#" )
+				expect( candidate.isManager() ).toBeTrue()
+			} )
+
+			it( "a manager whose own heartbeat has gone stale stops acting as manager", function() {
+				var suffix = createUUID()
+				var manager = _peer( "a-#suffix#", 2 )
+				expect( manager.isManager() ).toBeTrue()
+
+				// Stops the heartbeat job; the key it holds is still there.
+				manager.shutdown()
+				sleep( 1300 )
+				expect( cache( variables.electionCacheName ).get( "boxexpress-cluster-manager" ).get() ).toBe( "a-#suffix#" )
+				expect( manager.isManager() ).toBeFalse()
+			} )
+
+			it( "a 1s idle timeout keeps a live peer live across heartbeats", function() {
+				var suffix = createUUID()
+				var one = _peer( "a-#suffix#", 1 )
+				var two = _peer( "b-#suffix#", 1 )
+				var deadline = getTickCount() + 3000
+				while ( getTickCount() < deadline ) {
+					expect( one.getPeers() ).toInclude( "b-#suffix#" )
+					sleep( 50 )
+				}
+			} )
+
+			it( "reads a peer entry from a node that only writes whole-second heartbeats", function() {
+				var suffix = createUUID()
+				var observer = _peer( "a-#suffix#" )
+				var oldName = "old-#suffix#"
+				cache( variables.electionCacheName ).set(
+					"boxexpress-cluster-peer-" & hash( oldName, "MD5" ),
+					{ name: oldName, heartbeat: observer.getEpochSeconds() },
+					60
+				)
+				expect( observer.getPeers() ).toInclude( oldName )
+			} )
+
+			it( "rejects a peerIdleTimeoutSeconds under 1", function() {
+				expect( () => _peer( "a-#createUUID()#", 0 ) ).toThrow( "BoxExpress.ClusterConfigError" )
+			} )
+
 		} )
 
 		describe( "ClusterManager - relay mesh", function() {

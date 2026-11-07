@@ -193,13 +193,26 @@ class {
 		// Clustered jobs only ever run on the elected manager — see
 		// plans/cluster-support.md's "Consumer 2: Scheduler leader
 		// election". A non-leader node does zero work for this tick: it
-		// never touches the overlap AtomicBoolean below, never submits
-		// anything to taskExecutor. If this Scheduler was never handed an
-		// app (a test/script using `new Scheduler(settings)` directly) or
+		// never claims the run id below, never submits anything to
+		// taskExecutor. If this Scheduler was never handed an app (a
+		// test/script using `new Scheduler(settings)` directly) or
 		// clustering was never configured on it, isManager() is a no-op
 		// that's always true — same behavior as an unclustered job.
-		if ( job.clustered && !isNull( variables.app ) && !variables.app.getClusterManager().isManager() ) {
-			return
+		//
+		// Inside a try: anything escaping this Runnable makes the JDK cancel
+		// every future tick of the job, silently (see the note further
+		// down). A ClusterManager that's busy being built or torn down on
+		// another thread, or that can't be built at all, skips this tick.
+		if ( job.clustered && !isNull( variables.app ) ) {
+			try {
+				var clusterManager = variables.app._tryGetClusterManager()
+				if ( isSimpleValue( clusterManager ) || !clusterManager.isManager() ) {
+					return
+				}
+			} catch ( any e ) {
+				println( "[Scheduler] job '" & job.name & "' skipped this tick — couldn't check cluster manager election: " & e.message )
+				return
+			}
 		}
 
 		var runId = job.nextRunId.incrementAndGet()
@@ -287,9 +300,9 @@ class {
 	/**
 	 * Live introspection, same pattern as Stomp.bx's getConnections()/
 	 * getSubscriptions() — reads current state, not a stable data API to
-	 * build app logic against. running reflects the AtomicBoolean at the
-	 * moment of the call (any run of the job in flight), not a snapshot guaranteed to still be accurate
-	 * by the time a caller looks at it.
+	 * build app logic against. running is true while any run of the job is
+	 * in flight (activeRuns) at the moment of the call, not a snapshot
+	 * guaranteed to still be accurate by the time a caller looks at it.
 	 */
 	function getJobs() {
 		var result = {}

@@ -64,6 +64,21 @@ class extends="testbox.system.BaseSpec" {
 				expect( variables.app.getClusterManager().isEnabled() ).toBeTrue()
 			} )
 
+			it( "a clustered schedule() with a misconfigured cluster throws at the call, not silently on a tick", function() {
+				variables.app = new "../../models/BoxExpress"()
+				variables.app.set( "cluster", { enabled: true, name: "sched-peer-#createUUID()#" } )
+				expect( () => variables.app.schedule( 1000, () => {}, { clustered: true } ) ).toThrow( "BoxExpress.ClusterConfigError" )
+			} )
+
+			it( "schedule() and getClusterManager() after close() throw instead of starting work nothing will stop", function() {
+				variables.app = new "../../models/BoxExpress"()
+				variables.app.schedule( 60000, () => {} )
+				variables.app.close()
+				expect( () => variables.app.schedule( 60000, () => {} ) ).toThrow( "BoxExpress.AppClosed" )
+				expect( () => variables.app.getClusterManager() ).toThrow( "BoxExpress.AppClosed" )
+				expect( variables.app.getScheduledJobs() ).toBeEmpty()
+			} )
+
 		} )
 
 		describe( "app.schedule() with options.clustered", function() {
