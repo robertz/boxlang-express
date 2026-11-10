@@ -62,7 +62,9 @@ higher ceiling.
 Every request gets a line on stdout as soon as it's received —
 `[2026-08-10 10:45:41] GET /users/42 127.0.0.1`. Turn it off with
 `app.set("log", false)` — useful for a high-throughput deployment that
-doesn't want a synchronous stdout write on every request.
+doesn't want a synchronous stdout write on every request. Control
+characters in the path are printed as `?`, so a request can't forge log
+lines or send escape sequences to a terminal.
 
 ## More on the app object
 

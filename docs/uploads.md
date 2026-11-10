@@ -26,6 +26,9 @@ app.post( "/upload", boxExpressUpload( { dest: expandPath( "./uploads" ) } ), ( 
 } )
 ```
 
+A part with no `name` in its `Content-Disposition` is answered with a
+400 (`Malformed multipart body`).
+
 Every file struct always has `fieldName`, `filename` (the name the client
 sent — never trust it as a disk path), `contentType`, `size`, and `buffer`
 (the raw bytes, in memory). `path` is only present when `dest` was given —

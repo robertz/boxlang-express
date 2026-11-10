@@ -1,5 +1,45 @@
 # Changelog
 
+**0.2.26**
+- **Session ids** (`models/middleware/Session.bx`,
+  `models/stores/CacheStore.bx`): the session cookie's value went to the
+  store as-is, so with a cache-backed store a client could name any entry
+  in that cache as its session — another feature's data, or the rate
+  limiter's own counter, which the session save then wrote back stale
+  (a limit of 3 let 10 of 10 requests through). Only values shaped like a
+  generated id are looked up now, and `CacheStore` keys are prefixed
+  `boxexpress-session-`. **Upgrading signs out existing cache-backed
+  sessions once**, since their entries are under the old, unprefixed keys.
+- **Malformed `%` escapes** (`models/Request.bx`,
+  `models/WebSocketConnection.bx`, `models/middleware/BodyParsers.bx`): a
+  cookie such as `discount=50%` failed every request carrying it with a
+  500. Cookie and query values that won't decode are kept as raw text; a
+  urlencoded body that won't decode gets a 400.
+- **Request log** (`models/HttpBridge.bx`): control characters in the
+  logged path and client address are printed as `?` — the decoded path
+  could carry a newline or a terminal escape sequence and forge log lines.
+- **Rate limiter** (`models/middleware/RateLimit.bx`): the in-memory
+  counter is updated atomically; concurrent requests could read the same
+  count and run a few over the limit.
+- **SSE** (`models/SseEmitter.bx`): `send()` splits data on CR and CRLF as
+  well as LF, so a bare CR can't start a new field, and blank lines inside
+  the data are no longer dropped.
+- **Uploads** (`models/middleware/Multipart.bx`): `name` is no longer read
+  out of `filename="..."` when a client sends `filename` first, and a part
+  with no `name` gets a 400 instead of a 500.
+- **STOMP** (`models/middleware/Stomp.bx`, `models/StompFrameCodec.bx`):
+  - Destinations, subscription ids, exchange bindings, topic patterns and
+    listeners match case-sensitively. `/ADMIN/feed` and `/admin/feed` were
+    one subscriber set, so an `authorize()` that compared case-sensitively
+    could be sidestepped. **Apps that relied on case-insensitive
+    destinations need to normalize them.**
+  - `sendToUser()` compares logins exactly; `alice` also reached `ALICE`,
+    and `7` reached `007`.
+  - Line breaks are dropped from headers sent to STOMP 1.0 subscribers
+    (1.0 has no escapes), CR from 1.1 headers, and NUL from all of them.
+- **Static files** (`models/middleware/StaticFiles.bx`): a path holding a
+  NUL falls through to the next handler instead of a 500.
+
 **0.2.25**
 - **Lazy init vs. teardown** (`models/BoxExpress.bx`): `close()` and the
   reload supervisor nulled the `Scheduler` and `ClusterManager` without

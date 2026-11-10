@@ -130,17 +130,20 @@ class {
 	}
 
 	private function _escape( str, version = "1.2" ) {
+		// NUL ends a frame in every version and has no escape.
+		var raw = toString( str ).replace( char( 0 ), "", "all" )
 		if ( version == "1.0" ) {
-			return toString( str )
+			// 1.0 has no escapes at all, so a line break can only be dropped —
+			// left in, it would start a new header or end the header block.
+			return raw.replace( char( 13 ), "", "all" ).replace( char( 10 ), "", "all" )
 		}
 		// Order matters: backslash first, so the backslashes introduced by
 		// the newline/colon/CR escaping below don't themselves get escaped
 		// a second time.
-		var result = toString( str ).replace( "\", "\\", "all" )
+		var result = raw.replace( "\", "\\", "all" )
 			result = result.replace( char( 10 ), "\n", "all" )
-			if ( version == "1.2" ) {
-				result = result.replace( char( 13 ), "\r", "all" )
-			}
+			// 1.1 has no escape for CR, so it's dropped there.
+			result = result.replace( char( 13 ), version == "1.2" ? "\r" : "", "all" )
 			result = result.replace( ":", "\c", "all" )
 			return result
 		}

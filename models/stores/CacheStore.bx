@@ -29,15 +29,20 @@ class {
 	}
 
 	function get( id ) {
-		return variables.access.get( id )
+		return variables.access.get( _key( id ) )
 	}
 
 	function set( id, data, maxAge ) {
-		variables.access.set( id, data, maxAge )
+		variables.access.set( _key( id ), data, maxAge )
 	}
 
 	function destroy( id ) {
-		variables.access.remove( id )
+		variables.access.remove( _key( id ) )
+	}
+
+	// Namespaced so a session id can never address another entry in a shared cache.
+	private function _key( id ) {
+		return "boxexpress-session-" & id
 	}
 
 	function getMode() {

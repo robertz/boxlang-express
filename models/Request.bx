@@ -69,9 +69,9 @@ class {
 				// already guards against.
 				var rawKey = eqPos == 1 ? "" : pair.left( eqPos - 1 )
 				var rawValue = eqPos == pair.len() ? "" : pair.right( pair.len() - eqPos )
-				result[ urlDecode( rawKey ) ] = urlDecode( rawValue )
+				result[ _decode( rawKey ) ] = _decode( rawValue )
 			} else {
-				result[ urlDecode( pair ) ] = ""
+				result[ _decode( pair ) ] = ""
 			}
 		}
 		return result
@@ -89,10 +89,23 @@ class {
 				// Same zero-count left()/right() guard as _parseQueryString() above.
 				var cookieName = ( eqPos == 1 ? "" : trimmedPair.left( eqPos - 1 ) ).trim()
 				var cookieValue = ( eqPos == trimmedPair.len() ? "" : trimmedPair.right( trimmedPair.len() - eqPos ) ).trim()
-				result[ cookieName ] = urlDecode( cookieValue )
+				result[ cookieName ] = _decode( cookieValue )
 			}
 		}
 		return result
+	}
+
+	/**
+	 * urlDecode() throws on a malformed escape ("50%", "%zz"). A cookie can be
+	 * set by any script or sibling subdomain, so one bad value must not fail
+	 * every request that carries it — the raw text is used instead.
+	 */
+	private function _decode( value ) {
+		try {
+			return urlDecode( value )
+		} catch ( any e ) {
+			return value
+		}
 	}
 
 	/**

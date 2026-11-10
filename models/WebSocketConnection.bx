@@ -238,7 +238,12 @@ class {
 			if ( eqPos ) {
 				var cookieName = ( eqPos == 1 ? "" : trimmedPair.left( eqPos - 1 ) ).trim()
 				var cookieValue = ( eqPos == trimmedPair.len() ? "" : trimmedPair.right( trimmedPair.len() - eqPos ) ).trim()
-				result[ cookieName ] = urlDecode( cookieValue )
+				try {
+					result[ cookieName ] = urlDecode( cookieValue )
+				} catch ( any e ) {
+					// a malformed escape — keep the raw value, same as Request.bx
+					result[ cookieName ] = cookieValue
+				}
 			}
 		}
 		return result

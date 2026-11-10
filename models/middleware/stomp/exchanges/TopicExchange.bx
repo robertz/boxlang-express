@@ -44,7 +44,7 @@ class {
 			if ( di > destSegments.len() ) {
 				return false
 			}
-			if ( segment != "*" && segment != destSegments[ di ] ) {
+			if ( segment != "*" && compare( segment, destSegments[ di ] ) != 0 ) {
 				return false
 			}
 			pi++

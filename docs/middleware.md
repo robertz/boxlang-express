@@ -57,6 +57,9 @@ buffering an unbounded body into memory — override with `{ limit: bytes }`:
 app.use( boxExpressJSON( { limit: 5000000 } ) )  // 5MB
 ```
 
+A body that won't parse (broken JSON, a malformed `%` escape in a
+urlencoded body) is answered with a 400.
+
 A body over the limit gets a `413` response and never reaches your route
 handler. A JSON body that doesn't parse gets a `400`
 (`{ error: true, message: "Malformed JSON body" }`), answered directly like

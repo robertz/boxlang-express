@@ -42,6 +42,11 @@ class {
 
 			var relativePath = req.path.left( 1 ) == "/" ? req.path.mid( 2, req.path.len() - 1 ) : req.path
 
+			// No file name holds a NUL, and Path.resolve() throws on one.
+			if ( relativePath.find( char( 0 ) ) ) {
+				return next()
+			}
+
 			if ( dotfiles != "allow" && _hasDotSegment( relativePath ) ) {
 				return dotfiles == "deny" ? res.sendStatus( 403 ) : next()
 			}

@@ -104,6 +104,11 @@ app.use( boxExpressSession( { store: boxExpressCacheStore() } ) )              /
 app.use( boxExpressSession( { store: boxExpressCacheStore( "sessions" ) } ) )  // a named cache
 ```
 
+Entries are stored under `boxexpress-session-<id>`, so a session id can
+never address anything else kept in the same cache. The session
+middleware also only looks up cookie values shaped like the ids it issues
+(64 hex characters); anything else gets a new, empty session.
+
 The named cache has to already exist — `boxExpressCacheStore()` doesn't
 register one, it just talks to it. If it doesn't, or the store later
 fails, the app keeps serving: see **Falling back without durable

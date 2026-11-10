@@ -1,0 +1,410 @@
+/**
+ * Regression coverage for the 0.2.26 hardening pass: session ids as cache
+ * keys, malformed percent-escapes, log-line forging, the in-memory rate
+ * limiter under concurrency, SSE and multipart parsing, STOMP destination
+ * and login matching, STOMP 1.0 header serialization, and a NUL in a
+ * static-file path. Unit cases first, then the same fixes over real HTTP.
+ */
+class extends="testbox.system.BaseSpec" {
+
+	variables.NL = char( 10 )
+	variables.CR = char( 13 )
+
+	function beforeAll() {
+		variables.port = 4981
+		variables.base = "http://localhost:" & variables.port
+		variables.http = new "../helpers/HttpClient"()
+		variables.cacheKey = "input-hardening-http-" & createUUID()
+		cache( "default" ).set( variables.cacheKey, { isAdmin: true }, 120 )
+
+		var app = new "../../models/BoxExpress"()
+		app.set( "log", false )
+		app.use( "/sess", new "../../models/middleware/Session"().session( { cache: "default" } ) )
+		app.get( "/sess/whoami", ( req, res ) => res.json( { session: req.session } ) )
+		app.use( new "../../models/middleware/BodyParsers"().urlencoded() )
+		app.get( "/cookies", ( req, res ) => res.json( req.cookies ) )
+		app.post( "/form", ( req, res ) => res.json( req.body ) )
+		app.post( "/up", new "../../models/middleware/Multipart"().upload(), ( req, res ) => {
+			var fileFields = []
+			for ( var key in req.files ) {
+				fileFields.append( key )
+			}
+			res.json( { fileFields: fileFields } )
+		} )
+		app.get( "/sse", ( req, res ) => {
+			res.sse( ( emitter ) => emitter.send( "one" & char( 13 ) & "event: admin" ) )
+		} )
+		app.use( new "../../models/middleware/StaticFiles"().serve( expandPath( "tests/fixtures/public" ) ) )
+		app.listen( port = variables.port, options = { block: false } )
+		variables.liveApp = app
+		sleep( 300 )
+	}
+
+	function afterAll() {
+		variables.liveApp.close()
+		cache( "default" ).clear( variables.cacheKey )
+	}
+
+	private function _fakeRes() {
+		var res = {}
+		res.onBeforeSend = ( fn ) => res
+		res.cookie = ( name, value, options ) => res
+		return res
+	}
+
+	private function _fakeConnection() {
+		var c = { closed: false, sent: [] }
+		c.send = ( data ) => { c.sent.append( data ) }
+		c.close = () => { c.closed = true }
+		c.isClosed = () => c.closed
+		c.onMessage = ( fn ) => { c.msg = fn }
+		c.onBinary = ( fn ) => { c.bin = fn }
+		c.onClose = ( fn ) => { c.cls = fn }
+		return c
+	}
+
+	private function _frame( cmd, hdrs = {}, body = "" ) {
+		var out = cmd & variables.NL
+		for ( var k in hdrs ) {
+			out &= k & ":" & hdrs[ k ] & variables.NL
+		}
+		return out & variables.NL & body & char( 0 )
+	}
+
+	private function _stompClient( stomp, login = "" ) {
+		var conn = _fakeConnection()
+		stomp.handler()( conn )
+		conn.msg( _frame( "CONNECT", { "accept-version": "1.2", "login": login } ) )
+		return conn
+	}
+
+	private function _messagesFor( conn ) {
+		return conn.sent.filter( ( text ) => left( text, 7 ) == "MESSAGE" )
+	}
+
+	private function _multipart( app, body ) {
+		return app.inject( { method: "POST", url: "/u", headers: { "Content-Type": "multipart/form-data; boundary=B" }, body: body } )
+	}
+
+	function run() {
+
+		describe( "Session ids", function() {
+
+			it( "never asks the store for a cookie value that isn't a generated id", function() {
+				var asked = []
+				var store = {
+					get: ( id ) => {
+						asked.append( id )
+						return { isAdmin: true }
+					},
+					set: ( id, data, maxAge ) => {},
+					destroy: ( id ) => {}
+				}
+				var handler = new "../../models/middleware/Session"().session( { store: store } )
+
+				for ( var forged in [ "user:42", "ratelimit:F528764D624DB129B32C21FBCA0CB8D6", "boxexpress-cluster-manager", repeatString( "A", 64 ) ] ) {
+					var req = { cookies: { "connect.sid": forged } }
+					handler( req, _fakeRes(), function() {} )
+					expect( structKeyExists( req.session, "isAdmin" ) ).withContext( forged ).toBeFalse()
+					expect( req.sessionID ).withContext( forged ).notToBe( forged )
+				}
+				expect( asked.len() ).toBe( 0 )
+			} )
+
+			it( "still loads a session by the id it issued", function() {
+				var handler = new "../../models/middleware/Session"().session()
+				var req1 = { cookies: {} }
+				handler( req1, _fakeRes(), function() {} )
+				req1.session.views = 1
+				var req2 = { cookies: { "connect.sid": req1.sessionID } }
+				handler( req2, _fakeRes(), function() {} )
+				expect( req2.session.views ).toBe( 1 )
+			} )
+
+			it( "CacheStore namespaces its keys, so an id can't address another cache entry", function() {
+				var store = new "../../models/stores/CacheStore"( "default" )
+				var other = "input-hardening-" & createUUID()
+				cache( "default" ).set( other, { secret: true }, 60 )
+				store.set( "abc", { views: 1 }, 60 )
+				assertAll( [
+					() => expect( isNull( store.get( other ) ) ).toBeTrue(),
+					() => expect( cache( "default" ).get( "boxexpress-session-abc" ).isPresent() ).toBeTrue(),
+					() => expect( cache( "default" ).get( "abc" ).isPresent() ).toBeFalse()
+				] )
+				store.destroy( "abc" )
+				cache( "default" ).clear( other )
+			} )
+
+		} )
+
+		describe( "Malformed percent-escapes", function() {
+
+			it( "keeps the raw text of a cookie or query value that won't decode", function() {
+				var app = new "../../models/BoxExpress"()
+				app.get( "/c", ( req, res ) => res.json( { cookies: req.cookies, query: req.query } ) )
+				var res = app.inject( { url: "/c?q=%zz&ok=a%20b", headers: { "Cookie": "discount=50%; bad=%zz; fine=a%20b" } } )
+				assertAll( [
+					() => expect( res.statusCode ).toBe( 200 ),
+					() => expect( res.json().cookies.discount ).toBe( "50%" ),
+					() => expect( res.json().cookies.bad ).toBe( "%zz" ),
+					() => expect( res.json().cookies.fine ).toBe( "a b" ),
+					() => expect( res.json().query.q ).toBe( "%zz" ),
+					() => expect( res.json().query.ok ).toBe( "a b" )
+				] )
+			} )
+
+			it( "answers a urlencoded body that won't decode with a 400", function() {
+				var app = new "../../models/BoxExpress"()
+				app.use( new "../../models/middleware/BodyParsers"().urlencoded() )
+				app.post( "/f", ( req, res ) => res.json( req.body ) )
+				var bad = app.inject( { method: "POST", url: "/f", headers: { "Content-Type": "application/x-www-form-urlencoded" }, body: "a=%zz" } )
+				var good = app.inject( { method: "POST", url: "/f", form: { a: "1 2", b: "" } } )
+				assertAll( [
+					() => expect( bad.statusCode ).toBe( 400 ),
+					() => expect( bad.json().message ).toBe( "Malformed urlencoded body" ),
+					() => expect( good.statusCode ).toBe( 200 ),
+					() => expect( good.json().a ).toBe( "1 2" ),
+					() => expect( good.json().b ).toBe( "" )
+				] )
+			} )
+
+		} )
+
+		describe( "Request log line", function() {
+
+			it( "replaces control characters in the logged path", function() {
+				var bridge = new "../../models/HttpBridge"( "", {} )
+				var forged = "/x" & variables.NL & "[2026-01-01 00:00:00] GET /forged " & char( 27 ) & "[31m" & variables.CR
+				var safe = bridge._logSafe( forged )
+				assertAll( [
+					() => expect( find( variables.NL, safe ) ).toBe( 0 ),
+					() => expect( find( variables.CR, safe ) ).toBe( 0 ),
+					() => expect( find( char( 27 ), safe ) ).toBe( 0 ),
+					() => expect( safe ).toBe( "/x?[2026-01-01 00:00:00] GET /forged ?[31m?" ),
+					() => expect( bridge._logSafe( "/plain/path-1_2.html" ) ).toBe( "/plain/path-1_2.html" )
+				] )
+			} )
+
+		} )
+
+		describe( "In-memory rate limiter", function() {
+
+			it( "lets exactly max requests through when they arrive at once", function() {
+				var handler = new "../../models/middleware/RateLimit"().limit( { max: 50, windowMs: 60000 } )
+				var passed = createObject( "java", "java.util.concurrent.atomic.AtomicInteger" ).init( 0 )
+				var executor = createObject( "java", "java.util.concurrent.Executors" ).newFixedThreadPool( javacast( "int", 32 ) )
+				var futures = []
+				for ( var i = 1; i <= 400; i++ ) {
+					futures.append( executor.submit( createDynamicProxy(
+						new "../../models/ThreadRunnable"( function() {
+							var res = {}
+							res.set = ( name, value ) => res
+							res.status = ( code ) => res
+							res.json = ( body ) => res
+							handler( { ip: "203.0.113.9" }, res, function() {
+								passed.incrementAndGet()
+							} )
+						} ),
+						[ "java.lang.Runnable" ]
+					) ) )
+				}
+				for ( var future in futures ) {
+					future.get()
+				}
+				executor.shutdown()
+				expect( passed.get() ).toBe( 50 )
+			} )
+
+		} )
+
+		describe( "SseEmitter data lines", function() {
+
+			it( "treats a bare CR as a line break, so data can't start a new field", function() {
+				var out = createObject( "java", "java.io.ByteArrayOutputStream" ).init()
+				new "../../models/SseEmitter"( out ).send( "hello" & variables.CR & "event: admin" & variables.CR & variables.NL & "data: x" )
+				var text = out.toString( "UTF-8" )
+				assertAll( [
+					() => expect( find( variables.CR, text ) ).toBe( 0 ),
+					() => expect( text ).toBe( "data: hello" & variables.NL & "data: event: admin" & variables.NL & "data: data: x" & variables.NL & variables.NL )
+				] )
+			} )
+
+			it( "keeps blank lines inside the data", function() {
+				var out = createObject( "java", "java.io.ByteArrayOutputStream" ).init()
+				new "../../models/SseEmitter"( out ).send( "a" & variables.NL & variables.NL & "b" )
+				expect( out.toString( "UTF-8" ) ).toBe( "data: a" & variables.NL & "data: " & variables.NL & "data: b" & variables.NL & variables.NL )
+			} )
+
+		} )
+
+		describe( "Multipart field names", function() {
+
+			beforeEach( function() {
+				variables.app = new "../../models/BoxExpress"()
+				variables.app.post( "/u", new "../../models/middleware/Multipart"().upload(), ( req, res ) => {
+					var fileFields = []
+					for ( var key in req.files ) {
+						fileFields.append( key )
+					}
+					res.json( { fields: req.body, fileFields: fileFields } )
+				} )
+			} )
+
+			it( "reads name even when filename comes first", function() {
+				var crlf = variables.CR & variables.NL
+				var res = _multipart( variables.app, "--B" & crlf & 'Content-Disposition: form-data; filename="evil.txt"; name="avatar"' & crlf & crlf & "hi" & crlf & "--B--" & crlf )
+				assertAll( [
+					() => expect( res.statusCode ).toBe( 200 ),
+					() => expect( res.json().fileFields ).toBe( [ "avatar" ] )
+				] )
+			} )
+
+			it( "answers a part with no name with a 400", function() {
+				var crlf = variables.CR & variables.NL
+				var res = _multipart( variables.app, "--B" & crlf & "Content-Disposition: form-data" & crlf & crlf & "hi" & crlf & "--B--" & crlf )
+				assertAll( [
+					() => expect( res.statusCode ).toBe( 400 ),
+					() => expect( res.json().message ).toBe( "Malformed multipart body" )
+				] )
+			} )
+
+		} )
+
+		describe( "STOMP matching", function() {
+
+			it( "keeps destinations that differ only by case apart", function() {
+				var stomp = new "../../models/middleware/Stomp"()
+				var lower = _stompClient( stomp )
+				var upper = _stompClient( stomp )
+				lower.msg( _frame( "SUBSCRIBE", { id: "s1", destination: "/admin/feed" } ) )
+				upper.msg( _frame( "SUBSCRIBE", { id: "s1", destination: "/ADMIN/feed" } ) )
+				stomp.send( "/admin/feed", "secret" )
+				assertAll( [
+					() => expect( _messagesFor( lower ).len() ).toBe( 1 ),
+					() => expect( _messagesFor( upper ).len() ).toBe( 0 ),
+					() => expect( structCount( stomp.getSubscriptions() ) ).toBe( 2 )
+				] )
+			} )
+
+			it( "sendToUser() matches the login exactly", function() {
+				var stomp = new "../../models/middleware/Stomp"()
+				var clients = structNew( "casesensitive" )
+				for ( var login in [ "alice", "ALICE", "7", "007" ] ) {
+					clients[ "c-" & login ] = _stompClient( stomp, login )
+					clients[ "c-" & login ].msg( _frame( "SUBSCRIBE", { id: "s1", destination: "/inbox" } ) )
+				}
+				var toAlice = stomp.sendToUser( "alice", "/inbox", "hi" )
+				var toSeven = stomp.sendToUser( "7", "/inbox", "hi" )
+				assertAll( [
+					() => expect( toAlice ).toBe( 1 ),
+					() => expect( toSeven ).toBe( 1 ),
+					() => expect( _messagesFor( clients[ "c-alice" ] ).len() ).toBe( 1 ),
+					() => expect( _messagesFor( clients[ "c-7" ] ).len() ).toBe( 1 )
+				] )
+			} )
+
+			it( "matches exchange bindings and topic patterns case-sensitively", function() {
+				var stomp = new "../../models/middleware/Stomp"( { exchanges: {
+					direct: { bindings: { "orders": "/staff" } },
+					topic: { bindings: { "chat.room.*": "/rooms" } }
+				} } )
+				var staff = _stompClient( stomp )
+				var rooms = _stompClient( stomp )
+				staff.msg( _frame( "SUBSCRIBE", { id: "s1", destination: "/staff" } ) )
+				rooms.msg( _frame( "SUBSCRIBE", { id: "s1", destination: "/rooms" } ) )
+				stomp.send( "ORDERS", "x" )
+				stomp.send( "topic/CHAT.room.1", "x" )
+				var before = _messagesFor( staff ).len() + _messagesFor( rooms ).len()
+				stomp.send( "orders", "x" )
+				stomp.send( "topic/chat.room.1", "x" )
+				assertAll( [
+					() => expect( before ).toBe( 0 ),
+					() => expect( _messagesFor( staff ).len() ).toBe( 1 ),
+					() => expect( _messagesFor( rooms ).len() ).toBe( 1 )
+				] )
+			} )
+
+		} )
+
+		describe( "STOMP header serialization", function() {
+
+			it( "drops line breaks from 1.0 headers, which have no escape", function() {
+				var codec = new "../../models/StompFrameCodec"()
+				var frame = new "../../models/StompFrame"( "MESSAGE", { note: "a" & variables.NL & "destination:/forged" & variables.CR & variables.NL & variables.NL & "fake body" }, "real" )
+				var text = codec.serialize( frame, "1.0" )
+				var parsed = codec.parse( text, "1.0" )
+				assertAll( [
+					() => expect( find( variables.CR, text ) ).toBe( 0 ),
+					() => expect( parsed.getHeader( "destination", "" ) ).toBe( "" ),
+					() => expect( parsed.getBody() ).toBe( "real" )
+				] )
+			} )
+
+			it( "drops CR from 1.1 headers and NUL from every version, and still round-trips 1.2", function() {
+				var codec = new "../../models/StompFrameCodec"()
+				var value = "a" & variables.CR & "b" & variables.NL & "c:d" & char( 0 ) & "e"
+				var v11 = codec.serialize( new "../../models/StompFrame"( "MESSAGE", { note: value }, "" ), "1.1" )
+				var v12 = codec.serialize( new "../../models/StompFrame"( "MESSAGE", { note: value }, "" ), "1.2" )
+				assertAll( [
+					() => expect( find( variables.CR, v11 ) ).toBe( 0 ),
+					() => expect( codec.parse( v11, "1.1" ).getHeader( "note" ) ).toBe( "ab" & variables.NL & "c:de" ),
+					() => expect( codec.parse( v12, "1.2" ).getHeader( "note" ) ).toBe( "a" & variables.CR & "b" & variables.NL & "c:de" )
+				] )
+			} )
+
+		} )
+
+		describe( "Over real HTTP", function() {
+
+			it( "gives a fresh, empty session to a cookie naming another cache entry", function() {
+				var res = variables.http.getWithHeaders( variables.base & "/sess/whoami", { "Cookie": "connect.sid=" & variables.cacheKey } )
+				assertAll( [
+					() => expect( res.statusCode ).toBe( 200 ),
+					() => expect( structIsEmpty( JSONDeserialize( res.body ).session ) ).toBeTrue(),
+					() => expect( res.setCookie ).toInclude( "connect.sid=" ),
+					() => expect( res.setCookie ).notToInclude( variables.cacheKey )
+				] )
+			} )
+
+			it( "serves a request whose cookie has a malformed escape", function() {
+				var res = variables.http.getWithHeaders( variables.base & "/cookies", { "Cookie": "discount=50%; ok=a%20b" } )
+				assertAll( [
+					() => expect( res.statusCode ).toBe( 200 ),
+					() => expect( JSONDeserialize( res.body ).discount ).toBe( "50%" ),
+					() => expect( JSONDeserialize( res.body ).ok ).toBe( "a b" )
+				] )
+			} )
+
+			it( "answers a malformed urlencoded body with a 400", function() {
+				var res = variables.http.post( variables.base & "/form", "a=%zz", "application/x-www-form-urlencoded" )
+				expect( res.statusCode ).toBe( 400 )
+			} )
+
+			it( "reads the multipart field name when filename comes first, and rejects a part with none", function() {
+				var crlf = char( 13 ) & char( 10 )
+				var swapped = variables.http.post( variables.base & "/up", "--B" & crlf & 'Content-Disposition: form-data; filename="evil.txt"; name="avatar"' & crlf & crlf & "hi" & crlf & "--B--" & crlf, "multipart/form-data; boundary=B" )
+				var nameless = variables.http.post( variables.base & "/up", "--B" & crlf & "Content-Disposition: form-data" & crlf & crlf & "hi" & crlf & "--B--" & crlf, "multipart/form-data; boundary=B" )
+				assertAll( [
+					() => expect( JSONDeserialize( swapped.body ).fileFields ).toBe( [ "avatar" ] ),
+					() => expect( nameless.statusCode ).toBe( 400 )
+				] )
+			} )
+
+			it( "sends no bare CR in an SSE stream", function() {
+				var res = variables.http.get( variables.base & "/sse" )
+				assertAll( [
+					() => expect( find( char( 13 ), res.body ) ).toBe( 0 ),
+					() => expect( res.body ).toInclude( "data: event: admin" )
+				] )
+			} )
+
+			it( "answers a path holding a NUL with a 404 from the static middleware", function() {
+				var res = variables.http.get( variables.base & "/a%00b" )
+				expect( res.statusCode ).toBe( 404 )
+			} )
+
+		} )
+
+	}
+
+}

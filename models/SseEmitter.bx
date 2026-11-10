@@ -50,7 +50,10 @@ class {
 		if ( len( event ) ) {
 			frame &= "event: #_stripNewlines( event )#" & char( 10 )
 		}
-		for ( var line in payload.listToArray( char( 10 ) ) ) {
+		// CR and CRLF end a line in SSE too, so a bare CR in the data would
+		// start a new field. Blank lines are kept (includeEmptyFields).
+		var normalized = payload.replace( char( 13 ) & char( 10 ), char( 10 ), "all" ).replace( char( 13 ), char( 10 ), "all" )
+		for ( var line in normalized.listToArray( char( 10 ), true ) ) {
 			frame &= "data: #line#" & char( 10 )
 		}
 		frame &= char( 10 )

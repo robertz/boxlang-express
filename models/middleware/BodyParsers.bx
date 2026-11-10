@@ -50,26 +50,34 @@ class {
 			}
 
 			var formData = {}
-			if ( len( rawBody ) ) {
-				for ( var pair in rawBody.listToArray( "&" ) ) {
-					var eqPos = pair.find( "=" )
-					if ( eqPos ) {
-						// eqPos - 1 or pair.len() - eqPos can be zero (an empty key or
-						// an empty value, e.g. "name=") — BoxLang's left()/right() throw
-						// "Count cannot be zero" for a zero count (unlike Lucee/CF, which
-						// just return ""). Same class of bug as the StaticFiles root-path
-						// fix (0.1.7) — worked around there by switching to mid().
-						var key = eqPos == 1 ? "" : urlDecode( pair.left( eqPos - 1 ) )
-						var val = eqPos == pair.len() ? "" : urlDecode( pair.right( pair.len() - eqPos ) )
-						formData[ key ] = val
-					} else if ( len( pair ) ) {
-						formData[ urlDecode( pair ) ] = ""
-					}
-				}
+			try {
+				formData = _parseUrlencoded( rawBody )
+			} catch ( any e ) {
+				return res.status( 400 ).json( { error: true, message: "Malformed urlencoded body" } )
 			}
 			req.body = formData
 			next()
 		}
+	}
+
+	private function _parseUrlencoded( rawBody ) {
+		var formData = {}
+		for ( var pair in rawBody.listToArray( "&" ) ) {
+			var eqPos = pair.find( "=" )
+			if ( eqPos ) {
+				// eqPos - 1 or pair.len() - eqPos can be zero (an empty key or
+				// an empty value, e.g. "name=") — BoxLang's left()/right() throw
+				// "Count cannot be zero" for a zero count (unlike Lucee/CF, which
+				// just return ""). Same class of bug as the StaticFiles root-path
+				// fix (0.1.7) — worked around there by switching to mid().
+				var key = eqPos == 1 ? "" : urlDecode( pair.left( eqPos - 1 ) )
+				var val = eqPos == pair.len() ? "" : urlDecode( pair.right( pair.len() - eqPos ) )
+				formData[ key ] = val
+			} else if ( len( pair ) ) {
+				formData[ urlDecode( pair ) ] = ""
+			}
+		}
+		return formData
 	}
 
 	/**

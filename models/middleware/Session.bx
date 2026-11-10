@@ -87,7 +87,10 @@ class {
 
 		return function( req, res, next ) {
 			var sessionId = req.cookies[ cookieName ] ?: ""
-			var data = len( sessionId ) ? store.get( sessionId ) : javacast( "null", "" )
+			// Only an id in the shape _generateId() mints is ever looked up: the
+			// cookie is client-chosen, and a store may share its keyspace with
+			// other data (a cache also holding rate-limit or app entries).
+			var data = _isSessionId( sessionId ) ? store.get( sessionId ) : javacast( "null", "" )
 			var isNewSession = isNull( data )
 
 			if ( isNewSession ) {
@@ -281,6 +284,10 @@ class {
 
 	private function _now() {
 		return createObject( "java", "java.lang.System" ).currentTimeMillis()
+	}
+
+	private function _isSessionId( value ) {
+		return isSimpleValue( value ) && reFind( "^[0-9a-f]{64}$", value ) > 0
 	}
 
 	private function _generateId() {

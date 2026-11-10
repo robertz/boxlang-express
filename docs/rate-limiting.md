@@ -33,7 +33,8 @@ O(1) bookkeeping per request instead of a timestamp log per key. The
 default key is `req.ip` — same caveat as `req.ip` itself applies: behind a
 reverse proxy without `app.set("trust proxy", 1)` (or a list of the proxies' addresses), every request shares
 the proxy's own IP as the key, rate-limiting the whole app together rather
-than per client. By default the store is in-memory on each `RateLimit`
+than per client. By default the store is in-memory (counted atomically, so concurrent
+requests can't slip past the limit) on each `RateLimit`
 instance (same trade-off as `Session`'s default `MemoryStore` — fine for a
 single-process app, not a cluster).
 

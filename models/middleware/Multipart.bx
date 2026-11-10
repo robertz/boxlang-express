@@ -38,6 +38,8 @@ class {
 			var parsed = ""
 			try {
 				parsed = _parseMultipart( bodyBytes, boundary )
+			} catch ( "BoxExpress.MultipartMalformed" e ) {
+				return res.status( 400 ).json( { error: true, message: "Malformed multipart body" } )
 			} catch ( any e ) {
 				return next( e )
 			}
@@ -123,6 +125,9 @@ class {
 				continue
 			}
 			var fieldName = _extractDispositionParam( disposition, "name" )
+			if ( isNull( fieldName ) ) {
+				throw( type = "BoxExpress.MultipartMalformed", message = "A multipart part has no name" )
+			}
 			var filename = _extractDispositionParam( disposition, "filename" )
 			// An empty part body shares its header terminator's last CRLF with
 			// the next delimiter, which puts headerEnd + 4 past partEnd.
@@ -168,23 +173,18 @@ class {
 		return headers
 	}
 
+	/**
+	 * Anchored to the start of a parameter, so `name` can't match the tail
+	 * of `filename` when a client sends filename first.
+	 */
 	private function _extractDispositionParam( disposition, paramName ) {
-		var marker = paramName & '="'
-		var pos = disposition.findNoCase( marker )
-		if ( !pos ) {
+		var matcher = createObject( "java", "java.util.regex.Pattern" )
+			.compile( '(?i)(?:^|;)\s*' & paramName & '="([^"]*)"' )
+			.matcher( disposition )
+		if ( !matcher.find() ) {
 			return javacast( "null", "" )
 		}
-		// mid(), not right()/left() — an empty param value (name="", the
-		// filename a browser sends for a file input submitted with nothing
-		// selected being the common real-world case) makes one of these
-		// counts 0, which right()/left() throw on but mid() handles fine.
-		var restStart = pos + marker.len()
-		var rest = disposition.mid( restStart, disposition.len() - restStart + 1 )
-		var endPos = rest.find( '"' )
-		if ( !endPos ) {
-			return javacast( "null", "" )
-		}
-		return rest.mid( 1, endPos - 1 )
+		return matcher.group( javacast( "int", 1 ) )
 	}
 
 	private function _persistFiles( files, dest ) {

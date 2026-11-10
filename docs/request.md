@@ -7,6 +7,11 @@ middleware, empty struct otherwise), `req.rawExchange()` (an escape hatch to
 the underlying `io.undertow.server.HttpServerExchange`, for anything not
 covered by the rest of the API).
 
+Cookie and query values are URL-decoded. One with a malformed escape
+(`discount=50%`, `%zz`) is kept as its raw text rather than failing the
+request — a cookie can be set by any script or sibling subdomain, so a bad
+one shouldn't lock a visitor out.
+
 `req.ip` is always the direct TCP peer by default — safe, since a client
 can't spoof it, but wrong behind a reverse proxy (it'll report the proxy's
 IP). `app.set( "trust proxy", ... )` says which proxies to believe, with the

@@ -15,7 +15,7 @@ class extends="testbox.system.BaseSpec" {
 				var id = "cachestore-test-#createUUID()#"
 				store.set( id, { views: 1 }, 60 )
 
-				expect( cache( "default" ).get( id ).isPresent() ).toBeTrue()
+				expect( cache( "default" ).get( "boxexpress-session-" & id ).isPresent() ).toBeTrue()
 				store.destroy( id )
 			} )
 
@@ -145,7 +145,7 @@ class extends="testbox.system.BaseSpec" {
 						() => expect( store.get( "during" ).n ).withContext( "and the outage-time entry is still readable" ).toBe( 2 )
 					] )
 					store.set( "after", { n: 3 }, 60 )
-					expect( cache( variables.name ).get( "after" ).isPresent() ).withContext( "writes reach the cache again" ).toBeTrue()
+					expect( cache( variables.name ).get( "boxexpress-session-after" ).isPresent() ).withContext( "writes reach the cache again" ).toBeTrue()
 				} )
 
 				it( "propagates runtime failures when fallback is false", function() {

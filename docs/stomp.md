@@ -165,7 +165,8 @@ node.
 **Targeted delivery.** `stomp.sendToUser(login, destination, data,
 headers)` publishes to `destination` (through the exchanges, like any
 publish) but only to subscriptions whose connection authenticated with
-that `login` — every connection the user has open, no one else's.
+that `login` (compared exactly, case included) — every connection the
+user has open, no one else's.
 `stomp.sendToConnection(connectionId, destination, data, headers)` does
 the same for one connection (a key of `getConnections()`). Both return
 how many subscriptions on this node received it, don't invoke
@@ -280,14 +281,17 @@ can't. Also not built: message **redelivery** (`NACK` and unacknowledged
 messages just clear bookkeeping — there is no queue to redeliver into).
 Destination matching (both the subscriber registry and
 exchange bindings) is exact-string only — `/topic/a` and `/topic/a/`
-are different destinations.
+are different destinations, and so are `/topic/a` and `/Topic/A`: matching
+is case-sensitive, so an `authorize()` rule can't be sidestepped by
+changing a destination's case.
 
 To relay a publish to every other process in a cluster instead of just
 this one's local subscribers, see `options.cluster` under [Cluster
 support](cluster.md).
 
 Header values are escaped per the STOMP spec (backslash, newline, colon),
-not just stripped — a destination or login value built from
+not just stripped (STOMP 1.0 has no escapes, so line breaks in a header
+sent to a 1.0 subscriber are dropped instead) — a destination or login value built from
 request-derived input can't break a frame's structure, the actual
 protocol-correct version of the same fix `SseEmitter.bx` needed. See
 [StompFrameCodec.bx](../models/StompFrameCodec.bx) and

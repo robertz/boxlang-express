@@ -39,7 +39,7 @@ class {
 			// Unlike this, the error paths below always log: those are actual
 			// server-side failures, not routine traffic.
 			if ( variables.settings[ "log" ] ?: true ) {
-				println( variables.color.gray( "[#dateTimeFormat( now(), 'yyyy-MM-dd HH:mm:ss' )#]" ) & _idTag( requestId ) & " " & variables.color.method( req.method ) & " #req.path# " & variables.color.dim( req.ip ) )
+				println( variables.color.gray( "[#dateTimeFormat( now(), 'yyyy-MM-dd HH:mm:ss' )#]" ) & _idTag( requestId ) & " " & variables.color.method( req.method ) & " #_logSafe( req.path )# " & variables.color.dim( _logSafe( req.ip ) ) )
 			}
 		} catch ( any e ) {
 			println( variables.color.gray( "[#dateTimeFormat( now(), 'yyyy-MM-dd HH:mm:ss' )#]" ) & " " & variables.color.red( "Failed to construct Request/Response: #e.message#" ) )
@@ -64,7 +64,7 @@ class {
 		try {
 			variables.router.dispatch( req, res )
 		} catch ( any e ) {
-			println( variables.color.gray( "[#dateTimeFormat( now(), 'yyyy-MM-dd HH:mm:ss' )#]" ) & _idTag( requestId ) & " " & variables.color.red( "Unhandled error dispatching #req.method# #req.path#: #e.message#" ) )
+			println( variables.color.gray( "[#dateTimeFormat( now(), 'yyyy-MM-dd HH:mm:ss' )#]" ) & _idTag( requestId ) & " " & variables.color.red( "Unhandled error dispatching #req.method# #_logSafe( req.path )#: #e.message#" ) )
 			if ( !res.isSent() ) {
 				try {
 					var message = ( variables.settings[ "env" ] ?: "" ) == "development" ? e.message : "Internal Server Error"
@@ -97,6 +97,14 @@ class {
 			return incoming
 		}
 		return lCase( createUUID() )
+	}
+
+	/**
+	 * The path arrives percent-decoded, so it can hold a newline or a terminal
+	 * escape sequence — printed raw, a request could forge log lines.
+	 */
+	function _logSafe( value ) {
+		return reReplace( toString( value ), "[\x00-\x1F\x7F-\x9F\u2028\u2029]", "?", "all" )
 	}
 
 	private function _idTag( requestId ) {
