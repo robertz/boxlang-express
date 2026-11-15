@@ -11,6 +11,10 @@ apiRouter.get( "/ping", ( req, res ) => res.json( { pong: true } ) )
 app.use( "/api", apiRouter )
 ```
 
+Inside a mounted router, `req.path` is relative to the mount point and
+`req.baseUrl` is the mount path (`"/api"` here; nested mounts add up) —
+see [Request](request.md#more-request-properties).
+
 Register all routes and middleware *before* calling `listen()`. The route
 table isn't synchronized, so mutating it while requests are already being
 served concurrently (each on its own virtual thread) isn't supported.

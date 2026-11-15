@@ -50,7 +50,7 @@ class {
 			}
 			// Whenever the answer depends on the request's Origin, caches must key on it.
 			if ( !( isSimpleValue( originOption ) && originOption == "*" ) ) {
-				res.set( "Vary", "Origin" )
+				res.vary( "Origin" )
 			}
 
 			if ( credentials ) {

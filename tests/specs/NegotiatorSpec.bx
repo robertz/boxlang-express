@@ -1,0 +1,150 @@
+/**
+ * Unit tests for content negotiation (Negotiator.bx) and the MIME table
+ * behind it — plain strings in, plain strings out, no request involved.
+ */
+class extends="testbox.system.BaseSpec" {
+
+	function run() {
+
+		describe( "Negotiator.mediaType()", function() {
+
+			it( "returns the offer the client weights highest, as it was offered", function() {
+				var negotiator = new "../../models/Negotiator"()
+				assertAll( [
+					() => expect( negotiator.mediaType( "text/html;q=0.5, application/json", [ "html", "json" ] ) ).toBe( "json" ),
+					() => expect( negotiator.mediaType( "text/html;q=0.5, application/json", [ "text/html", "application/json" ] ) ).toBe( "application/json" ),
+					() => expect( negotiator.mediaType( "application/json", [ "html", "json" ] ) ).toBe( "json" )
+				] )
+			} )
+
+			it( "falls back to offer order when the client has no preference", function() {
+				var negotiator = new "../../models/Negotiator"()
+				assertAll( [
+					() => expect( negotiator.mediaType( "", [ "json", "html" ] ) ).withContext( "no Accept header" ).toBe( "json" ),
+					() => expect( negotiator.mediaType( "*/*", [ "html", "json" ] ) ).toBe( "html" ),
+					() => expect( negotiator.mediaType( "*", [ "html", "json" ] ) ).withContext( "bare * some clients send" ).toBe( "html" )
+				] )
+			} )
+
+			it( "prefers a specific range over a wildcard that also matches", function() {
+				var negotiator = new "../../models/Negotiator"()
+				assertAll( [
+					() => expect( negotiator.mediaType( "text/*;q=0.3, text/html;q=0.9, */*;q=0.1", [ "txt", "html", "json" ] ) ).toBe( "html" ),
+					() => expect( negotiator.mediaType( "text/*, application/json;q=0.2", [ "json", "txt" ] ) ).toBe( "txt" ),
+					() => expect( negotiator.mediaType( "text/html;q=0, */*", [ "html", "json" ] ) ).withContext( "q=0 on the specific range excludes it despite */*" ).toBe( "json" )
+				] )
+			} )
+
+			it( "returns an empty string when nothing offered is acceptable", function() {
+				var negotiator = new "../../models/Negotiator"()
+				assertAll( [
+					() => expect( negotiator.mediaType( "image/png", [ "html", "json" ] ) ).toBe( "" ),
+					() => expect( negotiator.mediaType( "text/html;q=0", [ "html" ] ) ).toBe( "" ),
+					() => expect( negotiator.mediaType( "*/*", [ "nosuchextension" ] ) ).withContext( "an unknown extension is never offered" ).toBe( "" ),
+					() => expect( negotiator.mediaType( "*/*", [] ) ).toBe( "" )
+				] )
+			} )
+
+			it( "ignores parameters, case and junk in the header", function() {
+				var negotiator = new "../../models/Negotiator"()
+				assertAll( [
+					() => expect( negotiator.mediaType( "TEXT/HTML; level=1; Q=0.4 , Application/JSON ;q=0.8", [ "html", "json" ] ) ).toBe( "json" ),
+					() => expect( negotiator.mediaType( ",, ;q=1, garbage, application/json;q=abc, text/html", [ "json", "html" ] ) ).withContext( "an unparseable q counts as 0" ).toBe( "html" )
+				] )
+			} )
+
+			it( "lists the accepted types most preferred first", function() {
+				var negotiator = new "../../models/Negotiator"()
+				expect( negotiator.mediaTypes( "text/html;q=0.5, application/json, image/png;q=0" ) ).toBe( [ "application/json", "text/html" ] )
+			} )
+
+		} )
+
+		describe( "Negotiator.language()", function() {
+
+			it( "picks by weight, and matches a tag against its prefix both ways", function() {
+				var negotiator = new "../../models/Negotiator"()
+				assertAll( [
+					() => expect( negotiator.language( "fr;q=0.3, en-US", [ "fr", "en" ] ) ).withContext( "en satisfies en-US" ).toBe( "en" ),
+					() => expect( negotiator.language( "en", [ "fr", "en-GB" ] ) ).withContext( "en-GB satisfies en" ).toBe( "en-GB" ),
+					() => expect( negotiator.language( "en", [ "en-GB", "en" ] ) ).withContext( "an exact tag beats a prefix match" ).toBe( "en" ),
+					() => expect( negotiator.language( "de", [ "fr", "en" ] ) ).toBe( "" ),
+					() => expect( negotiator.language( "de, *;q=0.1", [ "fr", "en" ] ) ).toBe( "fr" ),
+					() => expect( negotiator.language( "", [ "fr", "en" ] ) ).toBe( "fr" )
+				] )
+			} )
+
+			it( "lists the accepted languages most preferred first", function() {
+				var negotiator = new "../../models/Negotiator"()
+				expect( negotiator.languages( "en;q=0.8, fr, de;q=0.9" ) ).toBe( [ "fr", "de", "en" ] )
+			} )
+
+		} )
+
+		describe( "Negotiator.matchType()", function() {
+
+			it( "matches an extension or a full type and returns it as given", function() {
+				var negotiator = new "../../models/Negotiator"()
+				assertAll( [
+					() => expect( negotiator.matchType( "application/json; charset=utf-8", "json" ) ).toBe( "json" ),
+					() => expect( negotiator.matchType( "Application/JSON", "application/json" ) ).toBe( "application/json" ),
+					() => expect( negotiator.matchType( "text/html", "json" ) ).toBe( "" ),
+					() => expect( negotiator.matchType( "application/x-www-form-urlencoded", "urlencoded" ) ).toBe( "urlencoded" )
+				] )
+			} )
+
+			it( "returns the actual type for a wildcard or suffix pattern", function() {
+				var negotiator = new "../../models/Negotiator"()
+				assertAll( [
+					() => expect( negotiator.matchType( "text/html; charset=utf-8", "text/*" ) ).toBe( "text/html" ),
+					() => expect( negotiator.matchType( "application/json", "*/json" ) ).toBe( "application/json" ),
+					() => expect( negotiator.matchType( "application/vnd.api+json", "+json" ) ).toBe( "application/vnd.api+json" ),
+					() => expect( negotiator.matchType( "application/json", "+json" ) ).withContext( "a suffix needs something before it" ).toBe( "" ),
+					() => expect( negotiator.matchType( "multipart/form-data; boundary=x", "multipart" ) ).toBe( "multipart/form-data" ),
+					() => expect( negotiator.matchType( "image/png", "text/*" ) ).toBe( "" )
+				] )
+			} )
+
+			it( "never matches a malformed Content-Type or an unknown extension", function() {
+				var negotiator = new "../../models/Negotiator"()
+				assertAll( [
+					() => expect( negotiator.matchType( "", "json" ) ).toBe( "" ),
+					() => expect( negotiator.matchType( "json", "json" ) ).toBe( "" ),
+					() => expect( negotiator.matchType( "a/b/c", "*/*" ) ).toBe( "" ),
+					() => expect( negotiator.matchType( "application/json", "nosuchextension" ) ).toBe( "" ),
+					() => expect( negotiator.matchType( "application/json", "" ) ).toBe( "" )
+				] )
+			} )
+
+		} )
+
+		describe( "MimeTypes", function() {
+
+			it( "looks up an extension with or without a dot, in any case", function() {
+				var mime = new "../../models/MimeTypes"()
+				assertAll( [
+					() => expect( mime.forExtension( "json" ) ).toBe( "application/json; charset=utf-8" ),
+					() => expect( mime.forExtension( ".PNG" ) ).toBe( "image/png" ),
+					() => expect( mime.forExtension( "nosuchextension" ) ).toBe( "" ),
+					() => expect( mime.forExtension( "" ) ).toBe( "" ),
+					() => expect( mime.forExtension( "." ) ).toBe( "" )
+				] )
+			} )
+
+			it( "adds a charset to a bare text type and leaves others alone", function() {
+				var mime = new "../../models/MimeTypes"()
+				assertAll( [
+					() => expect( mime.contentType( "text/html" ) ).toBe( "text/html; charset=utf-8" ),
+					() => expect( mime.contentType( "text/html; charset=latin1" ) ).toBe( "text/html; charset=latin1" ),
+					() => expect( mime.contentType( "image/png" ) ).toBe( "image/png" ),
+					() => expect( mime.contentType( "csv" ) ).toBe( "text/csv; charset=utf-8" ),
+					() => expect( mime.bare( "json" ) ).toBe( "application/json" ),
+					() => expect( mime.bare( "Text/HTML; charset=utf-8" ) ).toBe( "text/html" )
+				] )
+			} )
+
+		} )
+
+	}
+
+}

@@ -126,6 +126,7 @@ class extends="testbox.system.BaseSpec" {
 		res.isSent = function() { return sent }
 		res.status = function( code ) { statusCode = code; return res }
 		res.set = function( name, value ) { headers[ name ] = value; return res }
+		res.vary = function( field ) { headers[ "Vary" ] = field; return res }
 		res.end = function() { sent = true; return res }
 		res.json = function( data ) { sent = true; return res }
 		res.getStatusCode = function() { return statusCode }

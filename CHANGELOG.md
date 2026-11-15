@@ -1,5 +1,113 @@
 # Changelog
 
+**0.2.27**
+- **Request helpers** (`models/Request.bx`, new `models/Negotiator.bx`):
+  the parts of Express's `req` that a ported handler reaches for first
+  and had to be hand-rolled from `req.headers` until now.
+  - `req.accepts()` and `req.acceptsLanguages()` pick from the types or
+    languages you offer by the client's `q` weights, returning `false`
+    when none is acceptable. `req.is()` matches the request's own
+    `Content-Type`, including wildcards, `+json`-style suffixes and the
+    `urlencoded`/`multipart` shorthands. The rules follow the npm
+    `negotiator` and `type-is` packages, minus media-type parameters
+    other than `q`. `req.is()` returns `false`, not `null`, for a request
+    with no body.
+  - `req.xhr`, and `req.subdomains` with `app.set( "subdomain offset", n )`.
+  - `req.baseUrl` (`models/Router.bx`): the mount path of the router or
+    path-scoped middleware handling the request. A mounted router had no
+    way to learn where it was mounted, so it couldn't build a link to
+    itself without the prefix hard-coded.
+  - No `req.fresh`/`req.stale` yet — they only mean something once
+    `res.send()`/`res.json()` set an `ETag`, which they don't.
+- **Response helpers** (`models/Response.bx`):
+  - `res.clearCookie()`, plus `domain` and `expires` options on
+    `res.cookie()` — without `domain` a cookie scoped to a parent domain
+    could be neither set nor cleared.
+  - `res.vary()` adds to `Vary` instead of replacing it.
+    `boxExpressCors()` now uses it, so its `Vary: Origin` no longer
+    overwrites a `Vary` set earlier in the chain. **A hand-written fake
+    `res` passed to the CORS middleware in a unit test needs a `vary()`
+    method.**
+  - `res.format()` dispatches on `Accept`, sets `Content-Type` and
+    `Vary: Accept`, and answers `406` when nothing matches. Pass an
+    ordered struct (`[ ... ]`): a plain `{ ... }` has no key order to
+    fall back on when the client has no preference.
+  - `res.get()`, `res.append()`, `res.location()`, `res.links()`,
+    `res.attachment()`, `res.set( { ... } )` for several headers at once,
+    and an extension shorthand for `res.type( "json" )`. `res.append()`
+    joins values into one comma-separated line (a line each for
+    `Set-Cookie`) so `res.get()` still returns the whole value.
+- **Timeouts and size limits** (`models/BoxExpress.bx`,
+  `models/HttpBridge.bx`, new `models/RequestWatchdog.bx`; see
+  [docs/limits.md](docs/limits.md)). Until now the only bounds on a
+  request were the body parsers' own limits and the accept backlog.
+  - `app.set( "requestTimeoutMs", n )` answers `503` when a handler
+    hasn't started its response in time; `req.setTimeout( ms )` changes
+    or removes it for one request. Off by default. The handler's thread
+    is interrupted and sends the `503` itself — the watchdog never writes
+    to the response, because Undertow's exchange isn't safe to write from
+    a second thread while the handler may be using it. The trade-off is
+    that a handler which never blocks isn't stopped. Error-handling
+    middleware doesn't run for a timeout; a handler that catches the
+    interruption can check `req.timedOut`. A response that has already
+    started (SSE, a file download) is never cut off.
+  - `app.set( "maxBodySize", bytes )` answers `413` before any handler
+    runs, on `Content-Length` alone when there is one. Off by default, so
+    upgrading can't start rejecting uploads. This is enforced in
+    BoxExpress rather than with Undertow's `MAX_ENTITY_SIZE`, which was
+    tried first: it answered an oversized request with a `500`, or
+    dropped the connection with no response for a chunked one, and
+    printed a stack trace either way. A chunked body is read into memory
+    up to the cap to measure it.
+  - **`headerTimeoutMs` defaults to 60 s. Before, a client that never
+    finished sending its headers was held open indefinitely** (measured
+    against 0.2.26: still open after 75 s).
+  - **`maxHeaderSize` defaults to 64 KB, down from Undertow's 1 MB**; a
+    request over it gets a `400`. Raise it if you send unusually large
+    headers.
+  - `keepAliveTimeoutMs` makes the idle keep-alive timeout configurable.
+    Its default, 60 s, is what Undertow already did.
+- **Text and raw body parsers** (`models/middleware/BodyParsers.bx`, new
+  `bifs/boxExpressText.bx`, `bifs/boxExpressRaw.bx`; see
+  [docs/middleware.md](docs/middleware.md)):
+  - `boxExpressText()` puts a `text/plain` body on `req.body` as a
+    string, decoded with the charset the request names (`415` for one the
+    JVM can't decode). `boxExpressRaw()` puts an
+    `application/octet-stream` body there as the exact bytes.
+  - All four parsers take a `type` option — the same patterns as
+    `req.is()`, an array, or a function — so `boxExpressJSON( { type:
+    [ "json", "+json" ] } )` parses `application/vnd.api+json`. With no
+    `type`, `json()` and `urlencoded()` match exactly as before.
+  - All four take a `verify( req, res, bodyBytes )` option, called with
+    the bytes as received before they're parsed; throwing answers `403`.
+    This is what a webhook signature check needs: the signature covers
+    the sender's exact bytes, which re-serializing parsed JSON doesn't
+    reproduce, and before this the only way to see them was to skip the
+    parser and read `req.bodyStream()` by hand.
+  - A parser now skips a request an earlier parser, or
+    `boxExpressUpload()`, already handled. The body stream can only be
+    read once, so a second parser was reading nothing — harmless while
+    no two parsers could match the same request, but a catch-all
+    `type: "*/*"` would have replaced a parsed `req.body` with an empty
+    one.
+- **Signed cookies** (new `models/CookieSigner.bx`, `models/Request.bx`,
+  `models/Response.bx`): `app.set( "cookie secret", secret )`, then
+  `res.cookie( name, value, { signed: true } )` and `req.signedCookies`.
+  A cookie that fails verification reads as `false` and, like every
+  signed cookie, is removed from `req.cookies`, so a forged value can't
+  be read as a plain one. An array of secrets signs with the first and
+  verifies with all, for rotation. The format is `cookie-parser`'s, byte
+  for byte (checked against Node's own HMAC output), so an Express app
+  with the same secret reads these cookies and vice versa. No `j:` JSON
+  cookies. Setting a secret changes nothing for an app that doesn't sign:
+  only values starting `s:` are affected.
+- **One MIME table** (new `models/MimeTypes.bx`): `res.sendFile()` and
+  `boxExpressStatic()` each had their own, and they disagreed —
+  `sendFile()` sent `.avif`, `.ttf`, `.otf`, `.ogg`, `.map` and
+  `.webmanifest` as `application/octet-stream`, static files did the same
+  for `.csv` and `.zip`. Both now use the union, which also gains `.md`,
+  `.yaml`/`.yml`, `.wav` and `.text`.
+
 **0.2.26**
 - **Session ids** (`models/middleware/Session.bx`,
   `models/stores/CacheStore.bx`): the session cookie's value went to the

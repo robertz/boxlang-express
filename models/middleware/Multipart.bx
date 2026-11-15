@@ -50,6 +50,7 @@ class {
 				_persistFiles( parsed.files, dest )
 			}
 			req.files = parsed.files
+			req.bodyParsed = true
 
 			next()
 		}

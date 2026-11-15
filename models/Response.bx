@@ -13,20 +13,8 @@ class {
 			200: "OK", 201: "Created", 204: "No Content",
 			301: "Moved Permanently", 302: "Found",
 			400: "Bad Request", 401: "Unauthorized", 403: "Forbidden", 404: "Not Found",
-			405: "Method Not Allowed", 409: "Conflict", 422: "Unprocessable Entity",
+			405: "Method Not Allowed", 406: "Not Acceptable", 409: "Conflict", 422: "Unprocessable Entity",
 			500: "Internal Server Error", 502: "Bad Gateway", 503: "Service Unavailable"
-		}
-		MIME_TYPES = {
-			html: "text/html; charset=utf-8", htm: "text/html; charset=utf-8",
-			css: "text/css; charset=utf-8", js: "text/javascript; charset=utf-8",
-			json: "application/json; charset=utf-8", txt: "text/plain; charset=utf-8",
-			png: "image/png", jpg: "image/jpeg", jpeg: "image/jpeg", gif: "image/gif",
-			svg: "image/svg+xml", ico: "image/x-icon",
-			woff: "font/woff", woff2: "font/woff2",
-			pdf: "application/pdf", zip: "application/zip",
-			csv: "text/csv; charset=utf-8", xml: "application/xml; charset=utf-8",
-			mp4: "video/mp4", webm: "video/webm", mp3: "audio/mpeg",
-			mjs: "text/javascript; charset=utf-8", webp: "image/webp", wasm: "application/wasm"
 		}
 	}
 
@@ -91,7 +79,16 @@ class {
 		return this
 	}
 
+	/**
+	 * set( name, value ) or set( { name: value, ... } )
+	 */
 	function set( name, value ) {
+		if ( isStruct( name ) ) {
+			for ( var headerName in name ) {
+				variables.exchangeAdapter.setHeader( headerName, name[ headerName ] )
+			}
+			return this
+		}
 		variables.exchangeAdapter.setHeader( name, value )
 		return this
 	}
@@ -100,15 +97,175 @@ class {
 		return set( name, value )
 	}
 
+	/**
+	 * A response header set so far, or null.
+	 */
+	function get( name ) {
+		return variables.exchangeAdapter.getHeader( name )
+	}
+
+	/**
+	 * Adds to a header instead of replacing it. Set-Cookie gets a line per
+	 * value; any other header is joined into one comma-separated line,
+	 * which means the same thing and keeps res.get() showing all of it.
+	 */
+	function append( name, value ) {
+		var values = isArray( value ) ? value : [ value ]
+		if ( compareNoCase( name, "Set-Cookie" ) == 0 ) {
+			for ( var item in values ) {
+				variables.exchangeAdapter.addHeader( name, item )
+			}
+			return this
+		}
+		var existing = variables.exchangeAdapter.getHeader( name ) ?: ""
+		var combined = len( existing ) ? [ existing ] : []
+		combined.append( values, true )
+		if ( combined.len() ) {
+			variables.exchangeAdapter.setHeader( name, combined.toList( ", " ) )
+		}
+		return this
+	}
+
+	/**
+	 * type( "application/json" ), or an extension: type( "json" ), type( ".png" ).
+	 * An unknown extension is sent as application/octet-stream.
+	 */
 	function type( mimeType ) {
+		if ( !toString( mimeType ).find( "/" ) ) {
+			var known = new MimeTypes().forExtension( mimeType )
+			return set( "Content-Type", len( known ) ? known : "application/octet-stream" )
+		}
 		return set( "Content-Type", mimeType )
 	}
 
+	function location( targetUrl ) {
+		return set( "Location", targetUrl )
+	}
+
+	/**
+	 * Adds field names to Vary, skipping ones already listed — so a cache
+	 * keys on every request header the response depends on, however many
+	 * middleware each added their own.
+	 */
+	function vary( field ) {
+		var fields = isArray( field ) ? field : toString( field ).listToArray( "," )
+		var existing = variables.exchangeAdapter.getHeader( "Vary" ) ?: ""
+		var current = existing.listToArray( "," ).map( ( item ) => trim( item ) )
+		if ( current.find( "*" ) ) {
+			return this
+		}
+		for ( var item in fields ) {
+			var fieldName = trim( item )
+			if ( !len( fieldName ) ) {
+				continue
+			}
+			if ( fieldName == "*" ) {
+				return set( "Vary", "*" )
+			}
+			if ( !current.findNoCase( fieldName ) ) {
+				current.append( fieldName )
+			}
+		}
+		if ( current.len() ) {
+			set( "Vary", current.toList( ", " ) )
+		}
+		return this
+	}
+
+	/**
+	 * links( { next: "/items?page=3", last: "/items?page=9" } ) -> a Link
+	 * header, added to any already set.
+	 */
+	function links( linkMap ) {
+		var parts = []
+		for ( var rel in linkMap ) {
+			parts.append( "<" & linkMap[ rel ] & '>; rel="' & _sanitizeHeaderToken( rel ) & '"' )
+		}
+		return parts.len() ? append( "Link", parts.toList( ", " ) ) : this
+	}
+
+	/**
+	 * Content-Disposition: attachment, with no file involved — for a body
+	 * the handler builds itself. A filename also sets Content-Type from its
+	 * extension when that's known.
+	 */
+	function attachment( filename = "" ) {
+		if ( !len( filename ) ) {
+			return set( "Content-Disposition", "attachment" )
+		}
+		var known = new MimeTypes().forExtension( listLast( filename, "." ) )
+		if ( len( known ) ) {
+			set( "Content-Type", known )
+		}
+		return set( "Content-Disposition", 'attachment; filename="#_sanitizeHeaderToken( filename )#"' )
+	}
+
+	/**
+	 * Runs the handler for the type the request's Accept header prefers:
+	 *
+	 *   res.format( [
+	 *     html: () => res.send( "<p>hi</p>" ),
+	 *     json: () => res.json( { hi: true } ),
+	 *     default: () => res.status( 406 ).send( "Not Acceptable" )
+	 *   ] )
+	 *
+	 * Keys are extensions or full MIME types. Content-Type is set to the
+	 * chosen one and Accept is added to Vary. With no match and no
+	 * `default`, the response is a 406. When the client has no preference
+	 * the first key wins — which is only "the first one written" for an
+	 * ordered struct ( [ ... ] ); a plain { ... } has no key order.
+	 */
+	function format( handlers ) {
+		var offered = []
+		for ( var key in handlers ) {
+			if ( compareNoCase( key, "default" ) != 0 ) {
+				offered.append( key )
+			}
+		}
+
+		vary( "Accept" )
+
+		var chosen = offered.len() ? new Negotiator().mediaType( variables.exchangeAdapter.getRequestHeader( "Accept" ), offered ) : ""
+		if ( len( chosen ) ) {
+			set( "Content-Type", new MimeTypes().contentType( chosen ) )
+			var chosenHandler = handlers[ chosen ]
+			chosenHandler()
+		} else if ( structKeyExists( handlers, "default" ) ) {
+			var defaultHandler = handlers[ "default" ]
+			defaultHandler()
+		} else {
+			sendStatus( 406 )
+		}
+		return this
+	}
+
+	/**
+	 * options: path ("/"), domain, maxAge (seconds), expires (a date),
+	 * httpOnly (true), secure (false), sameSite, signed (false — needs
+	 * app.set( "cookie secret" ); read it back from req.signedCookies).
+	 */
 	function cookie( name, value, options = {} ) {
-		var parts = [ name & "=" & urlEncodedFormat( value ) ]
+		var cookieValue = value
+		if ( options.signed ?: false ) {
+			var signer = variables.settings[ "cookie signer" ] ?: ""
+			if ( isSimpleValue( signer ) ) {
+				throw(
+					message = "res.cookie() with signed: true needs a secret — call app.set( ""cookie secret"", ... ) first",
+					type = "BoxExpress.NoCookieSecret"
+				)
+			}
+			cookieValue = signer.sign( toString( value ) )
+		}
+		var parts = [ name & "=" & urlEncodedFormat( cookieValue ) ]
 		parts.append( "Path=" & ( options.path ?: "/" ) )
+		if ( !isNull( options.domain ) ) {
+			parts.append( "Domain=" & options.domain )
+		}
 		if ( !isNull( options.maxAge ) ) {
 			parts.append( "Max-Age=" & options.maxAge )
+		}
+		if ( !isNull( options.expires ) ) {
+			parts.append( "Expires=" & dateTimeFormat( options.expires, "EEE, dd MMM yyyy HH:mm:ss", "UTC" ) & " GMT" )
 		}
 		if ( options.httpOnly ?: true ) {
 			parts.append( "HttpOnly" )
@@ -121,6 +278,20 @@ class {
 		}
 		variables.exchangeAdapter.addHeader( "Set-Cookie", parts.toList( "; " ) )
 		return this
+	}
+
+	/**
+	 * Tells the browser to drop a cookie. A browser only removes the cookie
+	 * whose path and domain match, so pass the same `path`/`domain` (and
+	 * `secure`/`sameSite`) options it was set with.
+	 */
+	function clearCookie( name, options = {} ) {
+		var clearOptions = {}
+		clearOptions.append( options )
+		clearOptions.signed = false
+		clearOptions.maxAge = 0
+		clearOptions.expires = createDateTime( 1970, 1, 1, 0, 0, 0, 0, "UTC" )
+		return cookie( name, "", clearOptions )
 	}
 
 	function send( data ) {
@@ -151,7 +322,7 @@ class {
 
 	function redirect( targetUrl, code = 302 ) {
 		status( code )
-		set( "Location", targetUrl )
+		location( targetUrl )
 		return _end( [] )
 	}
 
@@ -331,8 +502,8 @@ class {
 	}
 
 	private function _guessMimeType( fileName ) {
-		var ext = listLast( fileName, "." ).lcase()
-		return static.MIME_TYPES[ ext ] ?: "application/octet-stream"
+		var known = new MimeTypes().forExtension( listLast( fileName, "." ) )
+		return len( known ) ? known : "application/octet-stream"
 	}
 
 	/**

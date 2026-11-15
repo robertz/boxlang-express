@@ -1,0 +1,240 @@
+/**
+ * Content negotiation for req.accepts(), req.acceptsLanguages(), req.is()
+ * and res.format() — the same rules as the npm `negotiator` and `type-is`
+ * packages Express uses. Every method returns "" for "no match" rather
+ * than null; see ARCHITECTURE.md on null locals.
+ *
+ * Media-type parameters other than q (e.g. "text/html;level=1") are
+ * ignored: a range matches on type and subtype alone.
+ */
+class {
+
+	function init() {
+		variables.mime = new MimeTypes()
+		return this
+	}
+
+	/**
+	 * The entry in `offered` (extensions or full MIME types) the Accept
+	 * header prefers, returned as it was offered. A missing or empty header
+	 * accepts anything, so the first usable offer wins.
+	 */
+	function mediaType( acceptHeader, offered ) {
+		var ranges = _parse( acceptHeader, "*/*" )
+		var candidates = []
+
+		for ( var i = 1; i <= offered.len(); i++ ) {
+			var fullType = variables.mime.bare( offered[ i ] )
+			if ( !fullType.find( "/" ) ) {
+				continue
+			}
+			var best = _bestRange( ranges, ( range ) => _mediaSpecificity( range.value, fullType ) )
+			if ( best.specificity > 0 && best.q > 0 ) {
+				candidates.append( { value: offered[ i ], q: best.q, specificity: best.specificity, order: best.order, index: i } )
+			}
+		}
+
+		return _pick( candidates )
+	}
+
+	/**
+	 * The MIME types the Accept header names, most preferred first.
+	 */
+	function mediaTypes( acceptHeader ) {
+		return _ordered( _parse( acceptHeader, "*/*" ) )
+	}
+
+	/**
+	 * The entry in `offered` (language tags) the Accept-Language header
+	 * prefers. "en" is satisfied by a client asking for "en-US", and the
+	 * other way round, with an exact tag preferred over either.
+	 */
+	function language( acceptLanguageHeader, offered ) {
+		var ranges = _parse( acceptLanguageHeader, "*" )
+		var candidates = []
+
+		for ( var i = 1; i <= offered.len(); i++ ) {
+			var tag = lcase( trim( offered[ i ] ) )
+			if ( !len( tag ) ) {
+				continue
+			}
+			var best = _bestRange( ranges, ( range ) => _languageSpecificity( range.value, tag ) )
+			if ( best.specificity > 0 && best.q > 0 ) {
+				candidates.append( { value: offered[ i ], q: best.q, specificity: best.specificity, order: best.order, index: i } )
+			}
+		}
+
+		return _pick( candidates )
+	}
+
+	function languages( acceptLanguageHeader ) {
+		return _ordered( _parse( acceptLanguageHeader, "*" ) )
+	}
+
+	/**
+	 * Whether a Content-Type header value matches `pattern`: an extension
+	 * ("json"), a full type, a type with a wildcard on either side of the
+	 * slash, a suffix ("+json"), or the shorthands "urlencoded" and
+	 * "multipart". Returns the
+	 * pattern as given — or the actual type, for a wildcard or suffix
+	 * pattern — and "" when it doesn't match.
+	 */
+	function matchType( contentTypeHeader, pattern ) {
+		var actual = lcase( trim( toString( contentTypeHeader ).listFirst( ";" ) ) )
+		if ( actual.listLen( "/" ) != 2 ) {
+			return ""
+		}
+
+		var wanted = lcase( trim( pattern ) )
+		if ( wanted == "urlencoded" ) {
+			wanted = "application/x-www-form-urlencoded"
+		} else if ( wanted == "multipart" ) {
+			wanted = "multipart/*"
+		} else if ( wanted.left( 1 ) == "+" ) {
+			wanted = "*/*" & wanted
+		} else if ( !wanted.find( "/" ) ) {
+			wanted = variables.mime.bare( wanted )
+		}
+		if ( wanted.listLen( "/" ) != 2 ) {
+			return ""
+		}
+
+		var actualType = actual.listFirst( "/" )
+		var actualSubtype = actual.listLast( "/" )
+		var wantedType = wanted.listFirst( "/" )
+		var wantedSubtype = wanted.listLast( "/" )
+
+		if ( wantedType != "*" && wantedType != actualType ) {
+			return ""
+		}
+
+		var subtypeMatches = false
+		if ( wantedSubtype == "*" ) {
+			subtypeMatches = true
+		} else if ( wantedSubtype.left( 2 ) == "*+" ) {
+			var suffix = wantedSubtype.mid( 2, wantedSubtype.len() )
+			subtypeMatches = actualSubtype.len() > suffix.len() && actualSubtype.right( suffix.len() ) == suffix
+		} else {
+			subtypeMatches = ( wantedSubtype == actualSubtype )
+		}
+		if ( !subtypeMatches ) {
+			return ""
+		}
+
+		return ( wanted.find( "*" ) ) ? actual : pattern
+	}
+
+	/**
+	 * "a;q=0.5, b" -> [ { value: "a", q: 0.5, order: 1 }, { value: "b", q: 1, order: 2 } ].
+	 * A missing or blank header is one range matching everything.
+	 */
+	private function _parse( headerValue, wildcard ) {
+		var raw = trim( toString( headerValue ) )
+		if ( !len( raw ) ) {
+			return [ { value: wildcard, q: 1, order: 1 } ]
+		}
+
+		var ranges = []
+		var order = 0
+		for ( var part in raw.listToArray( "," ) ) {
+			var pieces = part.listToArray( ";" )
+			if ( !pieces.len() ) {
+				continue
+			}
+			var value = lcase( trim( pieces[ 1 ] ) )
+			if ( !len( value ) ) {
+				continue
+			}
+			// Some clients send a bare "*" in Accept.
+			if ( wildcard == "*/*" && value == "*" ) {
+				value = "*/*"
+			}
+			var q = 1
+			for ( var p = 2; p <= pieces.len(); p++ ) {
+				var param = trim( pieces[ p ] )
+				if ( lcase( param.left( 2 ) ) == "q=" ) {
+					var rawQ = trim( param.mid( 3, param.len() ) )
+					q = isNumeric( rawQ ) ? val( rawQ ) : 0
+				}
+			}
+			order++
+			ranges.append( { value: value, q: q, order: order } )
+		}
+		return ranges
+	}
+
+	/**
+	 * The most specific range that matches, by `specificityOf( range )`
+	 * (0 = no match). Among equally specific ranges the earliest wins.
+	 */
+	private function _bestRange( ranges, specificityOf ) {
+		var best = { specificity: 0, q: 0, order: 0 }
+		for ( var range in ranges ) {
+			var specificity = specificityOf( range )
+			if ( specificity > best.specificity ) {
+				best = { specificity: specificity, q: range.q, order: range.order }
+			}
+		}
+		return best
+	}
+
+	private function _mediaSpecificity( rangeValue, fullType ) {
+		if ( rangeValue == "*/*" ) {
+			return 1
+		}
+		if ( rangeValue.listLen( "/" ) != 2 ) {
+			return 0
+		}
+		if ( rangeValue == fullType ) {
+			return 3
+		}
+		if ( rangeValue.listLast( "/" ) == "*" && rangeValue.listFirst( "/" ) == fullType.listFirst( "/" ) ) {
+			return 2
+		}
+		return 0
+	}
+
+	private function _languageSpecificity( rangeValue, tag ) {
+		if ( rangeValue == tag ) {
+			return 4
+		}
+		if ( rangeValue.listFirst( "-" ) == tag ) {
+			return 3
+		}
+		if ( rangeValue == tag.listFirst( "-" ) ) {
+			return 2
+		}
+		return rangeValue == "*" ? 1 : 0
+	}
+
+	private function _pick( candidates ) {
+		if ( !candidates.len() ) {
+			return ""
+		}
+		candidates.sort( ( a, b ) => {
+			if ( a.q != b.q ) {
+				return a.q > b.q ? -1 : 1
+			}
+			if ( a.specificity != b.specificity ) {
+				return a.specificity > b.specificity ? -1 : 1
+			}
+			if ( a.order != b.order ) {
+				return a.order < b.order ? -1 : 1
+			}
+			return a.index < b.index ? -1 : 1
+		} )
+		return candidates[ 1 ].value
+	}
+
+	private function _ordered( ranges ) {
+		var accepted = ranges.filter( ( range ) => range.q > 0 )
+		accepted.sort( ( a, b ) => {
+			if ( a.q != b.q ) {
+				return a.q > b.q ? -1 : 1
+			}
+			return a.order < b.order ? -1 : 1
+		} )
+		return accepted.map( ( range ) => range.value )
+	}
+
+}

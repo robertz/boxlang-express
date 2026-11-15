@@ -1,0 +1,451 @@
+/**
+ * req.accepts()/acceptsLanguages()/is(), req.xhr/subdomains/baseUrl, and
+ * res.get()/append()/vary()/links()/location()/attachment()/format()/
+ * clearCookie(). Most run through app.inject(); the last suite repeats the
+ * ones that depend on real header handling against a live server.
+ */
+class extends="testbox.system.BaseSpec" {
+
+	function beforeAll() {
+		variables.testPort = 4350
+		variables.baseUrl = "http://localhost:#variables.testPort#"
+		variables.client = new "../helpers/HttpClient"()
+		variables.liveApp = _app()
+		variables.liveApp.set( "log", false )
+		variables.liveApp.listen( port = variables.testPort, options = { block: false } )
+		sleep( 300 )
+	}
+
+	function afterAll() {
+		variables.liveApp.close()
+	}
+
+	private function _app() {
+		var app = new "../../models/BoxExpress"()
+
+		app.get( "/negotiate", ( req, res ) => res.json( {
+			type: req.accepts( "html", "json" ),
+			fromArray: req.accepts( [ "text/html", "application/json" ] ),
+			all: req.accepts(),
+			language: req.acceptsLanguages( "fr", "en" ),
+			languages: req.acceptsLanguages()
+		} ) )
+		app.all( "/is", ( req, res ) => res.json( {
+			json: req.is( "json" ),
+			either: req.is( "html", "json" ),
+			fromArray: req.is( [ "html", "text/*" ] ),
+			suffix: req.is( "+json" )
+		} ) )
+		app.get( "/meta", ( req, res ) => res.json( { xhr: req.xhr, subdomains: req.subdomains, baseUrl: req.baseUrl } ) )
+
+		var inner = new "../../models/Router"()
+		inner.get( "/where", ( req, res ) => res.json( { baseUrl: req.baseUrl, path: req.path, originalUrl: req.originalUrl } ) )
+		inner.get( "/boom", ( req, res ) => { throw( "boom" ) } )
+		var outer = new "../../models/Router"()
+		outer.use( "/:version", inner )
+		outer.get( "/where", ( req, res ) => res.json( { baseUrl: req.baseUrl } ) )
+		app.use( "/api", ( req, res, next ) => {
+			res.set( "X-Seen-Base", req.baseUrl )
+			next()
+		} )
+		app.use( "/api", outer )
+		app.get( "/after", ( req, res ) => res.json( { baseUrl: req.baseUrl } ) )
+
+		app.get( "/format", ( req, res ) => {
+			res.format( [
+				html: () => res.send( "<p>hi</p>" ),
+				"application/json": () => res.json( { hi: true } ),
+				txt: () => res.send( "hi" )
+			] )
+		} )
+		app.get( "/format-default", ( req, res ) => {
+			res.format( [
+				json: () => res.json( { hi: true } ),
+				default: () => res.status( 415 ).send( "fallback" )
+			] )
+		} )
+		app.get( "/format-empty", ( req, res ) => res.format( {} ) )
+
+		app.get( "/headers", ( req, res ) => {
+			res.set( { "X-One": "1", "X-Two": "2" } )
+			res.append( "X-List", "a" ).append( "X-List", [ "b", "c" ] )
+			res.vary( "Origin" ).vary( "origin, Accept" ).vary( [ "Accept", "Accept-Language" ] )
+			res.links( [ next: "/items?page=2", last: "/items?page=9" ] ).links( [ prev: "/items?page=0" ] )
+			res.location( "/elsewhere" )
+			res.json( { one: res.get( "x-one" ), list: res.get( "X-List" ), missing: isNull( res.get( "X-Nope" ) ) } )
+		} )
+		app.get( "/vary-star", ( req, res ) => res.vary( "Accept" ).vary( "*" ).vary( "Origin" ).send( "ok" ) )
+		app.get( "/type/:kind", ( req, res ) => res.type( req.params.kind ).end( "x" ) )
+		app.get( "/attachment", ( req, res ) => res.attachment( "report.csv" ).send( "a,b" ) )
+		app.get( "/attachment-bare", ( req, res ) => res.attachment().send( "x" ) )
+		app.get( "/attachment-unknown", ( req, res ) => res.attachment( 'we"ird.zzz' ).send( "x" ) )
+		app.get( "/cookies", ( req, res ) => {
+			res.append( "Set-Cookie", "raw=1" )
+			res.cookie( "scoped", "v", { domain: "example.com", path: "/admin", expires: createDateTime( 2030, 1, 2, 3, 4, 5, 0, "UTC" ) } )
+			res.clearCookie( "gone" )
+			res.clearCookie( "scopedGone", { domain: "example.com", path: "/admin", secure: true, sameSite: "None", maxAge: 3600 } )
+			res.send( "ok" )
+		} )
+		app.get( "/inject-header", ( req, res ) => res.links( { next: "/x" & char( 13 ) & char( 10 ) & "Injected: 1" } ).send( "ok" ) )
+
+		return app
+	}
+
+	function run() {
+
+		describe( "req.accepts() / req.acceptsLanguages()", function() {
+
+			it( "returns the preferred offer in the form it was offered", function() {
+				var body = _app().inject( { url: "/negotiate", headers: {
+					"Accept": "text/html;q=0.5, application/json",
+					"Accept-Language": "fr;q=0.2, en-GB"
+				} } ).json()
+				assertAll( [
+					() => expect( body.type ).toBe( "json" ),
+					() => expect( body.fromArray ).toBe( "application/json" ),
+					() => expect( body.all ).toBe( [ "application/json", "text/html" ] ),
+					() => expect( body.language ).toBe( "en" ),
+					() => expect( body.languages ).toBe( [ "en-gb", "fr" ] )
+				] )
+			} )
+
+			it( "takes the first offer when the request has neither header", function() {
+				var body = _app().inject( "/negotiate" ).json()
+				assertAll( [
+					() => expect( body.type ).toBe( "html" ),
+					() => expect( body.language ).toBe( "fr" )
+				] )
+			} )
+
+			it( "returns false when nothing offered is acceptable", function() {
+				var body = _app().inject( { url: "/negotiate", headers: { "Accept": "image/png", "Accept-Language": "de" } } ).json()
+				assertAll( [
+					() => expect( body.type ).toBeFalse(),
+					() => expect( body.fromArray ).toBeFalse(),
+					() => expect( body.language ).toBeFalse()
+				] )
+			} )
+
+		} )
+
+		describe( "req.is()", function() {
+
+			it( "matches the request's Content-Type, ignoring its parameters", function() {
+				var body = _app().inject( { method: "POST", url: "/is", headers: { "Content-Type": "application/json; charset=utf-8" }, body: "{}" } ).json()
+				assertAll( [
+					() => expect( body.json ).toBe( "json" ),
+					() => expect( body.either ).toBe( "json" ),
+					() => expect( body.fromArray ).toBeFalse(),
+					() => expect( body.suffix ).toBeFalse()
+				] )
+			} )
+
+			it( "returns the actual type for a wildcard or suffix match", function() {
+				var app = _app()
+				assertAll( [
+					() => expect( app.inject( { method: "POST", url: "/is", headers: { "Content-Type": "text/plain" }, body: "x" } ).json().fromArray ).toBe( "text/plain" ),
+					() => expect( app.inject( { method: "POST", url: "/is", headers: { "Content-Type": "application/vnd.api+json" }, body: "{}" } ).json().suffix ).toBe( "application/vnd.api+json" )
+				] )
+			} )
+
+			it( "is false for a request with no Content-Type", function() {
+				var body = _app().inject( "/is" ).json()
+				assertAll( [
+					() => expect( body.json ).toBeFalse(),
+					() => expect( body.fromArray ).toBeFalse()
+				] )
+			} )
+
+		} )
+
+		describe( "req.xhr / req.subdomains", function() {
+
+			it( "reads X-Requested-With case-insensitively", function() {
+				var app = _app()
+				assertAll( [
+					() => expect( app.inject( { url: "/meta", headers: { "X-Requested-With": "xmlhttprequest" } } ).json().xhr ).toBeTrue(),
+					() => expect( app.inject( { url: "/meta", headers: { "X-Requested-With": "fetch" } } ).json().xhr ).toBeFalse(),
+					() => expect( app.inject( "/meta" ).json().xhr ).toBeFalse()
+				] )
+			} )
+
+			it( "lists subdomains nearest the domain first", function() {
+				var app = _app()
+				assertAll( [
+					() => expect( app.inject( { url: "/meta", headers: { "Host": "tobi.ferrets.example.com:3000" } } ).json().subdomains ).toBe( [ "ferrets", "tobi" ] ),
+					() => expect( app.inject( { url: "/meta", headers: { "Host": "example.com" } } ).json().subdomains ).toBe( [] ),
+					() => expect( app.inject( { url: "/meta", headers: { "Host": "localhost" } } ).json().subdomains ).toBe( [] )
+				] )
+			} )
+
+			it( "has none for an IP address host", function() {
+				var app = _app()
+				assertAll( [
+					() => expect( app.inject( { url: "/meta", headers: { "Host": "10.1.2.3:8080" } } ).json().subdomains ).toBe( [] ),
+					() => expect( app.inject( { url: "/meta", headers: { "Host": "[2001:db8::1]:8080" } } ).json().subdomains ).toBe( [] )
+				] )
+			} )
+
+			it( "honors app.set( 'subdomain offset' )", function() {
+				var three = _app()
+				three.set( "subdomain offset", 3 )
+				var zero = _app()
+				zero.set( "subdomain offset", 0 )
+				assertAll( [
+					() => expect( three.inject( { url: "/meta", headers: { "Host": "shop.example.co.uk" } } ).json().subdomains ).toBe( [ "shop" ] ),
+					() => expect( three.inject( { url: "/meta", headers: { "Host": "example.co.uk" } } ).json().subdomains ).toBe( [] ),
+					() => expect( zero.inject( { url: "/meta", headers: { "Host": "a.example.com" } } ).json().subdomains ).toBe( [ "com", "example", "a" ] )
+				] )
+			} )
+
+		} )
+
+		describe( "req.baseUrl", function() {
+
+			it( "is empty outside any mount", function() {
+				expect( _app().inject( "/meta" ).json().baseUrl ).toBe( "" )
+			} )
+
+			it( "accumulates across nested routers, with param values filled in", function() {
+				var res = _app().inject( "/api/v2/where?x=1" )
+				assertAll( [
+					() => expect( res.json().baseUrl ).toBe( "/api/v2" ),
+					() => expect( res.json().path ).toBe( "/where" ),
+					() => expect( res.json().originalUrl ).toBe( "/api/v2/where?x=1" ),
+					() => expect( res.header( "X-Seen-Base" ) ).withContext( "path-mounted middleware sees its own mount" ).toBe( "/api" )
+				] )
+			} )
+
+			it( "is restored when a mounted router passes the request on", function() {
+				var app = _app()
+				assertAll( [
+					() => expect( app.inject( "/api/where" ).json().baseUrl ).withContext( "inner router did not match; outer handles it" ).toBe( "/api" ),
+					() => expect( app.inject( "/after" ).json().baseUrl ).toBe( "" )
+				] )
+			} )
+
+			it( "is restored for error-handling middleware after a mounted handler throws", function() {
+				var app = _app()
+				var seen = "unset"
+				app.use( ( err, req, res, next ) => {
+					seen = req.baseUrl
+					res.status( 500 ).send( "handled" )
+				} )
+				app.inject( "/api/v2/boom" )
+				expect( seen ).toBe( "" )
+			} )
+
+		} )
+
+		describe( "res.format()", function() {
+
+			it( "runs the handler for the preferred type and sets Content-Type and Vary", function() {
+				var app = _app()
+				var asJson = app.inject( { url: "/format", headers: { "Accept": "text/html;q=0.1, application/json" } } )
+				var asText = app.inject( { url: "/format", headers: { "Accept": "text/plain" } } )
+				assertAll( [
+					() => expect( asJson.json().hi ).toBeTrue(),
+					() => expect( asJson.header( "Vary" ) ).toBe( "Accept" ),
+					() => expect( asText.body ).toBe( "hi" ),
+					() => expect( asText.header( "Content-Type" ) ).toBe( "text/plain; charset=utf-8" )
+				] )
+			} )
+
+			it( "runs the first handler when the client has no preference", function() {
+				var res = _app().inject( "/format" )
+				assertAll( [
+					() => expect( res.body ).toBe( "<p>hi</p>" ),
+					() => expect( res.header( "Content-Type" ) ).toBe( "text/html; charset=utf-8" )
+				] )
+			} )
+
+			it( "answers 406 when nothing matches and there is no default", function() {
+				var res = _app().inject( { url: "/format", headers: { "Accept": "image/png" } } )
+				assertAll( [
+					() => expect( res.statusCode ).toBe( 406 ),
+					() => expect( res.body ).toBe( "Not Acceptable" ),
+					() => expect( res.header( "Vary" ) ).toBe( "Accept" ),
+					() => expect( _app().inject( "/format-empty" ).statusCode ).toBe( 406 )
+				] )
+			} )
+
+			it( "runs default when nothing matches, and never offers it as a type", function() {
+				var app = _app()
+				var miss = app.inject( { url: "/format-default", headers: { "Accept": "image/png" } } )
+				assertAll( [
+					() => expect( miss.statusCode ).toBe( 415 ),
+					() => expect( miss.body ).toBe( "fallback" ),
+					() => expect( app.inject( "/format-default" ).json().hi ).toBeTrue()
+				] )
+			} )
+
+		} )
+
+		describe( "response header helpers", function() {
+
+			it( "sets several headers from a struct and reads one back", function() {
+				var res = _app().inject( "/headers" )
+				assertAll( [
+					() => expect( res.header( "X-One" ) ).toBe( "1" ),
+					() => expect( res.header( "X-Two" ) ).toBe( "2" ),
+					() => expect( res.json().one ).toBe( "1" ),
+					() => expect( res.json().missing ).toBeTrue()
+				] )
+			} )
+
+			it( "appends to a header instead of replacing it", function() {
+				var res = _app().inject( "/headers" )
+				assertAll( [
+					() => expect( res.header( "X-List" ) ).toBe( "a, b, c" ),
+					() => expect( res.json().list ).toBe( "a, b, c" )
+				] )
+			} )
+
+			it( "adds each Vary field once, whatever its case", function() {
+				expect( _app().inject( "/headers" ).header( "Vary" ) ).toBe( "Origin, Accept, Accept-Language" )
+			} )
+
+			it( "collapses Vary to * and keeps it there", function() {
+				expect( _app().inject( "/vary-star" ).header( "Vary" ) ).toBe( "*" )
+			} )
+
+			it( "builds a Link header and adds to an existing one", function() {
+				expect( _app().inject( "/headers" ).header( "Link" ) ).toBe( '</items?page=2>; rel="next", </items?page=9>; rel="last", </items?page=0>; rel="prev"' )
+			} )
+
+			it( "sets Location without ending the response", function() {
+				var res = _app().inject( "/headers" )
+				assertAll( [
+					() => expect( res.statusCode ).toBe( 200 ),
+					() => expect( res.header( "Location" ) ).toBe( "/elsewhere" )
+				] )
+			} )
+
+			it( "accepts an extension in res.type()", function() {
+				var app = _app()
+				assertAll( [
+					() => expect( app.inject( "/type/json" ).header( "Content-Type" ) ).toBe( "application/json; charset=utf-8" ),
+					() => expect( app.inject( "/type/.png" ).header( "Content-Type" ) ).toBe( "image/png" ),
+					() => expect( app.inject( "/type/nosuchextension" ).header( "Content-Type" ) ).toBe( "application/octet-stream" )
+				] )
+			} )
+
+			it( "sets Content-Disposition, and Content-Type from a known extension", function() {
+				var app = _app()
+				var known = app.inject( "/attachment" )
+				var unknown = app.inject( "/attachment-unknown" )
+				assertAll( [
+					() => expect( known.header( "Content-Disposition" ) ).toBe( 'attachment; filename="report.csv"' ),
+					() => expect( known.header( "Content-Type" ) ).toBe( "text/csv; charset=utf-8" ),
+					() => expect( app.inject( "/attachment-bare" ).header( "Content-Disposition" ) ).toBe( "attachment" ),
+					() => expect( unknown.header( "Content-Disposition" ) ).withContext( "a quote can't close the filename early" ).toBe( 'attachment; filename="weird.zzz"' ),
+					() => expect( unknown.header( "Content-Type" ) ).toBe( "text/html; charset=utf-8" )
+				] )
+			} )
+
+			it( "refuses a header value carrying a line break", function() {
+				var res = _app().inject( "/inject-header" )
+				assertAll( [
+					() => expect( res.statusCode ).toBe( 500 ),
+					() => expect( res.header( "Injected" ) ).toBe( "" )
+				] )
+			} )
+
+		} )
+
+		describe( "res.cookie() domain/expires and res.clearCookie()", function() {
+
+			it( "writes Domain and an HTTP-date Expires", function() {
+				var cookies = _app().inject( "/cookies" ).setCookies
+				expect( cookies ).toInclude( "scoped=v; Path=/admin; Domain=example.com; Expires=Wed, 02 Jan 2030 03:04:05 GMT; HttpOnly" )
+			} )
+
+			it( "expires a cookie, keeping the attributes it was set with", function() {
+				var cookies = _app().inject( "/cookies" ).setCookies
+				assertAll( [
+					() => expect( cookies ).toInclude( "gone=; Path=/; Max-Age=0; Expires=Thu, 01 Jan 1970 00:00:00 GMT; HttpOnly" ),
+					() => expect( cookies ).withContext( "a maxAge passed to clearCookie() is overridden" ).toInclude( "scopedGone=; Path=/admin; Domain=example.com; Max-Age=0; Expires=Thu, 01 Jan 1970 00:00:00 GMT; HttpOnly; Secure; SameSite=None" )
+				] )
+			} )
+
+			it( "keeps every Set-Cookie as its own header line", function() {
+				var cookies = _app().inject( "/cookies" ).setCookies
+				assertAll( [
+					() => expect( cookies.len() ).toBe( 4 ),
+					() => expect( cookies[ 1 ] ).toBe( "raw=1" )
+				] )
+			} )
+
+		} )
+
+		describe( "helpers against a live server", function() {
+
+			it( "negotiates on the real Accept and Accept-Language headers", function() {
+				var result = variables.client.getWithHeaders( variables.baseUrl & "/negotiate", {
+					"Accept": "text/html;q=0.5, application/json",
+					"Accept-Language": "fr;q=0.2, en-GB",
+				} )
+				var body = JSONDeserialize( result.body )
+				assertAll( [
+					() => expect( body.type ).toBe( "json" ),
+					() => expect( body.language ).toBe( "en" )
+				] )
+			} )
+
+			it( "matches a real request body's Content-Type", function() {
+				var result = variables.client.post( variables.baseUrl & "/is", "{}", "application/json; charset=utf-8" )
+				expect( JSONDeserialize( result.body ).json ).toBe( "json" )
+			} )
+
+			it( "reports req.xhr and req.baseUrl", function() {
+				var meta = JSONDeserialize( variables.client.getWithHeaders( variables.baseUrl & "/meta", { "X-Requested-With": "XMLHttpRequest" } ).body )
+				var where = variables.client.get( variables.baseUrl & "/api/v2/where" )
+				assertAll( [
+					() => expect( meta.xhr ).toBeTrue(),
+					() => expect( JSONDeserialize( where.body ).baseUrl ).toBe( "/api/v2" ),
+					() => expect( where.getHeader( "X-Seen-Base" ) ).toBe( "/api" )
+				] )
+			} )
+
+			it( "formats by Accept, with a 406 for no match", function() {
+				var asJson = variables.client.getWithHeaders( variables.baseUrl & "/format", { "Accept": "application/json" } )
+				var none = variables.client.getWithHeaders( variables.baseUrl & "/format", { "Accept": "image/png" } )
+				assertAll( [
+					() => expect( asJson.contentType ).toBe( "application/json; charset=utf-8" ),
+					() => expect( asJson.getHeader( "Vary" ) ).toBe( "Accept" ),
+					() => expect( none.statusCode ).toBe( 406 )
+				] )
+			} )
+
+			it( "sends appended, Vary, Link and Location headers on the wire", function() {
+				var result = variables.client.requestNoRedirect( "GET", variables.baseUrl & "/headers" )
+				assertAll( [
+					() => expect( result.getHeader( "X-List" ) ).toBe( "a, b, c" ),
+					() => expect( result.getHeader( "Vary" ) ).toBe( "Origin, Accept, Accept-Language" ),
+					() => expect( result.getHeader( "Link" ) ).toInclude( '</items?page=9>; rel="last"' ),
+					() => expect( result.location ).toBe( "/elsewhere" )
+				] )
+			} )
+
+			it( "sends each cookie, cleared ones included, as its own Set-Cookie", function() {
+				var lines = variables.client.get( variables.baseUrl & "/cookies" ).setCookie.listToArray( char( 10 ) )
+				assertAll( [
+					() => expect( lines.len() ).toBe( 4 ),
+					() => expect( lines ).toInclude( "gone=; Path=/; Max-Age=0; Expires=Thu, 01 Jan 1970 00:00:00 GMT; HttpOnly" )
+				] )
+			} )
+
+			it( "sends an attachment's disposition and type", function() {
+				var result = variables.client.get( variables.baseUrl & "/attachment" )
+				assertAll( [
+					() => expect( result.contentDisposition ).toBe( 'attachment; filename="report.csv"' ),
+					() => expect( result.contentType ).toBe( "text/csv; charset=utf-8" ),
+					() => expect( result.body ).toBe( "a,b" )
+				] )
+			} )
+
+		} )
+
+	}
+
+}

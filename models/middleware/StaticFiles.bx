@@ -22,18 +22,7 @@ class {
 			throw( type = "BoxExpress.InvalidOption", message = "boxExpressStatic dotfiles must be ""ignore"", ""deny"" or ""allow"", not ""#dotfiles#""" )
 		}
 		var conditional = new "../ConditionalGet"()
-		var mimeTypes = {
-			html: "text/html; charset=utf-8", htm: "text/html; charset=utf-8",
-			css: "text/css; charset=utf-8", js: "text/javascript; charset=utf-8",
-			mjs: "text/javascript; charset=utf-8", map: "application/json; charset=utf-8",
-			json: "application/json; charset=utf-8", txt: "text/plain; charset=utf-8",
-			xml: "application/xml; charset=utf-8", webmanifest: "application/manifest+json",
-			png: "image/png", jpg: "image/jpeg", jpeg: "image/jpeg", gif: "image/gif",
-			svg: "image/svg+xml", ico: "image/x-icon", webp: "image/webp", avif: "image/avif",
-			woff: "font/woff", woff2: "font/woff2", ttf: "font/ttf", otf: "font/otf",
-			wasm: "application/wasm", pdf: "application/pdf",
-			mp4: "video/mp4", webm: "video/webm", mp3: "audio/mpeg", ogg: "audio/ogg"
-		}
+		var mimeTypes = new "../MimeTypes"()
 
 		return function( req, res, next ) {
 			if ( req.method != "GET" && req.method != "HEAD" ) {
@@ -105,8 +94,10 @@ class {
 				return res.status( 304 ).end()
 			}
 
-			var ext = listLast( fileObj.getName(), "." ).lcase()
-			var contentType = mimeTypes[ ext ] ?: "application/octet-stream"
+			var contentType = mimeTypes.forExtension( listLast( fileObj.getName(), "." ) )
+			if ( !len( contentType ) ) {
+				contentType = "application/octet-stream"
+			}
 
 			res.sendFileRange( fileObj, contentType )
 		}

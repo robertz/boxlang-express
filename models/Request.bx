@@ -23,6 +23,7 @@ class {
 		this.files = {}
 		this.headers = exchangeAdapter.getRequestHeaders()
 		this.cookies = _parseCookies( this.headers[ "Cookie" ] ?: "" )
+		this.signedCookies = _extractSignedCookies( settings )
 		// Compiled once by app.set( "trust proxy", ... ); built here only for a
 		// Request made with raw settings (a test, a bare Router).
 		variables.proxyTrust = settings[ "trust proxy compiled" ] ?: new ProxyTrust( settings[ "trust proxy" ] ?: false )
@@ -31,12 +32,130 @@ class {
 		this.protocol = _resolveProtocol( settings )
 		this.secure = ( this.protocol == "https" )
 		this.hostname = _resolveHostname( settings )
+		this.subdomains = _resolveSubdomains( settings )
+		this.xhr = compareNoCase( trim( this.headers[ "X-Requested-With" ] ?: "" ), "XMLHttpRequest" ) == 0
+		// The mount path of the router or middleware currently handling the
+		// request; Router.dispatch() maintains it.
+		this.baseUrl = ""
+		// Set by RequestWatchdog when this request ran past its timeout.
+		this.timedOut = false
+		variables.watchdog = ""
+		variables.watchId = ""
+		variables.bufferedBody = ""
 
 		return this
 	}
 
+	/**
+	 * Gives this request `timeoutMs` from now to start its response,
+	 * replacing app.set( "requestTimeoutMs" ) for this one request; 0 turns
+	 * the timeout off. Call it from the thread handling the request.
+	 */
+	function setTimeout( timeoutMs ) {
+		if ( !isSimpleValue( timeoutMs ) || !isNumeric( timeoutMs ) || timeoutMs < 0 ) {
+			throw( type = "BoxExpress.InvalidArgument", message = "req.setTimeout() takes a number of milliseconds, 0 or more" )
+		}
+		if ( isSimpleValue( variables.watchdog ) ) {
+			return this
+		}
+		_clearTimeout()
+		if ( timeoutMs > 0 ) {
+			variables.watchId = variables.watchdog.watch( this, variables.response, timeoutMs )
+		}
+		return this
+	}
+
+	/**
+	 * HttpBridge's hooks: which watchdog and response setTimeout() works
+	 * with, and the end-of-request cleanup.
+	 */
+	function _bindTimeout( watchdog, res ) {
+		variables.watchdog = watchdog
+		variables.response = res
+	}
+
+	function _clearTimeout() {
+		if ( len( variables.watchId ) ) {
+			variables.watchdog.unwatch( variables.watchId )
+			variables.watchId = ""
+		}
+	}
+
+	/**
+	 * A body HttpBridge already read to enforce app.set( "maxBodySize" ) on
+	 * a request that didn't declare its length.
+	 */
+	function _setBufferedBody( bodyBytes ) {
+		variables.bufferedBody = createObject( "java", "java.io.ByteArrayInputStream" ).init( bodyBytes )
+	}
+
 	function get( name ) {
 		return this.headers[ name ] ?: javacast( "null", "" )
+	}
+
+	/**
+	 * accepts( "html" ) / accepts( "html", "json" ) / accepts( [ "html", "json" ] )
+	 *
+	 * The offered type (an extension or a full MIME type, returned as given)
+	 * the Accept header prefers, or false when none is acceptable. With no
+	 * arguments, the types the client accepts, most preferred first.
+	 */
+	function accepts() {
+		var offered = _offered( arguments )
+		var negotiator = new Negotiator()
+		var acceptHeader = this.headers[ "Accept" ] ?: ""
+		if ( !offered.len() ) {
+			return negotiator.mediaTypes( acceptHeader )
+		}
+		var chosen = negotiator.mediaType( acceptHeader, offered )
+		return len( chosen ) ? chosen : false
+	}
+
+	/**
+	 * Same shape as accepts(), against Accept-Language.
+	 */
+	function acceptsLanguages() {
+		var offered = _offered( arguments )
+		var negotiator = new Negotiator()
+		var languageHeader = this.headers[ "Accept-Language" ] ?: ""
+		if ( !offered.len() ) {
+			return negotiator.languages( languageHeader )
+		}
+		var chosen = negotiator.language( languageHeader, offered )
+		return len( chosen ) ? chosen : false
+	}
+
+	/**
+	 * is( "json" ) / is( "html", "+json" ) / is( [ ... ] )
+	 *
+	 * The first given type the request's Content-Type matches, or false —
+	 * also false when the request has no Content-Type at all.
+	 */
+	function is() {
+		var contentTypeHeader = this.headers[ "Content-Type" ] ?: ""
+		if ( !len( contentTypeHeader ) ) {
+			return false
+		}
+		var negotiator = new Negotiator()
+		for ( var pattern in _offered( arguments ) ) {
+			var matched = negotiator.matchType( contentTypeHeader, pattern )
+			if ( len( matched ) ) {
+				return matched
+			}
+		}
+		return false
+	}
+
+	private function _offered( args ) {
+		var offered = []
+		for ( var i = 1; i <= args.count(); i++ ) {
+			if ( isArray( args[ i ] ) ) {
+				offered.append( args[ i ], true )
+			} else {
+				offered.append( args[ i ] )
+			}
+		}
+		return offered
 	}
 
 	function rawExchange() {
@@ -52,6 +171,9 @@ class {
 	 * genuinely engine-specific access beyond just the body stream.
 	 */
 	function bodyStream() {
+		if ( !isSimpleValue( variables.bufferedBody ) ) {
+			return variables.bufferedBody
+		}
 		return variables.exchangeAdapter.getRequestBodyStream()
 	}
 
@@ -93,6 +215,30 @@ class {
 			}
 		}
 		return result
+	}
+
+	/**
+	 * With app.set( "cookie secret" ), moves every cookie in the signed
+	 * format out of this.cookies: into the returned struct as its original
+	 * value when the signature checks out, as false when it doesn't. A
+	 * tampered cookie is never left where it could be read as a plain one.
+	 */
+	private function _extractSignedCookies( settings ) {
+		var verified = {}
+		var signer = settings[ "cookie signer" ] ?: ""
+		if ( isSimpleValue( signer ) ) {
+			return verified
+		}
+		for ( var cookieName in this.cookies.keyArray() ) {
+			var cookieValue = this.cookies[ cookieName ]
+			if ( !signer.isSigned( cookieValue ) ) {
+				continue
+			}
+			var result = signer.unsign( cookieValue )
+			verified[ cookieName ] = result.valid ? result.value : false
+			this.cookies.delete( cookieName )
+		}
+		return verified
 	}
 
 	/**
@@ -184,6 +330,26 @@ class {
 		}
 		var colonPos = hostHeader.find( ":" )
 		return colonPos ? hostHeader.mid( 1, colonPos - 1 ) : hostHeader
+	}
+
+	/**
+	 * The hostname's labels left of the registrable domain, nearest the
+	 * domain first: "tobi.ferrets.example.com" -> [ "ferrets", "tobi" ].
+	 * app.set( "subdomain offset", n ) says how many trailing labels make up
+	 * the domain (default 2; use 3 for "example.co.uk"). An IP address has
+	 * none.
+	 */
+	private function _resolveSubdomains( settings ) {
+		var host = this.hostname
+		if ( !len( host ) || host.find( ":" ) || reFind( "^[0-9.]+$", host ) ) {
+			return []
+		}
+		var labels = host.listToArray( "." ).reverse()
+		var offset = settings[ "subdomain offset" ] ?: 2
+		if ( offset >= labels.len() ) {
+			return []
+		}
+		return offset <= 0 ? labels : labels.slice( offset + 1 )
 	}
 
 }

@@ -31,6 +31,7 @@ just a thin wrapper: `new bxModules.boxexpress.models.BoxExpress()` still
 works identically if you'd rather be explicit about where it comes from. Every
 other model gets the same treatment, each its own thin BIF wrapper: the
 built-in middleware factories — `boxExpressJSON()`, `boxExpressUrlencoded()`,
+`boxExpressText()`, `boxExpressRaw()`,
 `boxExpressStatic()`, `boxExpressUpload()`, `boxExpressSession()`,
 `boxExpressHelmet()`, `boxExpressCors()`, `boxExpressRateLimit()`,
 `boxExpressCsrf()`, `boxExpressStomp()` (see
@@ -96,14 +97,15 @@ Core:
 
 - [App](docs/app.md) — routes, settings, `listen()` / `close()`
 - [Router](docs/routing.md) — mountable sub-apps, route params, chainable routes
-- [Request](docs/request.md)
-- [Response](docs/response.md) — including range requests
+- [Request](docs/request.md) — including content negotiation (`req.accepts()`, `req.is()`)
+- [Response](docs/response.md) — header helpers, `res.format()`, cookies and signed cookies, range requests
 - [Views](docs/views.md) — `res.render()`, `app.locals` / `res.locals`
 - [Error handling](docs/error-handling.md) — default `404`/`500` responses
+- [Timeouts and size limits](docs/limits.md) — `requestTimeoutMs`, `maxBodySize`, `req.setTimeout()`
 
 Middleware:
 
-- [Middleware](docs/middleware.md) — handler shape, body parsers, static files
+- [Middleware](docs/middleware.md) — handler shape, body parsers (JSON, form, text, raw; webhook signature checks), static files
 - [File uploads](docs/uploads.md) — `boxExpressUpload()`
 - [Sessions](docs/sessions.md) — `boxExpressSession()`, durable stores
 - [Security headers](docs/helmet.md) — `boxExpressHelmet()`

@@ -1,6 +1,6 @@
 /**
  * Exercises the global BIFs (boxExpress, boxExpressRouter, boxExpressJSON,
- * boxExpressUrlencoded, boxExpressStatic, boxExpressUpload, boxExpressSession,
+ * boxExpressUrlencoded, boxExpressText, boxExpressRaw, boxExpressStatic, boxExpressUpload, boxExpressSession,
  * boxExpressHelmet, boxExpressCors, boxExpressRateLimit, boxExpressCsrf) for
  * real — a running server built entirely through the BIFs,
  * not the bxModules.boxexpress.models.* classes directly. These only resolve as
@@ -25,6 +25,14 @@ class extends="testbox.system.BaseSpec" {
 
 		variables.app.get( "/", ( req, res ) => {
 			res.send( "Hello via BIFs!" )
+		} )
+
+		variables.app.post( "/echo-text", boxExpressText(), ( req, res ) => {
+			res.json( { isString: isSimpleValue( req.body ), text: req.body } )
+		} )
+
+		variables.app.post( "/echo-raw", boxExpressRaw(), ( req, res ) => {
+			res.json( { isBinary: isBinary( req.body ), length: req.body.len() } )
 		} )
 
 		variables.app.get( "/session-count", ( req, res ) => {
@@ -83,6 +91,20 @@ class extends="testbox.system.BaseSpec" {
 			it( "boxExpressUrlencoded() parses form bodies", function() {
 				var result = variables.client.post( variables.baseUrl & "/echo", "x=1&y=2", "application/x-www-form-urlencoded" )
 				expect( JSONDeserialize( result.body ).youSent.x ).toBe( "1" )
+			} )
+
+			it( "boxExpressText() puts a text/plain body on req.body as a string", function() {
+				var result = variables.client.post( variables.baseUrl & "/echo-text", "plain words", "text/plain" )
+				var body = JSONDeserialize( result.body )
+				expect( body.isString ).toBeTrue()
+				expect( body.text ).toBe( "plain words" )
+			} )
+
+			it( "boxExpressRaw() puts an application/octet-stream body on req.body as bytes", function() {
+				var result = variables.client.post( variables.baseUrl & "/echo-raw", "12345", "application/octet-stream" )
+				var body = JSONDeserialize( result.body )
+				expect( body.isBinary ).toBeTrue()
+				expect( body.length ).toBe( 5 )
 			} )
 
 			it( "boxExpressStatic() serves files", function() {

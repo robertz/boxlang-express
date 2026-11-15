@@ -1,0 +1,225 @@
+/**
+ * app.set( "cookie secret" ), res.cookie( ..., { signed: true } ) and
+ * req.signedCookies.
+ */
+class extends="testbox.system.BaseSpec" {
+
+	function beforeAll() {
+		variables.testPort = 4366
+		variables.baseUrl = "http://localhost:#variables.testPort#"
+		variables.client = new "../helpers/HttpClient"()
+		variables.liveApp = _app( "keyboard cat" )
+		variables.liveApp.set( "log", false )
+		variables.liveApp.listen( port = variables.testPort, options = { block: false } )
+		sleep( 300 )
+	}
+
+	function afterAll() {
+		variables.liveApp.close()
+	}
+
+	private function _app( secret ) {
+		var app = new "../../models/BoxExpress"()
+		if ( !isSimpleValue( secret ) || len( secret ) ) {
+			app.set( "cookie secret", secret )
+		}
+		app.get( "/set", ( req, res ) => {
+			res.cookie( "user", req.query.value ?: "42", { signed: true } )
+			res.cookie( "theme", "dark" )
+			res.send( "set" )
+		} )
+		app.get( "/read", ( req, res ) => res.json( { signed: req.signedCookies, plain: req.cookies } ) )
+		app.get( "/clear", ( req, res ) => res.clearCookie( "user", { signed: true } ).send( "cleared" ) )
+		return app
+	}
+
+	private function _cookieHeader( injectResponse ) {
+		var pairs = []
+		for ( var line in injectResponse.setCookies ) {
+			pairs.append( listFirst( line, ";" ) )
+		}
+		return pairs.toList( "; " )
+	}
+
+	private function _read( app, cookieHeader ) {
+		return app.inject( { url: "/read", headers: { "Cookie": cookieHeader } } ).json()
+	}
+
+	function run() {
+
+		describe( "CookieSigner", function() {
+
+			it( "signs in the same format as Express's cookie-parser", function() {
+				// Expected value produced with Node: "s:hello." + createHmac( "sha256",
+				// "keyboard cat" ).update( "hello" ).digest( "base64" ) minus padding.
+				expect( new "../../models/CookieSigner"( "keyboard cat" ).sign( "hello" ) ).toBe( "s:hello.xz6khi6+oL1pnNhBgjk3Nr1CX2sxTjJiO9pKXaHZ33E" )
+			} )
+
+			it( "round-trips values, including empty ones and ones containing dots", function() {
+				var signer = new "../../models/CookieSigner"( "keyboard cat" )
+				assertAll( [
+					() => expect( signer.unsign( signer.sign( "42" ) ) ).toBe( { valid: true, value: "42" } ),
+					() => expect( signer.unsign( signer.sign( "a.b.c" ) ).value ).toBe( "a.b.c" ),
+					() => expect( signer.unsign( signer.sign( "" ) ) ).toBe( { valid: true, value: "" } ),
+					() => expect( signer.unsign( signer.sign( "s:nested.value" ) ).value ).toBe( "s:nested.value" )
+				] )
+			} )
+
+			it( "rejects a changed value, a changed signature, and a malformed one", function() {
+				var signer = new "../../models/CookieSigner"( "keyboard cat" )
+				var signed = signer.sign( "user-42" )
+				assertAll( [
+					() => expect( signer.unsign( replace( signed, "user-42", "user-1" ) ).valid ).toBeFalse(),
+					() => expect( signer.unsign( signed & "x" ).valid ).toBeFalse(),
+					() => expect( signer.unsign( signed.left( signed.len() - 1 ) ).valid ).toBeFalse(),
+					() => expect( signer.unsign( "s:user-42." ).valid ).toBeFalse(),
+					() => expect( signer.unsign( "s:user-42" ).valid ).withContext( "no signature at all" ).toBeFalse(),
+					() => expect( signer.unsign( "s:" & uCase( signed.mid( 3, signed.len() ) ) ).valid ).withContext( "the comparison is case-sensitive" ).toBeFalse()
+				] )
+			} )
+
+			it( "rejects a value signed with a different secret", function() {
+				var signed = new "../../models/CookieSigner"( "someone else's secret" ).sign( "admin" )
+				expect( new "../../models/CookieSigner"( "keyboard cat" ).unsign( signed ).valid ).toBeFalse()
+			} )
+
+			it( "signs with the first secret and verifies with any of them", function() {
+				var before = new "../../models/CookieSigner"( "old secret" )
+				var rotated = new "../../models/CookieSigner"( [ "new secret", "old secret" ] )
+				var after = new "../../models/CookieSigner"( "new secret" )
+				assertAll( [
+					() => expect( rotated.unsign( before.sign( "42" ) ).valid ).withContext( "a cookie from before the rotation" ).toBeTrue(),
+					() => expect( after.unsign( rotated.sign( "42" ) ).valid ).withContext( "new cookies use the new secret" ).toBeTrue(),
+					() => expect( after.unsign( before.sign( "42" ) ).valid ).withContext( "once the old secret is dropped" ).toBeFalse()
+				] )
+			} )
+
+			it( "only treats the s: prefix as signed, case-sensitively", function() {
+				var signer = new "../../models/CookieSigner"( "keyboard cat" )
+				assertAll( [
+					() => expect( signer.isSigned( "s:a.b" ) ).toBeTrue(),
+					() => expect( signer.isSigned( "S:a.b" ) ).toBeFalse(),
+					() => expect( signer.isSigned( "plain" ) ).toBeFalse(),
+					() => expect( signer.isSigned( "s:" ) ).toBeFalse(),
+					() => expect( signer.isSigned( "" ) ).toBeFalse()
+				] )
+			} )
+
+			it( "refuses an empty or non-string secret", function() {
+				assertAll( [
+					() => expect( () => new "../../models/CookieSigner"( "" ) ).toThrow( "BoxExpress.InvalidArgument" ),
+					() => expect( () => new "../../models/CookieSigner"( "   " ) ).toThrow( "BoxExpress.InvalidArgument" ),
+					() => expect( () => new "../../models/CookieSigner"( [] ) ).toThrow( "BoxExpress.InvalidArgument" ),
+					() => expect( () => new "../../models/CookieSigner"( [ "ok", "" ] ) ).toThrow( "BoxExpress.InvalidArgument" ),
+					() => expect( () => new "../../models/CookieSigner"( [ {} ] ) ).toThrow( "BoxExpress.InvalidArgument" ),
+					() => expect( () => new "../../models/BoxExpress"().set( "cookie secret", "" ) ).withContext( "caught at app.set()" ).toThrow( "BoxExpress.InvalidArgument" )
+				] )
+			} )
+
+		} )
+
+		describe( "signed cookies (app.inject)", function() {
+
+			it( "sets a signed cookie and reads it back from req.signedCookies only", function() {
+				var app = _app( "keyboard cat" )
+				var set = app.inject( "/set" )
+				var body = _read( app, _cookieHeader( set ) )
+				assertAll( [
+					() => expect( set.setCookies[ 1 ] ).toInclude( "user=s%3A42%2E" ),
+					() => expect( body.signed ).toBe( { user: "42" } ),
+					() => expect( body.plain ).withContext( "the signed cookie isn't also exposed raw" ).toBe( { theme: "dark" } )
+				] )
+			} )
+
+			it( "survives a signature containing + through the cookie round trip", function() {
+				// "hello" under "keyboard cat" signs to a value with a + in it,
+				// which a careless decode would turn into a space.
+				var app = _app( "keyboard cat" )
+				var set = app.inject( "/set?value=hello" )
+				assertAll( [
+					() => expect( set.setCookies[ 1 ] ).toInclude( "%2B" ),
+					() => expect( _read( app, _cookieHeader( set ) ).signed.user ).toBe( "hello" )
+				] )
+			} )
+
+			it( "reports a tampered cookie as false, and never as a plain cookie", function() {
+				var app = _app( "keyboard cat" )
+				var forged = replace( _cookieHeader( app.inject( "/set" ) ), "s%3A42", "s%3A1" )
+				var body = _read( app, forged )
+				assertAll( [
+					() => expect( body.signed.user ).toBeFalse(),
+					() => expect( structKeyExists( body.plain, "user" ) ).toBeFalse()
+				] )
+			} )
+
+			it( "rejects a cookie signed by a different app", function() {
+				var theirs = _cookieHeader( _app( "their secret" ).inject( "/set?value=admin" ) )
+				expect( _read( _app( "keyboard cat" ), theirs ).signed.user ).toBeFalse()
+			} )
+
+			it( "keeps accepting cookies signed with a rotated-out secret while it's still listed", function() {
+				var old = _cookieHeader( _app( "old secret" ).inject( "/set" ) )
+				assertAll( [
+					() => expect( _read( _app( [ "new secret", "old secret" ] ), old ).signed.user ).toBe( "42" ),
+					() => expect( _read( _app( "new secret" ), old ).signed.user ).toBeFalse()
+				] )
+			} )
+
+			it( "leaves cookies untouched when no secret is set", function() {
+				var body = _read( _app( "" ), "user=s%3A42.whatever; theme=dark" )
+				assertAll( [
+					() => expect( body.signed ).toBe( {} ),
+					() => expect( body.plain.user ).toBe( "s:42.whatever" )
+				] )
+			} )
+
+			it( "throws from res.cookie( signed: true ) when no secret is set", function() {
+				var app = _app( "" )
+				app.set( "env", "development" )
+				var res = app.inject( "/set" )
+				assertAll( [
+					() => expect( res.statusCode ).toBe( 500 ),
+					() => expect( res.json().message ).toInclude( "cookie secret" ),
+					() => expect( res.setCookies.len() ).toBe( 0 )
+				] )
+			} )
+
+			it( "clears a signed cookie with an empty, unsigned value", function() {
+				var cleared = _app( "keyboard cat" ).inject( "/clear" ).setCookies[ 1 ]
+				expect( cleared ).toInclude( "user=; Path=/; Max-Age=0" )
+			} )
+
+		} )
+
+		describe( "signed cookies against a live server", function() {
+
+			it( "round-trips a signed cookie through real Set-Cookie and Cookie headers", function() {
+				var set = variables.client.get( variables.baseUrl & "/set?value=hello" )
+				var pairs = []
+				for ( var line in set.setCookie.listToArray( char( 10 ) ) ) {
+					pairs.append( listFirst( line, ";" ) )
+				}
+				var body = JSONDeserialize( variables.client.getWithHeaders( variables.baseUrl & "/read", { "Cookie": pairs.toList( "; " ) } ).body )
+				assertAll( [
+					() => expect( body.signed.user ).toBe( "hello" ),
+					() => expect( body.plain.theme ).toBe( "dark" )
+				] )
+			} )
+
+			it( "reads a cookie exactly as an Express app with the same secret would have set it", function() {
+				// encodeURIComponent( "s:hello.xz6khi6+oL1pnNhBgjk3Nr1CX2sxTjJiO9pKXaHZ33E" )
+				var fromExpress = "user=s%3Ahello.xz6khi6%2BoL1pnNhBgjk3Nr1CX2sxTjJiO9pKXaHZ33E"
+				var body = JSONDeserialize( variables.client.getWithHeaders( variables.baseUrl & "/read", { "Cookie": fromExpress } ).body )
+				expect( body.signed.user ).toBe( "hello" )
+			} )
+
+			it( "reports a forged cookie as false", function() {
+				var body = JSONDeserialize( variables.client.getWithHeaders( variables.baseUrl & "/read", { "Cookie": "user=s%3Aadmin.xz6khi6%2BoL1pnNhBgjk3Nr1CX2sxTjJiO9pKXaHZ33E" } ).body )
+				expect( body.signed.user ).toBeFalse()
+			} )
+
+		} )
+
+	}
+
+}

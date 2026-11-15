@@ -30,6 +30,8 @@ each with its own global BIF mirroring the Express function of the same name:
 ```js
 app.use( boxExpressJSON() )        // parses application/json bodies into req.body
 app.use( boxExpressUrlencoded() )  // parses application/x-www-form-urlencoded bodies
+app.use( boxExpressText() )        // text/plain bodies: req.body is a string
+app.use( boxExpressRaw() )         // application/octet-stream bodies: req.body is a byte[]
 app.use( "/public", boxExpressStatic( expandPath( "./public" ) ) )
 app.use( boxExpressSession() )     // cookie-based sessions, req.session
 app.use( boxExpressHelmet() )      // security headers — see helmet.md
@@ -49,13 +51,18 @@ staticFiles = new bxModules.boxexpress.models.middleware.StaticFiles()
 app.use( "/public", staticFiles.serve( expandPath( "./public" ) ) )
 ```
 
-`json()`/`boxExpressJSON()` and `urlencoded()`/`boxExpressUrlencoded()` cap
+All four body parsers (`json()`, `urlencoded()`, `text()`, `raw()` and
+their `boxExpress...()` BIFs) cap
 the request body at 100KB by default, to keep a slow or malicious client from
 buffering an unbounded body into memory — override with `{ limit: bytes }`:
 
 ```js
 app.use( boxExpressJSON( { limit: 5000000 } ) )  // 5MB
 ```
+
+These limits apply only where a parser is mounted and to the content type
+it parses; `app.set( "maxBodySize", bytes )` caps every request — see
+[Timeouts and size limits](limits.md).
 
 A body that won't parse (broken JSON, a malformed `%` escape in a
 urlencoded body) is answered with a 400.
@@ -64,6 +71,90 @@ A body over the limit gets a `413` response and never reaches your route
 handler. A JSON body that doesn't parse gets a `400`
 (`{ error: true, message: "Malformed JSON body" }`), answered directly like
 the `413` rather than passed to error-handling middleware.
+### Text and raw bodies
+
+`boxExpressText()` puts the body on `req.body` as a string, and
+`boxExpressRaw()` as the exact bytes received (a Java `byte[]`):
+
+```js
+app.post( "/notes", boxExpressText(), ( req, res ) => {
+	notes.add( req.body )                    // a string
+	res.sendStatus( 201 )
+} )
+
+app.put( "/avatars/:id", boxExpressRaw( { type: "image/*", limit: 2000000 } ), ( req, res ) => {
+	fileWrite( avatarPath( req.params.id ), req.body )   // a byte[]
+	res.sendStatus( 204 )
+} )
+```
+
+By default `text()` parses `text/plain` and `raw()` parses
+`application/octet-stream`; anything else is passed over and `req.body`
+stays `{}`. `text()` decodes with the charset the `Content-Type` names,
+`options.defaultCharset` (UTF-8) when it names none, and answers `415`
+for a charset the JVM doesn't have. `raw()`'s bytes aren't valid input to
+`res.json()` — encode them (`binaryEncode( req.body, "base64" )`) first.
+
+### Choosing what a parser handles (`type`)
+
+Every parser takes a `type` option: a MIME type, a file extension, a
+wildcard or a `+suffix` — the same patterns as
+[`req.is()`](request.md#content-negotiation) — or an array of those, or a
+function `( req ) => boolean`:
+
+```js
+app.use( boxExpressJSON( { type: [ "json", "+json" ] } ) )   // also application/vnd.api+json
+app.use( boxExpressText( { type: [ "text/*", "xml" ] } ) )
+app.use( boxExpressRaw( { type: "*/*" } ) )                  // whatever nothing above parsed
+```
+
+A request body can only be read once, so a parser skips any request an
+earlier parser (or `boxExpressUpload()`) already handled. That makes a
+catch-all like the last line safe to put at the end of the list — it only
+sees what the others passed over — and it means order is how you resolve
+an overlap.
+
+### Checking a signature over the raw body (`verify`)
+
+Webhook senders (Stripe, GitHub, Slack) sign the exact bytes they send.
+Re-serializing the parsed JSON doesn't reproduce those bytes, so the check
+has to see the body before it's parsed. Every parser takes a `verify`
+option for this — `( req, res, bodyBytes ) => {...}`, called with the
+bytes as received. Throw to reject the request:
+
+```js
+app.post( "/webhooks/billing",
+	boxExpressJSON( { verify: ( req, res, bodyBytes ) => {
+		var expected = lCase( hmac( bodyBytes, webhookSecret, "HmacSHA256" ) )
+		var given = req.get( "X-Signature" ) ?: ""
+		// A constant-time comparison: == stops at the first difference,
+		// which leaks how much of a guess was right.
+		if ( !createObject( "java", "java.security.MessageDigest" ).isEqual( expected.getBytes( "UTF-8" ), given.getBytes( "UTF-8" ) ) ) {
+			throw( "signature mismatch" )
+		}
+	} } ),
+	( req, res ) => {
+		handleEvent( req.body )   // parsed as usual, and known to be authentic
+		res.sendStatus( 204 )
+	}
+)
+```
+
+A `verify` that throws gets the client a `403`
+(`{ error: true, message: "Request body failed verification" }`) and the
+route never runs; the thrown message isn't sent. `verify` can also send
+its own response instead of throwing. It isn't called for a body over the
+`limit`, which is refused first.
+
+Mount the verifying parser on the webhook route itself, *before* any
+app-wide `app.use( boxExpressJSON() )` — whichever parser reaches the body
+first is the one that reads it, and an app-wide parser registered earlier
+would parse the body with no check, leaving the route's parser nothing to
+verify. Each sender has its own header name and signature format (some
+prefix `sha256=`, some sign a timestamp along with the body); follow
+theirs.
+
+
 `boxExpressStatic()`/`StaticFiles.serve()` resolve requested files
 against the real (symlink-resolved) served directory, so a symlink placed
 inside it can't be used to read files from outside it.

@@ -1,0 +1,74 @@
+/**
+ * File-extension to MIME type table, shared by file responses
+ * (Response.bx, StaticFiles.bx) and content negotiation (Negotiator.bx).
+ */
+class {
+
+	// Built once per class, not once per request.
+	static {
+		TYPES = {
+			html: "text/html; charset=utf-8", htm: "text/html; charset=utf-8",
+			css: "text/css; charset=utf-8", js: "text/javascript; charset=utf-8",
+			json: "application/json; charset=utf-8", txt: "text/plain; charset=utf-8",
+			text: "text/plain; charset=utf-8", md: "text/markdown; charset=utf-8",
+			yaml: "application/yaml; charset=utf-8", yml: "application/yaml; charset=utf-8",
+			png: "image/png", jpg: "image/jpeg", jpeg: "image/jpeg", gif: "image/gif",
+			svg: "image/svg+xml", ico: "image/x-icon", avif: "image/avif",
+			woff: "font/woff", woff2: "font/woff2", ttf: "font/ttf", otf: "font/otf",
+			pdf: "application/pdf", zip: "application/zip",
+			csv: "text/csv; charset=utf-8", xml: "application/xml; charset=utf-8",
+			mp4: "video/mp4", webm: "video/webm", mp3: "audio/mpeg",
+			wav: "audio/wav", ogg: "audio/ogg",
+			mjs: "text/javascript; charset=utf-8", webp: "image/webp", wasm: "application/wasm",
+			map: "application/json; charset=utf-8", webmanifest: "application/manifest+json"
+		}
+	}
+
+	/**
+	 * The Content-Type value for a file extension ("json", ".json"), charset
+	 * included for text formats. "" when the extension isn't known.
+	 */
+	function forExtension( extension ) {
+		var key = lcase( trim( extension ) )
+		if ( key.left( 1 ) == "." ) {
+			key = key.mid( 2, key.len() )
+		}
+		if ( !len( key ) ) {
+			return ""
+		}
+		return static.TYPES[ key ] ?: ""
+	}
+
+	/**
+	 * A Content-Type value for either an extension or a full MIME type. A
+	 * full type naming a text format gets "; charset=utf-8" when it has no
+	 * charset of its own. "" for an unknown extension.
+	 */
+	function contentType( typeOrExtension ) {
+		var value = trim( typeOrExtension )
+		if ( !value.find( "/" ) ) {
+			return forExtension( value )
+		}
+		if ( value.find( ";" ) ) {
+			return value
+		}
+		var bareType = lcase( value )
+		if ( bareType.left( 5 ) == "text/" || bareType == "application/json" || bareType == "application/xml" || bareType == "application/yaml" ) {
+			return value & "; charset=utf-8"
+		}
+		return value
+	}
+
+	/**
+	 * The bare, lower-cased MIME type (no parameters) for an extension or a
+	 * full MIME type. "" for an unknown extension.
+	 */
+	function bare( typeOrExtension ) {
+		var value = trim( typeOrExtension )
+		if ( !value.find( "/" ) ) {
+			value = forExtension( value )
+		}
+		return lcase( trim( value.listFirst( ";" ) ) )
+	}
+
+}

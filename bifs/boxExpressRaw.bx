@@ -1,0 +1,15 @@
+/**
+ * Global BIF wrapping BodyParsers.raw() — mirrors Express's
+ * express.raw(). req.body becomes the body's exact bytes.
+ *
+ *   app.use( boxExpressRaw() )
+ *   app.use( boxExpressRaw( { type: "pdf", limit: 500000 } ) )
+ */
+@BoxBIF
+class {
+
+	function invoke( options = {} ) {
+		return new bxModules.boxexpress.models.middleware.BodyParsers().raw( options )
+	}
+
+}

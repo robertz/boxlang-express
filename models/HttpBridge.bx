@@ -7,7 +7,8 @@
  */
 class {
 
-	function init( router, settings, appLocals = {}, metrics = "" ) {
+	function init( router, settings, appLocals = {}, metrics = "", watchdog = "" ) {
+		variables.watchdog = isSimpleValue( watchdog ) ? new RequestWatchdog() : watchdog
 		variables.router = router
 		variables.settings = settings
 		variables.appLocals = appLocals
@@ -62,8 +63,19 @@ class {
 		}
 
 		try {
-			variables.router.dispatch( req, res )
+			req._bindTimeout( variables.watchdog, res )
+			var requestTimeoutMs = variables.settings[ "requestTimeoutMs" ] ?: 0
+			if ( requestTimeoutMs > 0 ) {
+				req.setTimeout( requestTimeoutMs )
+			}
+			if ( !_rejectOversizedBody( req, res ) ) {
+				variables.router.dispatch( req, res )
+			}
 		} catch ( any e ) {
+			if ( req.timedOut ) {
+				_sendTimeout( req, res, requestId )
+				return
+			}
 			println( variables.color.gray( "[#dateTimeFormat( now(), 'yyyy-MM-dd HH:mm:ss' )#]" ) & _idTag( requestId ) & " " & variables.color.red( "Unhandled error dispatching #req.method# #_logSafe( req.path )#: #e.message#" ) )
 			if ( !res.isSent() ) {
 				try {
@@ -73,6 +85,10 @@ class {
 				}
 			}
 		} finally {
+			req._clearTimeout()
+			if ( req.timedOut ) {
+				_sendTimeout( req, res, requestId )
+			}
 			if ( !res.isSent() ) {
 				try {
 					res.status( 500 ).send( "Internal Server Error" )
@@ -82,6 +98,55 @@ class {
 			if ( !isSimpleValue( variables.metrics ) ) {
 				variables.metrics.recordRequest( res.getStatusCode(), createObject( "java", "java.lang.System" ).nanoTime() - startedNs )
 			}
+		}
+	}
+
+	/**
+	 * app.set( "maxBodySize" ): answers 413 before any handler runs. A
+	 * request that declares its length is refused on the header alone. One
+	 * that doesn't (chunked) is read here, up to the cap, and handed to the
+	 * app from memory — the only way to know its size is to read it.
+	 */
+	private function _rejectOversizedBody( req, res ) {
+		var maxBodySize = variables.settings[ "maxBodySize" ] ?: 0
+		if ( maxBodySize <= 0 ) {
+			return false
+		}
+		var declared = trim( req.headers[ "Content-Length" ] ?: "" )
+		var tooLarge = false
+		if ( len( declared ) ) {
+			tooLarge = reFind( "^[0-9]+$", declared ) && ( declared.len() > 15 || declared > maxBodySize )
+		} else if ( ( req.headers[ "Transfer-Encoding" ] ?: "" ).findNoCase( "chunked" ) ) {
+			var bodyBytes = req.bodyStream().readNBytes( javacast( "int", maxBodySize + 1 ) )
+			tooLarge = bodyBytes.len() > maxBodySize
+			if ( !tooLarge ) {
+				req._setBufferedBody( bodyBytes )
+			}
+		}
+		if ( tooLarge ) {
+			// Closing the connection saves reading the rest of a body
+			// that's already been refused.
+			res.set( "Connection", "close" )
+			res.status( 413 ).json( { error: true, message: "Request body exceeds the #maxBodySize#-byte limit" } )
+		}
+		return tooLarge
+	}
+
+	/**
+	 * Answers a timed-out request, on its own thread. Thread.interrupted()
+	 * first: an interrupt that surfaced as a socket error leaves the
+	 * thread's interrupt flag set, which would fail the write below.
+	 */
+	function _sendTimeout( req, res, requestId = "" ) {
+		createObject( "java", "java.lang.Thread" ).interrupted()
+		if ( res.isSent() ) {
+			return
+		}
+		println( variables.color.gray( "[#dateTimeFormat( now(), 'yyyy-MM-dd HH:mm:ss' )#]" ) & _idTag( requestId ) & " " & variables.color.red( "#req.method# #_logSafe( req.originalUrl )# timed out after #req.timedOutAfterMs ?: 0#ms" ) )
+		try {
+			res.set( "Connection", "close" )
+			res.status( 503 ).json( { error: true, message: "Request timed out" } )
+		} catch ( any ignore ) {
 		}
 	}
 

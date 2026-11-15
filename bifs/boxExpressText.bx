@@ -1,0 +1,15 @@
+/**
+ * Global BIF wrapping BodyParsers.text() — mirrors Express's
+ * express.text(). req.body becomes the body as a string.
+ *
+ *   app.use( boxExpressText() )
+ *   app.use( boxExpressText( { type: "xml", limit: 500000 } ) )
+ */
+@BoxBIF
+class {
+
+	function invoke( options = {} ) {
+		return new bxModules.boxexpress.models.middleware.BodyParsers().text( options )
+	}
+
+}

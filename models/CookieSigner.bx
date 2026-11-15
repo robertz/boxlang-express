@@ -1,0 +1,63 @@
+/**
+ * Signs and verifies cookie values for res.cookie( ..., { signed: true } )
+ * and req.signedCookies, in the format Express's cookie-parser uses:
+ * "s:" & value & "." & base64( HMAC-SHA256( value, secret ) ), padding
+ * stripped. A signature proves the server issued the value; it doesn't
+ * hide it.
+ *
+ * Takes one secret or several. The first signs; all of them verify, so a
+ * secret can be replaced without invalidating cookies signed with the
+ * old one.
+ */
+class {
+
+	function init( secrets ) {
+		variables.secrets = isArray( secrets ) ? secrets : [ secrets ]
+		if ( !variables.secrets.len() ) {
+			throw( type = "BoxExpress.InvalidArgument", message = "app.set( ""cookie secret"" ) needs at least one secret" )
+		}
+		for ( var secret in variables.secrets ) {
+			if ( !isSimpleValue( secret ) || !len( trim( secret ) ) ) {
+				throw( type = "BoxExpress.InvalidArgument", message = "app.set( ""cookie secret"" ) must be a non-empty string, or an array of them" )
+			}
+		}
+		return this
+	}
+
+	function sign( value ) {
+		return "s:" & value & "." & _signature( value, variables.secrets[ 1 ] )
+	}
+
+	function isSigned( cookieValue ) {
+		return cookieValue.len() > 2 && compare( cookieValue.mid( 1, 2 ), "s:" ) == 0
+	}
+
+	/**
+	 * { valid, value } for a value in the signed format. valid is false,
+	 * and value "", when the signature matches none of the secrets.
+	 */
+	function unsign( cookieValue ) {
+		var payload = cookieValue.mid( 3, cookieValue.len() )
+		var dotPos = payload.len() - payload.reverse().find( "." ) + 1
+		if ( !payload.find( "." ) ) {
+			return { valid: false, value: "" }
+		}
+		var value = payload.mid( 1, dotPos - 1 )
+		var given = payload.mid( dotPos + 1, payload.len() ).getBytes( "UTF-8" )
+		var messageDigest = createObject( "java", "java.security.MessageDigest" )
+		for ( var secret in variables.secrets ) {
+			// Constant-time, so a wrong signature doesn't reveal how much
+			// of it was right.
+			if ( messageDigest.isEqual( _signature( value, secret ).getBytes( "UTF-8" ), given ) ) {
+				return { valid: true, value: value }
+			}
+		}
+		return { valid: false, value: "" }
+	}
+
+	private function _signature( value, secret ) {
+		var digest = binaryDecode( hmac( toString( value ), secret, "HmacSHA256", "UTF-8" ), "hex" )
+		return binaryEncode( digest, "base64" ).reReplace( "=+$", "" )
+	}
+
+}

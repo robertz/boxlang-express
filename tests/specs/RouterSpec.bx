@@ -265,6 +265,25 @@ class extends="testbox.system.BaseSpec" {
 				expect( capturedItemId ).toBe( "9" )
 			} )
 
+			it( "sets req.baseUrl to the mount path while a mounted layer runs, and restores it after", function() {
+				var router = new "../../models/Router"()
+				var seenInMiddleware = ""
+				var seenInSubRouter = ""
+				var seenAfter = "unset"
+				var seenAtRoot = "unset"
+				var subRouter = new "../../models/Router"()
+				subRouter.use( "/items", ( req, res, next ) => { seenInSubRouter = req.baseUrl; next() } )
+				router.use( ( req, res, next ) => { seenAtRoot = req.baseUrl; next() } )
+				router.use( "/api", ( req, res, next ) => { seenInMiddleware = req.baseUrl; next() } )
+				router.use( "/api", subRouter )
+				router.use( ( req, res, next ) => { seenAfter = req.baseUrl; next() } )
+				router.dispatch( _fakeReq( "GET", "/api/items/7" ), _fakeRes() )
+				expect( seenAtRoot ).toBe( "" )
+				expect( seenInMiddleware ).toBe( "/api" )
+				expect( seenInSubRouter ).toBe( "/api/items" )
+				expect( seenAfter ).toBe( "" )
+			} )
+
 			it( "preserves a trailing slash through a root-mounted USE layer", function() {
 				var router = new "../../models/Router"()
 				var seenPath = ""

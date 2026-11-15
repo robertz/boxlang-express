@@ -151,6 +151,13 @@ class {
 				return
 			}
 
+			// A request the watchdog interrupted is answered by HttpBridge,
+			// not by error-handling middleware — the error here is only how
+			// the interrupt happened to surface (see RequestWatchdog.bx).
+			if ( !isNull( err ) && ( req.timedOut ?: false ) ) {
+				throw( type = "BoxExpress.RequestTimeout", message = "Request timed out" )
+			}
+
 			// Layers that don't apply are skipped in this loop rather than by
 			// calling next() again — recursing once per skipped layer made the
 			// stack grow with the size of the route table, and a 404 in an app
@@ -202,6 +209,7 @@ class {
 
 			if ( layer.method == "USE" ) {
 				var savedPath = req.path
+				var savedBaseUrl = req.baseUrl ?: ""
 				var remainder = "/" & reqSegments.slice( matchResult.consumed + 1 ).toList( "/" )
 				// _splitPath()/listToArray() drops empty segments, so a trailing
 				// slash on the incoming path leaves no trace in reqSegments —
@@ -215,8 +223,10 @@ class {
 					remainder &= "/"
 				}
 				req.path = remainder
+				req.baseUrl = savedBaseUrl & ( matchResult.consumed > 0 ? "/" & reqSegments.slice( 1, matchResult.consumed ).toList( "/" ) : "" )
 				var scopedNext = function( innerErr ) {
 					req.path = savedPath
+					req.baseUrl = savedBaseUrl
 					if ( isNull( innerErr ) ) {
 						next()
 					} else {
@@ -235,6 +245,7 @@ class {
 						}
 					} catch ( any e ) {
 						req.path = savedPath
+						req.baseUrl = savedBaseUrl
 						next( e )
 					}
 				}

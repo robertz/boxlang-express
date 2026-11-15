@@ -1,0 +1,111 @@
+/**
+ * Enforces per-request timeouts (app.set( "requestTimeoutMs" ),
+ * req.setTimeout()). One watchdog serves a whole app: a single virtual
+ * thread that only exists while at least one request is being watched,
+ * checking deadlines every TICK_MS.
+ *
+ * A request past its deadline has its handler thread interrupted, and
+ * nothing else — the watchdog never touches the response. Undertow's
+ * exchange isn't safe to write from a second thread while the handler
+ * thread may be using it, so the 503 is sent by the handler thread itself
+ * as the interrupt unwinds it (Router.dispatch(), HttpBridge.handle()).
+ * The cost of that: a handler that never blocks, or swallows the
+ * interrupt, isn't stopped.
+ *
+ * Methods the tick thread calls are not private — a private method isn't
+ * reachable from a closure run outside the class (see ARCHITECTURE.md).
+ */
+class {
+
+	static {
+		TICK_MS = 50
+	}
+
+	function init() {
+		variables.watched = createObject( "java", "java.util.concurrent.ConcurrentHashMap" ).init()
+		variables.nextId = createObject( "java", "java.util.concurrent.atomic.AtomicLong" ).init()
+		variables.ticking = createObject( "java", "java.util.concurrent.atomic.AtomicBoolean" ).init( false )
+		variables.system = createObject( "java", "java.lang.System" )
+		variables.color = new AnsiColor()
+		return this
+	}
+
+	/**
+	 * Starts watching the calling thread's request. Returns an id for
+	 * unwatch().
+	 */
+	function watch( req, res, timeoutMs ) {
+		var id = toString( variables.nextId.incrementAndGet() )
+		variables.watched.put( id, {
+			thread: createObject( "java", "java.lang.Thread" ).currentThread(),
+			req: req,
+			res: res,
+			timeoutMs: timeoutMs,
+			deadlineNs: variables.system.nanoTime() + timeoutMs * 1000000
+		} )
+		if ( variables.ticking.compareAndSet( false, true ) ) {
+			_startTicking()
+		}
+		return id
+	}
+
+	/**
+	 * Stops watching. False when the watchdog already fired for this id.
+	 */
+	function unwatch( id ) {
+		return !isNull( variables.watched.remove( id ) )
+	}
+
+	function watchedCount() {
+		return variables.watched.size()
+	}
+
+	function _startTicking() {
+		var self = this
+		var runnable = createDynamicProxy( new ThreadRunnable( () => self._tickLoop() ), [ "java.lang.Runnable" ] )
+		createObject( "java", "java.lang.Thread" ).startVirtualThread( runnable )
+	}
+
+	function _tickLoop() {
+		while ( true ) {
+			try {
+				sleep( static.TICK_MS )
+				_fireExpired()
+			} catch ( any e ) {
+				println( variables.color.red( "[BoxExpress] request watchdog error: #e.message#" ) )
+			}
+			if ( variables.watched.isEmpty() ) {
+				variables.ticking.set( false )
+				// A watch() that landed between the two lines above saw
+				// ticking == true and started nothing; pick it up here.
+				if ( variables.watched.isEmpty() || !variables.ticking.compareAndSet( false, true ) ) {
+					return
+				}
+			}
+		}
+	}
+
+	function _fireExpired() {
+		var nowNs = variables.system.nanoTime()
+		for ( var mapEntry in variables.watched.entrySet().toArray() ) {
+			var entry = mapEntry.getValue()
+			if ( entry.deadlineNs > nowNs ) {
+				continue
+			}
+			// remove() is what decides between this and unwatch(): whichever
+			// gets the entry owns the outcome.
+			if ( isNull( variables.watched.remove( mapEntry.getKey() ) ) ) {
+				continue
+			}
+			// A response already under way (a file download, an SSE stream)
+			// isn't a stuck handler.
+			if ( entry.res.isSent() ) {
+				continue
+			}
+			entry.req.timedOut = true
+			entry.req.timedOutAfterMs = entry.timeoutMs
+			entry.thread.interrupt()
+		}
+	}
+
+}

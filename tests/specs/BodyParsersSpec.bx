@@ -1,0 +1,314 @@
+/**
+ * BodyParsers.text() and raw(), and the type / verify options and
+ * parse-once rule all four parsers share. Run through app.inject(); the
+ * last suite sends real bytes to a live server.
+ */
+class extends="testbox.system.BaseSpec" {
+
+	function beforeAll() {
+		variables.testPort = 4365
+		variables.baseUrl = "http://localhost:#variables.testPort#"
+		variables.client = new "../helpers/HttpClient"()
+		variables.secret = "test-signing-secret"
+
+		var parsers = new "../../models/middleware/BodyParsers"()
+		variables.liveApp = new "../../models/BoxExpress"()
+		variables.liveApp.set( "log", false )
+		variables.liveApp.post( "/hook", parsers.json( { verify: _signatureCheck( variables.secret ) } ), ( req, res ) => res.json( { event: req.body.event } ) )
+		variables.liveApp.use( parsers.json(), parsers.text(), parsers.raw() )
+		variables.liveApp.post( "/echo", ( req, res ) => res.json( _describe( req.body ) ) )
+		variables.liveApp.listen( port = variables.testPort, options = { block: false } )
+		sleep( 300 )
+	}
+
+	function afterAll() {
+		variables.liveApp.close()
+	}
+
+	// What kind of thing req.body ended up as, in a form res.json() can send.
+	private function _describe( body ) {
+		if ( isBinary( body ) ) {
+			return { kind: "binary", length: body.len(), hex: lCase( binaryEncode( body, "hex" ) ) }
+		}
+		if ( isSimpleValue( body ) ) {
+			return { kind: "string", value: body }
+		}
+		return { kind: "struct", keys: structCount( body ) }
+	}
+
+	private function _sign( payload, secret ) {
+		return lCase( hmac( payload, secret, "HmacSHA256" ) )
+	}
+
+	private function _signatureCheck( secret ) {
+		return function( req, res, bodyBytes ) {
+			var expected = lCase( hmac( bodyBytes, secret, "HmacSHA256" ) )
+			var given = req.headers[ "X-Signature" ] ?: ""
+			if ( !createObject( "java", "java.security.MessageDigest" ).isEqual( expected.getBytes( "UTF-8" ), given.getBytes( "UTF-8" ) ) ) {
+				throw( "signature mismatch" )
+			}
+		}
+	}
+
+	private function _appWith() {
+		var app = new "../../models/BoxExpress"()
+		for ( var i = 1; i <= arguments.count(); i++ ) {
+			app.use( arguments[ i ] )
+		}
+		app.post( "/echo", ( req, res ) => res.json( _describe( req.body ) ) )
+		return app
+	}
+
+	private function _post( app, contentType, body ) {
+		var options = { method: "POST", url: "/echo", body: body }
+		if ( len( contentType ) ) {
+			options.headers = { "Content-Type": contentType }
+		}
+		return app.inject( options )
+	}
+
+	function run() {
+
+		describe( "BodyParsers.text()", function() {
+
+			it( "puts a text/plain body on req.body as a string", function() {
+				var body = _post( _appWith( new "../../models/middleware/BodyParsers"().text() ), "text/plain", "hello, world" ).json()
+				assertAll( [
+					() => expect( body.kind ).toBe( "string" ),
+					() => expect( body.value ).toBe( "hello, world" )
+				] )
+			} )
+
+			it( "decodes with the charset the Content-Type names, UTF-8 otherwise", function() {
+				var app = _appWith( new "../../models/middleware/BodyParsers"().text() )
+				var word = "caf" & char( 233 )
+				var javaString = createObject( "java", "java.lang.String" ).init( word )
+				assertAll( [
+					() => expect( _post( app, "text/plain; charset=iso-8859-1", javaString.getBytes( "ISO-8859-1" ) ).json().value ).toBe( word ),
+					() => expect( _post( app, 'text/plain; charset="UTF-8"', javaString.getBytes( "UTF-8" ) ).json().value ).toBe( word ),
+					() => expect( _post( app, "text/plain", javaString.getBytes( "UTF-8" ) ).json().value ).toBe( word )
+				] )
+			} )
+
+			it( "uses options.defaultCharset when the Content-Type names none", function() {
+				var app = _appWith( new "../../models/middleware/BodyParsers"().text( { defaultCharset: "ISO-8859-1" } ) )
+				var word = "caf" & char( 233 )
+				expect( _post( app, "text/plain", createObject( "java", "java.lang.String" ).init( word ).getBytes( "ISO-8859-1" ) ).json().value ).toBe( word )
+			} )
+
+			it( "answers 415 for a charset it can't decode", function() {
+				var app = _appWith( new "../../models/middleware/BodyParsers"().text() )
+				assertAll( [
+					() => expect( _post( app, "text/plain; charset=klingon", "x" ).statusCode ).toBe( 415 ),
+					() => expect( _post( app, "text/plain; charset=not a name!", "x" ).statusCode ).withContext( "an illegal charset name, not just an unknown one" ).toBe( 415 )
+				] )
+			} )
+
+			it( "leaves other content types, and a request with none, alone", function() {
+				var app = _appWith( new "../../models/middleware/BodyParsers"().text() )
+				assertAll( [
+					() => expect( _post( app, "application/xml", "<a/>" ).json().kind ).toBe( "struct" ),
+					() => expect( _post( app, "", "words" ).json().kind ).toBe( "struct" )
+				] )
+			} )
+
+			it( "gives an empty string for an empty text body", function() {
+				var body = _post( _appWith( new "../../models/middleware/BodyParsers"().text() ), "text/plain", "" ).json()
+				assertAll( [
+					() => expect( body.kind ).toBe( "string" ),
+					() => expect( body.value ).toBe( "" )
+				] )
+			} )
+
+			it( "answers 413 over its limit", function() {
+				var app = _appWith( new "../../models/middleware/BodyParsers"().text( { limit: 10 } ) )
+				assertAll( [
+					() => expect( _post( app, "text/plain", "1234567890" ).json().value ).toBe( "1234567890" ),
+					() => expect( _post( app, "text/plain", "12345678901" ).statusCode ).toBe( 413 )
+				] )
+			} )
+
+		} )
+
+		describe( "BodyParsers.raw()", function() {
+
+			it( "puts the exact bytes on req.body", function() {
+				var bytes = binaryDecode( "00ff10807f0a0d", "hex" )
+				var body = _post( _appWith( new "../../models/middleware/BodyParsers"().raw() ), "application/octet-stream", bytes ).json()
+				assertAll( [
+					() => expect( body.kind ).toBe( "binary" ),
+					() => expect( body.length ).toBe( 7 ),
+					() => expect( body.hex ).withContext( "bytes that aren't valid UTF-8 survive untouched" ).toBe( "00ff10807f0a0d" )
+				] )
+			} )
+
+			it( "leaves other content types alone by default", function() {
+				expect( _post( _appWith( new "../../models/middleware/BodyParsers"().raw() ), "image/png", "x" ).json().kind ).toBe( "struct" )
+			} )
+
+			it( "answers 413 over its limit", function() {
+				var app = _appWith( new "../../models/middleware/BodyParsers"().raw( { limit: 4 } ) )
+				assertAll( [
+					() => expect( _post( app, "application/octet-stream", "1234" ).json().length ).toBe( 4 ),
+					() => expect( _post( app, "application/octet-stream", "12345" ).statusCode ).toBe( 413 )
+				] )
+			} )
+
+		} )
+
+		describe( "the type option", function() {
+
+			it( "takes a wildcard, an extension, an array or a function", function() {
+				var parsers = new "../../models/middleware/BodyParsers"()
+				assertAll( [
+					() => expect( _post( _appWith( parsers.raw( { type: "*/*" } ) ), "image/png", "x" ).json().kind ).toBe( "binary" ),
+					() => expect( _post( _appWith( parsers.text( { type: "xml" } ) ), "application/xml; charset=utf-8", "<a/>" ).json().value ).toBe( "<a/>" ),
+					() => expect( _post( _appWith( parsers.text( { type: [ "csv", "text/*" ] } ) ), "text/markdown", "## hi" ).json().value ).toBe( "## hi" ),
+					() => expect( _post( _appWith( parsers.text( { type: [ "csv", "text/*" ] } ) ), "application/pdf", "x" ).json().kind ).toBe( "struct" ),
+					() => expect( _post( _appWith( parsers.raw( { type: ( req ) => req.path == "/echo" } ) ), "", "no content type at all" ).json().kind ).withContext( "a function decides on its own, Content-Type or not" ).toBe( "binary" ),
+					() => expect( _post( _appWith( parsers.raw( { type: ( req ) => false } ) ), "application/octet-stream", "x" ).json().kind ).toBe( "struct" )
+				] )
+			} )
+
+			it( "lets json() parse a +json media type it ignores by default", function() {
+				var parsers = new "../../models/middleware/BodyParsers"()
+				var payload = '{"a":1,"b":2}'
+				assertAll( [
+					() => expect( _post( _appWith( parsers.json() ), "application/vnd.api+json", payload ).json().keys ).withContext( "default: not parsed" ).toBe( 0 ),
+					() => expect( _post( _appWith( parsers.json( { type: [ "json", "+json" ] } ) ), "application/vnd.api+json", payload ).json().keys ).toBe( 2 ),
+					() => expect( _post( _appWith( parsers.json( { type: [ "json", "+json" ] } ) ), "application/json", payload ).json().keys ).toBe( 2 ),
+					() => expect( _post( _appWith( parsers.json() ), "application/json; charset=utf-8", payload ).json().keys ).withContext( "default behavior unchanged" ).toBe( 2 )
+				] )
+			} )
+
+		} )
+
+		describe( "one parse per request", function() {
+
+			it( "does not let a catch-all parser overwrite what an earlier parser produced", function() {
+				var parsers = new "../../models/middleware/BodyParsers"()
+				var app = _appWith( parsers.json(), parsers.urlencoded(), parsers.text( { type: "*/*" } ) )
+				assertAll( [
+					() => expect( _post( app, "application/json", '{"a":1}' ).json().kind ).toBe( "struct" ),
+					() => expect( _post( app, "application/x-www-form-urlencoded", "a=1&b=2" ).json().keys ).toBe( 2 ),
+					() => expect( _post( app, "application/xml", "<a/>" ).json().value ).withContext( "anything the first two skipped" ).toBe( "<a/>" )
+				] )
+			} )
+
+			it( "does not let a catch-all parser replace a multipart upload's fields", function() {
+				var app = new "../../models/BoxExpress"()
+				app.use( new "../../models/middleware/Multipart"().upload(), new "../../models/middleware/BodyParsers"().raw( { type: "*/*" } ) )
+				app.post( "/echo", ( req, res ) => res.json( _describe( req.body ) ) )
+				var crlf = char( 13 ) & char( 10 )
+				var multipartBody = "--b" & crlf & 'Content-Disposition: form-data; name="note"' & crlf & crlf & "hi" & crlf & "--b--" & crlf
+				var body = _post( app, "multipart/form-data; boundary=b", multipartBody ).json()
+				assertAll( [
+					() => expect( body.kind ).toBe( "struct" ),
+					() => expect( body.keys ).toBe( 1 )
+				] )
+			} )
+
+		} )
+
+		describe( "the verify option", function() {
+
+			it( "receives the exact bytes before parsing, and lets a valid request through", function() {
+				var payload = '{ "event" : "paid" }'
+				var seen = {}
+				var app = _appWith( new "../../models/middleware/BodyParsers"().json( { verify: ( req, res, bodyBytes ) => {
+					seen.isBinary = isBinary( bodyBytes )
+					seen.text = createObject( "java", "java.lang.String" ).init( bodyBytes, "UTF-8" )
+				} } ) )
+				var res = _post( app, "application/json", payload )
+				assertAll( [
+					() => expect( res.json().keys ).toBe( 1 ),
+					() => expect( seen.isBinary ).toBeTrue(),
+					() => expect( seen.text ).withContext( "whitespace and all, not a re-serialized copy" ).toBe( payload )
+				] )
+			} )
+
+			it( "answers 403 when verify throws, and never runs the route", function() {
+				var routeRan = false
+				var app = new "../../models/BoxExpress"()
+				app.use( new "../../models/middleware/BodyParsers"().json( { verify: _signatureCheck( "s3cret" ) } ) )
+				app.post( "/echo", ( req, res ) => {
+					routeRan = true
+					res.send( "ran" )
+				} )
+				var payload = '{"event":"paid"}'
+				var rejected = app.inject( { method: "POST", url: "/echo", headers: { "Content-Type": "application/json", "X-Signature": _sign( '{"event":"refunded"}', "s3cret" ) }, body: payload } )
+				var rejectedRouteRan = routeRan
+				var accepted = app.inject( { method: "POST", url: "/echo", headers: { "Content-Type": "application/json", "X-Signature": _sign( payload, "s3cret" ) }, body: payload } )
+				assertAll( [
+					() => expect( rejected.statusCode ).toBe( 403 ),
+					() => expect( rejected.json().message ).toBe( "Request body failed verification" ),
+					() => expect( rejectedRouteRan ).toBeFalse(),
+					() => expect( accepted.body ).toBe( "ran" )
+				] )
+			} )
+
+			it( "lets verify send its own response", function() {
+				var app = _appWith( new "../../models/middleware/BodyParsers"().raw( { verify: ( req, res, bodyBytes ) => {
+					res.status( 401 ).send( "who are you" )
+				} } ) )
+				var res = _post( app, "application/octet-stream", "x" )
+				assertAll( [
+					() => expect( res.statusCode ).toBe( 401 ),
+					() => expect( res.body ).toBe( "who are you" )
+				] )
+			} )
+
+			it( "is not called for a body over the limit, or a content type the parser skips", function() {
+				var calls = 0
+				var app = _appWith( new "../../models/middleware/BodyParsers"().text( { limit: 5, verify: ( req, res, bodyBytes ) => {
+					calls++
+				} } ) )
+				_post( app, "text/plain", "123456" )
+				_post( app, "application/json", "{}" )
+				expect( calls ).toBe( 0 )
+			} )
+
+			it( "works on urlencoded(), text() and raw() too", function() {
+				var parsers = new "../../models/middleware/BodyParsers"()
+				var reject = ( req, res, bodyBytes ) => {
+					throw( "no" )
+				}
+				assertAll( [
+					() => expect( _post( _appWith( parsers.urlencoded( { verify: reject } ) ), "application/x-www-form-urlencoded", "a=1" ).statusCode ).toBe( 403 ),
+					() => expect( _post( _appWith( parsers.text( { verify: reject } ) ), "text/plain", "a" ).statusCode ).toBe( 403 ),
+					() => expect( _post( _appWith( parsers.raw( { verify: reject } ) ), "application/octet-stream", "a" ).statusCode ).toBe( 403 )
+				] )
+			} )
+
+		} )
+
+		describe( "parsers against a live server", function() {
+
+			it( "verifies a signed webhook over the bytes on the wire", function() {
+				var payload = '{"event":"paid","amount":1250}'
+				var good = variables.client.requestWithHeaders( "POST", variables.baseUrl & "/hook", { "X-Signature": _sign( payload, variables.secret ) }, payload, "application/json" )
+				var tampered = variables.client.requestWithHeaders( "POST", variables.baseUrl & "/hook", { "X-Signature": _sign( payload, variables.secret ) }, replace( payload, "1250", "9999" ), "application/json" )
+				var unsigned = variables.client.post( variables.baseUrl & "/hook", payload, "application/json" )
+				assertAll( [
+					() => expect( JSONDeserialize( good.body ).event ).toBe( "paid" ),
+					() => expect( tampered.statusCode ).toBe( 403 ),
+					() => expect( unsigned.statusCode ).toBe( 403 )
+				] )
+			} )
+
+			it( "parses text, raw and json bodies by Content-Type", function() {
+				var asText = JSONDeserialize( variables.client.post( variables.baseUrl & "/echo", "plain words", "text/plain; charset=utf-8" ).body )
+				var asRaw = JSONDeserialize( variables.client.post( variables.baseUrl & "/echo", "12345", "application/octet-stream" ).body )
+				var asJson = JSONDeserialize( variables.client.post( variables.baseUrl & "/echo", '{"a":1}', "application/json" ).body )
+				assertAll( [
+					() => expect( asText.value ).toBe( "plain words" ),
+					() => expect( asRaw.hex ).toBe( "3132333435" ),
+					() => expect( asJson.kind ).toBe( "struct" )
+				] )
+			} )
+
+		} )
+
+	}
+
+}

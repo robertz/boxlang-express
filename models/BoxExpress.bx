@@ -34,6 +34,7 @@ class {
 		variables.gracefulHandler = javacast( "null", "" )
 		variables.wsCallbackObject = javacast( "null", "" )
 		variables.color = new AnsiColor()
+		variables.requestWatchdog = new RequestWatchdog()
 		return this
 	}
 
@@ -284,7 +285,13 @@ class {
 	}
 
 	function set( name, value ) {
+		if ( listFindNoCase( "headerTimeoutMs,keepAliveTimeoutMs,requestTimeoutMs,maxHeaderSize,maxBodySize", name ) ) {
+			_checkLimit( name, value )
+		}
 		this.settings[ name ] = value
+		if ( lCase( name ) == "cookie secret" ) {
+			this.settings[ "cookie signer" ] = new CookieSigner( value )
+		}
 		// Parsed once here, not per request — and an invalid entry fails at startup.
 		if ( lCase( name ) == "trust proxy" ) {
 			this.settings[ "trust proxy compiled" ] = new ProxyTrust( value )
@@ -350,7 +357,7 @@ class {
 		}
 
 		var backlog = options.backlog ?: 1024
-		var bridge = new HttpBridge( variables.router, this.settings, this.locals, variables.metricsRegistry )
+		var bridge = new HttpBridge( variables.router, this.settings, this.locals, variables.metricsRegistry, variables.requestWatchdog )
 
 		var glue = new adapters.UndertowHandlerGlue( bridge )
 		var innerProxy = createDynamicProxy( glue, [ "io.undertow.server.HttpHandler" ] )
@@ -421,6 +428,7 @@ class {
 		builder.setHandler( variables.gracefulHandler )
 		builder.setSocketOption( createObject( "java", "org.xnio.Options" ).BACKLOG, javacast( "int", backlog ) )
 		builder.setServerOption( createObject( "java", "io.undertow.UndertowOptions" ).ENABLE_STATISTICS, javacast( "boolean", true ) )
+		_applyServerLimits( builder )
 
 		try {
 			variables.undertowServer = builder.build()
@@ -453,6 +461,30 @@ class {
 		}
 
 		return this
+	}
+
+	/**
+	 * Connection-level limits, enforced by Undertow before a request reaches
+	 * any handler — see docs/limits.md. 0 turns a limit off. maxBodySize and
+	 * requestTimeoutMs are enforced per request, in HttpBridge.
+	 */
+	private function _applyServerLimits( builder ) {
+		var undertowOptions = createObject( "java", "io.undertow.UndertowOptions" )
+		var headerTimeoutMs = this.settings[ "headerTimeoutMs" ] ?: 60000
+		var keepAliveTimeoutMs = this.settings[ "keepAliveTimeoutMs" ] ?: 60000
+		var maxHeaderSize = this.settings[ "maxHeaderSize" ] ?: 65536
+
+		builder.setServerOption( undertowOptions.REQUEST_PARSE_TIMEOUT, javacast( "int", headerTimeoutMs > 0 ? headerTimeoutMs : -1 ) )
+		builder.setServerOption( undertowOptions.NO_REQUEST_TIMEOUT, javacast( "int", keepAliveTimeoutMs > 0 ? keepAliveTimeoutMs : -1 ) )
+		if ( maxHeaderSize > 0 ) {
+			builder.setServerOption( undertowOptions.MAX_HEADER_SIZE, javacast( "int", maxHeaderSize ) )
+		}
+	}
+
+	private function _checkLimit( name, value ) {
+		if ( !isSimpleValue( value ) || !isNumeric( value ) || value < 0 || value != int( value ) || value > 2147483647 ) {
+			throw( type = "BoxExpress.InvalidArgument", message = "app.set( ""#name#"" ) must be a whole number, 0 or more, not ""#isSimpleValue( value ) ? value : "[complex value]"#""" )
+		}
 	}
 
 	/**
@@ -601,7 +633,7 @@ class {
 		// this call without touching the app's real settings.
 		var injectSettings = structCopy( this.settings )
 		injectSettings[ "log" ] = options.log ?: false
-		new HttpBridge( variables.router, injectSettings, this.locals ).handle( adapter )
+		new HttpBridge( variables.router, injectSettings, this.locals, "", variables.requestWatchdog ).handle( adapter )
 
 		return adapter.getResult()
 	}

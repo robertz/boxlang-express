@@ -1,29 +1,50 @@
 /**
- * Opt-in body-parsing middleware, mirroring express.json() / express.urlencoded().
+ * Opt-in body-parsing middleware, mirroring express.json() /
+ * express.urlencoded() / express.text() / express.raw().
  * Usage:
  *   bodyParsers = new middleware.BodyParsers()
  *   app.use( bodyParsers.json() )                 // default 100kb limit
  *   app.use( bodyParsers.urlencoded( { limit: 500000 } ) )
+ *   app.use( bodyParsers.text() )                 // text/plain -> req.body is a string
+ *   app.use( bodyParsers.raw() )                  // application/octet-stream -> req.body is a byte[]
+ *
+ * Options shared by all four:
+ *   limit   max body size in bytes (default 102400)
+ *   type    which Content-Types to parse: a type, extension or wildcard as
+ *           req.is() takes them, an array of those, or ( req ) => boolean
+ *   verify  ( req, res, bodyBytes ) => {...}, called with the exact bytes
+ *           received before they're parsed; throw to reject with a 403
+ *
+ * A request body can only be read once, so each parser skips a request an
+ * earlier one already handled.
  */
 class {
 
 	function json( options = {} ) {
 		var limit = options.limit ?: 102400
+		// "" keeps the original substring match; an explicit type goes
+		// through the same matching as req.is().
+		var matcher = options.type ?: ""
+		var verify = options.verify ?: ""
 
 		return function( req, res, next ) {
 			var contentType = req.headers[ "Content-Type" ] ?: ""
-			if ( !contentType.findNoCase( "application/json" ) ) {
+			var wanted = isSimpleValue( matcher ) && !len( matcher )
+				? contentType.findNoCase( "application/json" ) > 0
+				: _matches( req, contentType, matcher )
+			if ( !wanted || ( req.bodyParsed ?: false ) ) {
 				return next()
 			}
 
-			var rawBody = _readRawBody( req, limit )
-			if ( isNull( rawBody ) ) {
-				return res.status( 413 ).json( { error: true, message: "Request body exceeds the #limit#-byte limit" } )
+			var read = _read( req, res, limit, verify )
+			if ( !read.ok ) {
+				return
 			}
+			var rawBody = createObject( "java", "java.lang.String" ).init( read.bytes, "UTF-8" )
 
 			if ( len( rawBody ) ) {
 				// The client's mistake, so a 400 in the same shape as the 413
-				// above — passed on with next( e ), the parse exception reached
+				// — passed on with next( e ), the parse exception reached
 				// the app's error handler (or the default) as a 500.
 				try {
 					req.body = JSONDeserialize( rawBody )
@@ -31,23 +52,30 @@ class {
 					return res.status( 400 ).json( { error: true, message: "Malformed JSON body" } )
 				}
 			}
+			req.bodyParsed = true
 			next()
 		}
 	}
 
 	function urlencoded( options = {} ) {
 		var limit = options.limit ?: 102400
+		var matcher = options.type ?: ""
+		var verify = options.verify ?: ""
 
 		return function( req, res, next ) {
 			var contentType = req.headers[ "Content-Type" ] ?: ""
-			if ( !contentType.findNoCase( "application/x-www-form-urlencoded" ) ) {
+			var wanted = isSimpleValue( matcher ) && !len( matcher )
+				? contentType.findNoCase( "application/x-www-form-urlencoded" ) > 0
+				: _matches( req, contentType, matcher )
+			if ( !wanted || ( req.bodyParsed ?: false ) ) {
 				return next()
 			}
 
-			var rawBody = _readRawBody( req, limit )
-			if ( isNull( rawBody ) ) {
-				return res.status( 413 ).json( { error: true, message: "Request body exceeds the #limit#-byte limit" } )
+			var read = _read( req, res, limit, verify )
+			if ( !read.ok ) {
+				return
 			}
+			var rawBody = createObject( "java", "java.lang.String" ).init( read.bytes, "UTF-8" )
 
 			var formData = {}
 			try {
@@ -56,7 +84,130 @@ class {
 				return res.status( 400 ).json( { error: true, message: "Malformed urlencoded body" } )
 			}
 			req.body = formData
+			req.bodyParsed = true
 			next()
+		}
+	}
+
+	/**
+	 * req.body becomes the body as a string, decoded with the charset the
+	 * Content-Type names (options.defaultCharset, UTF-8, when it names
+	 * none). A charset this JVM doesn't have gets a 415.
+	 */
+	function text( options = {} ) {
+		var limit = options.limit ?: 102400
+		var matcher = options.type ?: "text/plain"
+		var verify = options.verify ?: ""
+		var defaultCharset = options.defaultCharset ?: "UTF-8"
+
+		return function( req, res, next ) {
+			var contentType = req.headers[ "Content-Type" ] ?: ""
+			if ( !_matches( req, contentType, matcher ) || ( req.bodyParsed ?: false ) ) {
+				return next()
+			}
+
+			var charsetName = _charsetOf( contentType, defaultCharset )
+			if ( !len( charsetName ) ) {
+				return res.status( 415 ).json( { error: true, message: "Unsupported charset" } )
+			}
+
+			var read = _read( req, res, limit, verify )
+			if ( !read.ok ) {
+				return
+			}
+			req.body = createObject( "java", "java.lang.String" ).init( read.bytes, charsetName )
+			req.bodyParsed = true
+			next()
+		}
+	}
+
+	/**
+	 * req.body becomes the body's exact bytes (a Java byte[]) — for binary
+	 * payloads, or anything whose signature is computed over the bytes as
+	 * sent.
+	 */
+	function raw( options = {} ) {
+		var limit = options.limit ?: 102400
+		var matcher = options.type ?: "application/octet-stream"
+		var verify = options.verify ?: ""
+
+		return function( req, res, next ) {
+			var contentType = req.headers[ "Content-Type" ] ?: ""
+			if ( !_matches( req, contentType, matcher ) || ( req.bodyParsed ?: false ) ) {
+				return next()
+			}
+
+			var read = _read( req, res, limit, verify )
+			if ( !read.ok ) {
+				return
+			}
+			req.body = read.bytes
+			req.bodyParsed = true
+			next()
+		}
+	}
+
+	private function _matches( req, contentType, matcher ) {
+		if ( isCustomFunction( matcher ) || isClosure( matcher ) ) {
+			return matcher( req ) ? true : false
+		}
+		if ( !len( contentType ) ) {
+			return false
+		}
+		var negotiator = new "../Negotiator"()
+		for ( var pattern in ( isArray( matcher ) ? matcher : [ matcher ] ) ) {
+			if ( len( negotiator.matchType( contentType, pattern ) ) ) {
+				return true
+			}
+		}
+		return false
+	}
+
+	/**
+	 * Reads the body, answering 413 over the limit and 403 when
+	 * options.verify throws. { ok, bytes } — when ok is false the response
+	 * has been sent.
+	 */
+	private function _read( req, res, limit, verify ) {
+		// limit+1 so an oversized body is detected without buffering an
+		// unbounded stream.
+		var bytes = req.bodyStream().readNBytes( limit + 1 )
+		if ( bytes.len() > limit ) {
+			res.status( 413 ).json( { error: true, message: "Request body exceeds the #limit#-byte limit" } )
+			return { ok: false }
+		}
+		if ( !isSimpleValue( verify ) ) {
+			try {
+				verify( req, res, bytes )
+			} catch ( any e ) {
+				if ( !res.isSent() ) {
+					res.status( 403 ).json( { error: true, message: "Request body failed verification" } )
+				}
+				return { ok: false }
+			}
+			if ( res.isSent() ) {
+				return { ok: false }
+			}
+		}
+		return { ok: true, bytes: bytes }
+	}
+
+	/**
+	 * The charset a Content-Type names, or the default — "" if this JVM
+	 * can't decode it.
+	 */
+	private function _charsetOf( contentType, defaultCharset ) {
+		var charsetName = defaultCharset
+		for ( var param in contentType.listToArray( ";" ) ) {
+			var trimmed = trim( param )
+			if ( lCase( trimmed.left( 8 ) ) == "charset=" ) {
+				charsetName = trimmed.mid( 9, trimmed.len() ).replace( '"', "", "all" ).trim()
+			}
+		}
+		try {
+			return createObject( "java", "java.nio.charset.Charset" ).isSupported( charsetName ) ? charsetName : ""
+		} catch ( any e ) {
+			return ""
 		}
 	}
 
@@ -78,19 +229,6 @@ class {
 			}
 		}
 		return formData
-	}
-
-	/**
-	 * Reads up to limit+1 bytes so an oversized body is detected without
-	 * buffering an unbounded stream. Returns null if the body exceeds limit.
-	 */
-	private function _readRawBody( req, limit ) {
-		var inStream = req.bodyStream()
-		var bytes = inStream.readNBytes( limit + 1 )
-		if ( bytes.len() > limit ) {
-			return javacast( "null", "" )
-		}
-		return createObject( "java", "java.lang.String" ).init( bytes, "UTF-8" )
 	}
 
 }

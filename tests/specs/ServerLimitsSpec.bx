@@ -1,0 +1,446 @@
+/**
+ * Timeouts and size limits: app.set( "requestTimeoutMs" ) / req.setTimeout(),
+ * "maxBodySize", and the connection-level "headerTimeoutMs",
+ * "keepAliveTimeoutMs" and "maxHeaderSize". The connection-level ones only
+ * exist on a real socket, so those tests speak raw HTTP to a live server.
+ */
+class extends="testbox.system.BaseSpec" {
+
+	function beforeAll() {
+		variables.testPort = 4360
+		variables.baseUrl = "http://localhost:#variables.testPort#"
+		variables.client = new "../helpers/HttpClient"()
+		variables.crlf = char( 13 ) & char( 10 )
+		variables.errorMiddlewareRuns = createObject( "java", "java.util.concurrent.atomic.AtomicInteger" ).init()
+
+		variables.liveApp = _app( variables.errorMiddlewareRuns )
+		variables.liveApp.set( "headerTimeoutMs", 500 )
+		variables.liveApp.set( "keepAliveTimeoutMs", 700 )
+		variables.liveApp.set( "maxHeaderSize", 2048 )
+		variables.liveApp.ws( "/echo", ( connection ) => {
+			connection.onMessage( ( text ) => connection.send( "echo:" & text ) )
+		} )
+		variables.liveApp.listen( port = variables.testPort, options = { block: false } )
+		sleep( 300 )
+	}
+
+	function afterAll() {
+		variables.liveApp.close()
+	}
+
+	private function _app( errorCounter ) {
+		var app = new "../../models/BoxExpress"()
+		app.set( "log", false )
+		app.set( "requestTimeoutMs", 400 )
+		app.set( "maxBodySize", 5000 )
+		app.use( new "../../models/middleware/BodyParsers"().json( { limit: 100000 } ) )
+
+		app.get( "/fast", ( req, res ) => res.send( "fast" ) )
+		app.get( "/slow", ( req, res ) => {
+			sleep( 3000 )
+			res.send( "slept" )
+		} )
+		app.get( "/swallow", ( req, res ) => {
+			try {
+				sleep( 3000 )
+			} catch ( any e ) {
+			}
+			res.status( 202 ).send( "handled it myself: " & req.timedOut )
+		} )
+		app.get( "/extended", ( req, res ) => {
+			req.setTimeout( 3000 )
+			sleep( 900 )
+			res.send( "extended" )
+		} )
+		app.get( "/off", ( req, res ) => {
+			req.setTimeout( 0 )
+			sleep( 900 )
+			res.send( "no timeout" )
+		} )
+		app.get( "/shortened", ( req, res ) => {
+			req.setTimeout( 100 )
+			sleep( 3000 )
+			res.send( "slept" )
+		} )
+		app.get( "/bad-timeout", ( req, res ) => {
+			req.setTimeout( "soon" )
+			res.send( "unreachable" )
+		} )
+		app.get( "/sse", ( req, res ) => {
+			res.sse( ( emitter ) => {
+				emitter.send( "first" )
+				sleep( 900 )
+				emitter.send( "last" )
+			} )
+		} )
+		app.post( "/echo", ( req, res ) => res.json( { length: len( req.body.a ?: "" ) } ) )
+		app.post( "/raw", ( req, res ) => res.send( "read " & req.bodyStream().readAllBytes().len() ) )
+		app.post( "/ignore", ( req, res ) => res.send( "ignored" ) )
+
+		app.use( ( err, req, res, next ) => {
+			errorCounter.incrementAndGet()
+			res.status( 500 ).send( "app error page: " & err.message )
+		} )
+		return app
+	}
+
+	private function _counter() {
+		return createObject( "java", "java.util.concurrent.atomic.AtomicInteger" ).init()
+	}
+
+	/**
+	 * Writes `payload` to a fresh socket and reads until the server closes
+	 * the connection (or 5s pass). { text, elapsedMs, closed }.
+	 */
+	private function _raw( payload ) {
+		var sock = createObject( "java", "java.net.Socket" ).init( "127.0.0.1", variables.testPort )
+		sock.setSoTimeout( 5000 )
+		var started = getTickCount()
+		var result = { text: "", elapsedMs: 0, closed: false }
+		try {
+			if ( len( payload ) ) {
+				sock.getOutputStream().write( payload.getBytes( "ISO-8859-1" ) )
+				sock.getOutputStream().flush()
+			}
+			result.text = createObject( "java", "java.lang.String" ).init( sock.getInputStream().readAllBytes(), "ISO-8859-1" )
+			result.closed = true
+		} catch ( any e ) {
+		}
+		result.elapsedMs = getTickCount() - started
+		sock.close()
+		return result
+	}
+
+	private function _post( path, body, extraHeaders = "" ) {
+		return "POST #path# HTTP/1.1" & variables.crlf & "Host: localhost" & variables.crlf & "Content-Type: application/json" & variables.crlf
+			& extraHeaders & "Content-Length: " & len( body ) & variables.crlf & variables.crlf & body
+	}
+
+	private function _postChunked( path, body, contentType = "application/json" ) {
+		return "POST #path# HTTP/1.1" & variables.crlf & "Host: localhost" & variables.crlf & "Content-Type: " & contentType & variables.crlf
+			& "Connection: close" & variables.crlf & "Transfer-Encoding: chunked" & variables.crlf & variables.crlf
+			& formatBaseN( len( body ), 16 ) & variables.crlf & body & variables.crlf & "0" & variables.crlf & variables.crlf
+	}
+
+	private function _json( length ) {
+		return '{"a":"' & repeatString( "x", length ) & '"}'
+	}
+
+	// A function of its own so each thread's closure gets its own index.
+	private function _getInThread( path, index, results ) {
+		var t = createObject( "java", "java.lang.Thread" ).init( createDynamicProxy(
+			new "../../models/ThreadRunnable"( function() {
+				results[ index ] = new "../helpers/HttpClient"().get( variables.baseUrl & path ).statusCode
+			} ),
+			[ "java.lang.Runnable" ]
+		) )
+		t.start()
+		return t
+	}
+
+	function run() {
+
+		describe( "RequestWatchdog", function() {
+
+			it( "interrupts the watching thread once its deadline passes, and marks the request", function() {
+				var watchdog = new "../../models/RequestWatchdog"()
+				var req = { timedOut: false }
+				watchdog.watch( req, { isSent: () => false }, 150 )
+
+				var interrupted = false
+				var started = getTickCount()
+				try {
+					sleep( 3000 )
+				} catch ( any e ) {
+					interrupted = true
+				}
+				assertAll( [
+					() => expect( interrupted ).toBeTrue(),
+					() => expect( getTickCount() - started ).toBeLT( 1500 ),
+					() => expect( req.timedOut ).toBeTrue(),
+					() => expect( req.timedOutAfterMs ).toBe( 150 ),
+					() => expect( watchdog.watchedCount() ).toBe( 0 )
+				] )
+			} )
+
+			it( "leaves a request alone once its response has started", function() {
+				var watchdog = new "../../models/RequestWatchdog"()
+				var req = { timedOut: false }
+				watchdog.watch( req, { isSent: () => true }, 100 )
+				sleep( 400 )
+				assertAll( [
+					() => expect( req.timedOut ).toBeFalse(),
+					() => expect( watchdog.watchedCount() ).withContext( "an expired entry is dropped either way" ).toBe( 0 )
+				] )
+			} )
+
+			it( "does nothing for a request unwatched in time", function() {
+				var watchdog = new "../../models/RequestWatchdog"()
+				var req = { timedOut: false }
+				var id = watchdog.watch( req, { isSent: () => false }, 200 )
+				var first = watchdog.unwatch( id )
+				var second = watchdog.unwatch( id )
+				sleep( 400 )
+				assertAll( [
+					() => expect( first ).toBeTrue(),
+					() => expect( second ).withContext( "already gone" ).toBeFalse(),
+					() => expect( req.timedOut ).toBeFalse()
+				] )
+			} )
+
+			it( "keeps working after going idle", function() {
+				var watchdog = new "../../models/RequestWatchdog"()
+				watchdog.unwatch( watchdog.watch( { timedOut: false }, { isSent: () => false }, 5000 ) )
+				sleep( 250 )
+
+				var req = { timedOut: false }
+				watchdog.watch( req, { isSent: () => false }, 100 )
+				try {
+					sleep( 2000 )
+				} catch ( any e ) {
+				}
+				expect( req.timedOut ).toBeTrue()
+			} )
+
+		} )
+
+		describe( "request timeout (app.inject)", function() {
+
+			it( "answers 503 for a handler that runs past requestTimeoutMs, without running error middleware", function() {
+				var errors = _counter()
+				var started = getTickCount()
+				var res = _app( errors ).inject( "/slow" )
+				assertAll( [
+					() => expect( res.statusCode ).toBe( 503 ),
+					() => expect( res.json().message ).toBe( "Request timed out" ),
+					() => expect( res.header( "Connection" ) ).toBe( "close" ),
+					() => expect( getTickCount() - started ).toBeLT( 2000 ),
+					() => expect( errors.get() ).toBe( 0 )
+				] )
+			} )
+
+			it( "leaves a fast request alone", function() {
+				var res = _app( _counter() ).inject( "/fast" )
+				assertAll( [
+					() => expect( res.statusCode ).toBe( 200 ),
+					() => expect( res.header( "Connection" ) ).toBe( "" )
+				] )
+			} )
+
+			it( "lets a handler that catches the interruption send its own response", function() {
+				var res = _app( _counter() ).inject( "/swallow" )
+				assertAll( [
+					() => expect( res.statusCode ).toBe( 202 ),
+					() => expect( res.body ).toBe( "handled it myself: true" )
+				] )
+			} )
+
+			it( "honors req.setTimeout() to lengthen, shorten or turn off the timeout", function() {
+				var app = _app( _counter() )
+				var started = getTickCount()
+				var shortened = app.inject( "/shortened" )
+				var shortenedMs = getTickCount() - started
+				assertAll( [
+					() => expect( app.inject( "/extended" ).body ).toBe( "extended" ),
+					() => expect( app.inject( "/off" ).body ).toBe( "no timeout" ),
+					() => expect( shortened.statusCode ).toBe( 503 ),
+					() => expect( shortenedMs ).withContext( "100ms, not the app's 400ms" ).toBeLT( 380 )
+				] )
+			} )
+
+			it( "rejects a non-numeric req.setTimeout()", function() {
+				var errors = _counter()
+				var res = _app( errors ).inject( "/bad-timeout" )
+				assertAll( [
+					() => expect( res.statusCode ).toBe( 500 ),
+					() => expect( res.body ).toInclude( "req.setTimeout() takes a number" ),
+					() => expect( errors.get() ).toBe( 1 )
+				] )
+			} )
+
+			it( "has no timeout unless one is set", function() {
+				var app = new "../../models/BoxExpress"()
+				app.get( "/slowish", ( req, res ) => {
+					sleep( 700 )
+					res.send( "done" )
+				} )
+				expect( app.inject( "/slowish" ).body ).toBe( "done" )
+			} )
+
+		} )
+
+		describe( "maxBodySize (app.inject)", function() {
+
+			it( "answers 413 before any handler runs", function() {
+				var errors = _counter()
+				var res = _app( errors ).inject( { method: "POST", url: "/ignore", body: repeatString( "x", 5001 ) } )
+				assertAll( [
+					() => expect( res.statusCode ).toBe( 413 ),
+					() => expect( res.json().message ).toBe( "Request body exceeds the 5000-byte limit" ),
+					() => expect( res.header( "Connection" ) ).toBe( "close" ),
+					() => expect( errors.get() ).toBe( 0 )
+				] )
+			} )
+
+			it( "lets a body exactly at the limit through", function() {
+				expect( _app( _counter() ).inject( { method: "POST", url: "/raw", body: repeatString( "x", 5000 ) } ).body ).toBe( "read 5000" )
+			} )
+
+			it( "leaves a parser's own smaller limit in charge below the cap", function() {
+				var app = new "../../models/BoxExpress"()
+				app.set( "maxBodySize", 5000 )
+				app.use( new "../../models/middleware/BodyParsers"().json( { limit: 50 } ) )
+				app.post( "/echo", ( req, res ) => res.send( "ok" ) )
+				var res = app.inject( { method: "POST", url: "/echo", headers: { "Content-Type": "application/json" }, body: _json( 100 ) } )
+				assertAll( [
+					() => expect( res.statusCode ).toBe( 413 ),
+					() => expect( res.json().message ).toInclude( "50-byte limit" )
+				] )
+			} )
+
+		} )
+
+		describe( "app.set() validation", function() {
+
+			it( "rejects a limit that isn't a whole number, 0 or more", function() {
+				var app = new "../../models/BoxExpress"()
+				assertAll( [
+					() => expect( () => app.set( "requestTimeoutMs", -1 ) ).toThrow( "BoxExpress.InvalidArgument" ),
+					() => expect( () => app.set( "headerTimeoutMs", "soon" ) ).toThrow( "BoxExpress.InvalidArgument" ),
+					() => expect( () => app.set( "maxBodySize", 1.5 ) ).toThrow( "BoxExpress.InvalidArgument" ),
+					() => expect( () => app.set( "maxHeaderSize", [] ) ).toThrow( "BoxExpress.InvalidArgument" ),
+					() => expect( () => app.set( "keepAliveTimeoutMs", 3000000000 ) ).toThrow( "BoxExpress.InvalidArgument" ),
+					() => expect( app.set( "keepAliveTimeoutMs", 0 ).getSetting( "keepAliveTimeoutMs" ) ).toBe( 0 )
+				] )
+			} )
+
+		} )
+
+		describe( "limits against a live server", function() {
+
+			it( "answers 503 and closes the connection when a handler runs too long", function() {
+				var before = variables.errorMiddlewareRuns.get()
+				var started = getTickCount()
+				var result = variables.client.get( variables.baseUrl & "/slow" )
+				assertAll( [
+					() => expect( result.statusCode ).toBe( 503 ),
+					() => expect( JSONDeserialize( result.body ).message ).toBe( "Request timed out" ),
+					() => expect( getTickCount() - started ).toBeLT( 2000 ),
+					() => expect( variables.errorMiddlewareRuns.get() ).toBe( before ),
+					() => expect( variables.client.get( variables.baseUrl & "/fast" ).body ).withContext( "server is fine afterwards" ).toBe( "fast" )
+				] )
+			} )
+
+			it( "times out only the slow requests when many run at once", function() {
+				var results = createObject( "java", "java.util.concurrent.ConcurrentHashMap" ).init()
+				var threads = []
+				for ( var i = 1; i <= 15; i++ ) {
+					threads.append( _getInThread( "/slow", "slow" & i, results ) )
+					threads.append( _getInThread( "/fast", "fast" & i, results ) )
+				}
+				for ( var t in threads ) {
+					t.join()
+				}
+				var slow = 0
+				var fast = 0
+				for ( var entry in results.entrySet().toArray() ) {
+					if ( entry.getKey().left( 4 ) == "slow" && entry.getValue() == 503 ) {
+						slow++
+					}
+					if ( entry.getKey().left( 4 ) == "fast" && entry.getValue() == 200 ) {
+						fast++
+					}
+				}
+				assertAll( [
+					() => expect( slow ).toBe( 15 ),
+					() => expect( fast ).toBe( 15 )
+				] )
+			} )
+
+			it( "does not cut off a response that has started, or a handler that turned the timeout off", function() {
+				var sse = variables.client.get( variables.baseUrl & "/sse" )
+				var off = variables.client.get( variables.baseUrl & "/off" )
+				assertAll( [
+					() => expect( sse.body ).withContext( "900ms stream: past requestTimeoutMs (400) and keepAliveTimeoutMs (700)" ).toInclude( "data: last" ),
+					() => expect( off.body ).toBe( "no timeout" )
+				] )
+			} )
+
+			it( "times out a request whose body stalls", function() {
+				var stalled = "POST /raw HTTP/1.1" & variables.crlf & "Host: localhost" & variables.crlf & "Transfer-Encoding: chunked" & variables.crlf & variables.crlf & "5" & variables.crlf & "12345" & variables.crlf
+				var result = _raw( stalled )
+				assertAll( [
+					() => expect( result.text ).toInclude( "503 Service Unavailable" ),
+					() => expect( result.closed ).toBeTrue(),
+					() => expect( result.elapsedMs ).toBeLT( 2000 )
+				] )
+			} )
+
+			it( "closes a connection that never finishes its headers (headerTimeoutMs)", function() {
+				var result = _raw( "GET /fast HTTP/1.1" & variables.crlf & "Host: localhost" & variables.crlf )
+				assertAll( [
+					() => expect( result.closed ).toBeTrue(),
+					() => expect( result.text ).toBe( "" ),
+					() => expect( result.elapsedMs ).toBeGTE( 400 ),
+					() => expect( result.elapsedMs ).toBeLT( 2500 )
+				] )
+			} )
+
+			it( "closes an idle keep-alive connection (keepAliveTimeoutMs)", function() {
+				var result = _raw( "GET /fast HTTP/1.1" & variables.crlf & "Host: localhost" & variables.crlf & variables.crlf )
+				assertAll( [
+					() => expect( result.text ).toInclude( "200 OK" ),
+					() => expect( result.closed ).toBeTrue(),
+					() => expect( result.elapsedMs ).toBeGTE( 600 ),
+					() => expect( result.elapsedMs ).toBeLT( 2500 )
+				] )
+			} )
+
+			it( "answers 400 for headers over maxHeaderSize", function() {
+				var head = "GET /fast HTTP/1.1" & variables.crlf & "Host: localhost" & variables.crlf & "Connection: close" & variables.crlf
+				var tooBig = _raw( head & "X-Big: " & repeatString( "a", 4000 ) & variables.crlf & variables.crlf )
+				var fine = _raw( head & "X-Big: " & repeatString( "a", 1000 ) & variables.crlf & variables.crlf )
+				assertAll( [
+					() => expect( tooBig.text ).toInclude( "400 Bad Request" ),
+					() => expect( fine.text ).toInclude( "200 OK" )
+				] )
+			} )
+
+			it( "answers 413 on Content-Length alone, without waiting for the body", function() {
+				var declaredOnly = "POST /echo HTTP/1.1" & variables.crlf & "Host: localhost" & variables.crlf & "Content-Type: application/json" & variables.crlf & "Content-Length: 1000000000" & variables.crlf & variables.crlf
+				var result = _raw( declaredOnly )
+				var withBody = _raw( _post( "/echo", _json( 9000 ) ) )
+				assertAll( [
+					() => expect( result.text ).toInclude( "413 " ),
+					() => expect( result.closed ).withContext( "connection closed rather than waiting for 1GB" ).toBeTrue(),
+					() => expect( result.elapsedMs ).toBeLT( 1000 ),
+					() => expect( withBody.text ).toInclude( "Request body exceeds the 5000-byte limit" )
+				] )
+			} )
+
+			it( "enforces maxBodySize on a chunked body, which declares no length", function() {
+				var tooBig = _raw( _postChunked( "/echo", _json( 9000 ) ) )
+				var parsed = _raw( _postChunked( "/echo", _json( 100 ) ) )
+				var streamed = _raw( _postChunked( "/raw", _json( 100 ), "application/octet-stream" ) )
+				assertAll( [
+					() => expect( tooBig.text ).toInclude( "413 " ),
+					() => expect( parsed.text ).withContext( "a body under the cap still reaches the parser" ).toInclude( '{"length":100}' ),
+					() => expect( streamed.text ).withContext( "and req.bodyStream()" ).toInclude( "read 108" )
+				] )
+			} )
+
+			it( "keeps an idle WebSocket open past the HTTP timeouts", function() {
+				var ws = new "../helpers/WebSocketTestClient"()
+				ws.connect( "localhost", variables.testPort, "/echo" )
+				sleep( 1300 )
+				ws.sendText( "still here" )
+				var reply = ws.readTextFrameWithTimeout( 2000 )
+				ws.close()
+				expect( reply ).toBe( "echo:still here" )
+			} )
+
+		} )
+
+	}
+
+}
