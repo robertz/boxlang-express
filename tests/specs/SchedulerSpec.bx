@@ -178,6 +178,9 @@ class extends="testbox.system.BaseSpec" {
 
 				_waitUntil( () => tickCount.get() >= 2, 1000 )
 				job.cancel()
+				// A tick already handed to its virtual thread when cancel() ran
+				// still finishes; let it, then count.
+				sleep( 60 )
 				var countAtCancel = tickCount.get()
 
 				sleep( 200 )

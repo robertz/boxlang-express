@@ -125,7 +125,8 @@ class extends="testbox.system.BaseSpec" {
 				var set = app.inject( "/set" )
 				var body = _read( app, _cookieHeader( set ) )
 				assertAll( [
-					() => expect( set.setCookies[ 1 ] ).toInclude( "user=s%3A42%2E" ),
+					// BoxLang versions differ on whether urlEncodedFormat() escapes the ".".
+					() => expect( reFind( "^user=s%3A42(\.|%2E)[A-Za-z0-9%]+; Path=/", set.setCookies[ 1 ] ) ).withContext( set.setCookies[ 1 ] ).toBe( 1 ),
 					() => expect( body.signed ).toBe( { user: "42" } ),
 					() => expect( body.plain ).withContext( "the signed cookie isn't also exposed raw" ).toBe( { theme: "dark" } )
 				] )
