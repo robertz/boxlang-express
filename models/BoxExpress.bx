@@ -13,6 +13,7 @@ class {
 		variables.router = new Router( this.settings )
 		variables.wsRoutes = {}
 		variables.wsOrigins = {}
+		variables.wsMiddleware = {}
 		variables.undertowServer = javacast( "null", "" )
 		variables.running = false
 		variables.reloadWatcher = javacast( "null", "" )
@@ -109,6 +110,18 @@ class {
 	 */
 	function ws( path, handler, options = {} ) {
 		variables.wsRoutes[ path ] = handler
+		structDelete( variables.wsMiddleware, path )
+		if ( structKeyExists( options, "use" ) ) {
+			var middleware = isArray( options.use ) ? options.use : [ options.use ]
+			for ( var item in middleware ) {
+				if ( !( isCustomFunction( item ) || isClosure( item ) ) ) {
+					throw( type = "BoxExpress.InvalidArgument", message = "app.ws( ""#path#"" ) options.use takes a middleware function, or an array of them" )
+				}
+			}
+			if ( middleware.len() ) {
+				variables.wsMiddleware[ path ] = middleware
+			}
+		}
 		if ( structKeyExists( options, "origins" ) ) {
 			variables.wsOrigins[ path ] = options.origins
 		}
@@ -288,6 +301,9 @@ class {
 		if ( listFindNoCase( "headerTimeoutMs,keepAliveTimeoutMs,requestTimeoutMs,maxHeaderSize,maxBodySize", name ) ) {
 			_checkLimit( name, value )
 		}
+		if ( lCase( name ) == "log" && !( isCustomFunction( value ) || isClosure( value ) || ( isSimpleValue( value ) && ( isBoolean( value ) || listFindNoCase( "access,json", value ) ) ) ) ) {
+			throw( type = "BoxExpress.InvalidArgument", message = "app.set( ""log"" ) takes true, false, ""access"", ""json"" or a function" )
+		}
 		this.settings[ name ] = value
 		if ( lCase( name ) == "cookie secret" ) {
 			this.settings[ "cookie signer" ] = new CookieSigner( value )
@@ -384,10 +400,12 @@ class {
 		// completely unchanged, for everything else.
 		var rootProxy = proxy
 		if ( !structIsEmpty( variables.wsRoutes ) ) {
+			var wsRequestKey = createObject( "java", "io.undertow.util.AttachmentKey" ).create( createObject( "java", "java.lang.Object" ).getClass() )
 			var wsConnectionCallback = new adapters.WsConnectionCallback(
 				variables.wsRoutes,
 				this.settings.wsMaxMessageSize ?: 1048576,
-				this.settings.wsIdleTimeoutMs ?: 0
+				this.settings.wsIdleTimeoutMs ?: 0,
+				wsRequestKey
 			)
 			variables.wsCallbackObject = wsConnectionCallback
 			var wsCallbackProxy = createDynamicProxy( wsConnectionCallback, [ "io.undertow.websockets.WebSocketConnectionCallback" ] )
@@ -415,7 +433,14 @@ class {
 			for ( var wsPath in variables.wsRoutes ) {
 				routeOrigins[ wsPath ] = variables.wsOrigins[ wsPath ] ?: ( this.settings.wsOrigins ?: "same-origin" )
 			}
-			var upgradeRouter = new adapters.WsUpgradeRouter( wsHandshakeHandler, variables.wsRoutes, proxy, routeOrigins, this.settings )
+			var wsMiddlewareHandler = ""
+			if ( !structIsEmpty( variables.wsMiddleware ) ) {
+				wsMiddlewareHandler = createDynamicProxy(
+					new adapters.WsUpgradeMiddleware( wsHandshakeHandler, variables.wsMiddleware, this.settings, this.locals, wsRequestKey ),
+					[ "io.undertow.server.HttpHandler" ]
+				)
+			}
+			var upgradeRouter = new adapters.WsUpgradeRouter( wsHandshakeHandler, variables.wsRoutes, proxy, routeOrigins, this.settings, variables.wsMiddleware, wsMiddlewareHandler )
 			rootProxy = createDynamicProxy( upgradeRouter, [ "io.undertow.server.HttpHandler" ] )
 		}
 

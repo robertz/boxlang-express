@@ -93,7 +93,12 @@ class {
 	 * BoxExpress.InvalidArgument before the job is registered.
 	 */
 	function schedule( intervalMs, callback, options = {} ) {
-		if ( !isNumeric( intervalMs ) || intervalMs < 1 || intervalMs != int( intervalMs ) ) {
+		// A string that isn't a number is a cron schedule ("0 2 * * *");
+		// CronExpression throws BoxExpress.InvalidArgument for a bad one.
+		var cron = ""
+		if ( isSimpleValue( intervalMs ) && !isNumeric( intervalMs ) ) {
+			cron = new CronExpression( intervalMs, options.timezone ?: "" )
+		} else if ( !isNumeric( intervalMs ) || intervalMs < 1 || intervalMs != int( intervalMs ) ) {
 			throw( type = "BoxExpress.InvalidArgument", message = "schedule() intervalMs must be a whole number of milliseconds, 1 or more, not ""#isSimpleValue( intervalMs ) ? intervalMs : "[complex value]"#""" )
 		}
 		if ( structKeyExists( options, "stallThresholdMs" ) && ( !isNumeric( options.stallThresholdMs ) || options.stallThresholdMs < 1 ) ) {
@@ -151,7 +156,26 @@ class {
 			// this job's own interval (so an hourly job isn't declared
 			// stuck after 30s of genuine work) with a floor so a
 			// sub-second job still gets a reasonable grace window.
-			stallThresholdMs: options.stallThresholdMs ?: max( intervalMs * 10, 30000 )
+			stallThresholdMs: options.stallThresholdMs ?: max( ( isSimpleValue( cron ) ? intervalMs : cron.intervalMsAfter( _now() ) ) * 10, 30000 ),
+			// "" for a fixed-interval job.
+			cron: cron,
+			// The fire time the pending timer is for, so the next one is
+			// computed after it even if the timer went off a little early.
+			cronFireTime: ""
+		}
+
+		if ( !isSimpleValue( cron ) ) {
+			_scheduleNextCronRun( jobId )
+			if ( immediate ) {
+				variables.tickExecutor.schedule(
+					createDynamicProxy( new ThreadRunnable( function() {
+						scheduler._runTick( jobId )
+					} ), [ "java.lang.Runnable" ] ),
+					javacast( "long", 0 ),
+					createObject( "java", "java.util.concurrent.TimeUnit" ).MILLISECONDS
+				)
+			}
+			return handle
 		}
 
 		var tickRunnable = createDynamicProxy(
@@ -175,6 +199,48 @@ class {
 		}
 
 		return handle
+	}
+
+	/**
+	 * Arms a one-shot timer for a cron job's next fire time; the timer
+	 * re-arms itself after each run. One-shot rather than fixed-rate
+	 * because the gap between fire times isn't constant (months differ,
+	 * and so do days when the clocks change).
+	 */
+	function _scheduleNextCronRun( jobId ) {
+		var job = variables.jobs[ jobId ] ?: javacast( "null", "" )
+		if ( isNull( job ) || job.cancelled.get() ) {
+			return
+		}
+		var now = _now()
+		var after = now
+		if ( !isSimpleValue( job.cronFireTime ) && job.cronFireTime.isAfter( now ) ) {
+			after = job.cronFireTime
+		}
+		var fireTime = job.cron.next( after )
+		job.cronFireTime = fireTime
+		var delayMs = max( 0, fireTime.toInstant().toEpochMilli() - createObject( "java", "java.lang.System" ).currentTimeMillis() )
+
+		var scheduler = this
+		var future = variables.tickExecutor.schedule(
+			createDynamicProxy( new ThreadRunnable( function() {
+				try {
+					scheduler._runTick( jobId )
+				} finally {
+					scheduler._scheduleNextCronRun( jobId )
+				}
+			} ), [ "java.lang.Runnable" ] ),
+			javacast( "long", delayMs ),
+			createObject( "java", "java.util.concurrent.TimeUnit" ).MILLISECONDS
+		)
+		job.futureRef.set( future )
+		if ( job.cancelled.get() ) {
+			future.cancel( false )
+		}
+	}
+
+	function _now() {
+		return createObject( "java", "java.time.ZonedDateTime" ).now()
 	}
 
 	/**
@@ -312,7 +378,10 @@ class {
 				name: job.name,
 				allowOverlap: job.allowOverlap,
 				clustered: job.clustered,
-				running: job.activeRuns.get() > 0
+				running: job.activeRuns.get() > 0,
+				// Cron jobs only: the expression, and when it next fires.
+				cron: isSimpleValue( job.cron ) ? "" : job.cron.getExpression(),
+				nextRun: isSimpleValue( job.cronFireTime ) ? "" : job.cronFireTime.toString()
 			}
 		}
 		return result

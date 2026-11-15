@@ -37,6 +37,72 @@ class extends="testbox.system.BaseSpec" {
 				expect( tickCount.get() ).toBeGTE( 3 )
 			} )
 
+			it( "fires a cron schedule at its times, and stops when cancelled", function() {
+				variables.app = new "../../models/BoxExpress"()
+				var tickCount = createObject( "java", "java.util.concurrent.atomic.AtomicInteger" ).init( 0 )
+
+				// Six fields: every second.
+				var job = variables.app.schedule( "* * * * * *", () => {
+					tickCount.incrementAndGet()
+				}, { name: "every-second" } )
+
+				_waitUntil( () => tickCount.get() >= 2, 4000 )
+				var afterTwo = tickCount.get()
+				job.cancel()
+				sleep( 50 )
+				var atCancel = tickCount.get()
+				sleep( 1500 )
+
+				expect( afterTwo ).toBeGTE( 2 )
+				expect( tickCount.get() ).withContext( "no ticks after cancel()" ).toBe( atCancel )
+			} )
+
+			it( "does not run a cron job twice for one fire time", function() {
+				variables.app = new "../../models/BoxExpress"()
+				var tickCount = createObject( "java", "java.util.concurrent.atomic.AtomicInteger" ).init( 0 )
+				variables.app.schedule( "* * * * * *", () => {
+					tickCount.incrementAndGet()
+				} )
+				sleep( 3300 )
+				// 3.3s holds three or four whole-second boundaries, never more.
+				expect( tickCount.get() ).toBeGTE( 2 )
+				expect( tickCount.get() ).toBeLTE( 4 )
+			} )
+
+			it( "runs a cron job at once as well when immediate is true", function() {
+				variables.app = new "../../models/BoxExpress"()
+				var tickCount = createObject( "java", "java.util.concurrent.atomic.AtomicInteger" ).init( 0 )
+				// Next due on 1 January — only immediate can make it run now.
+				variables.app.schedule( "@yearly", () => {
+					tickCount.incrementAndGet()
+				}, { immediate: true } )
+				_waitUntil( () => tickCount.get() >= 1, 2000 )
+				expect( tickCount.get() ).toBe( 1 )
+			} )
+
+			it( "lists a cron job's expression and next run time", function() {
+				variables.app = new "../../models/BoxExpress"()
+				variables.app.schedule( "0 2 * * *", () => {}, { name: "nightly", timezone: "UTC" } )
+				variables.app.schedule( 60000, () => {}, { name: "interval" } )
+				var byName = {}
+				var jobs = variables.app.getScheduledJobs()
+				for ( var jobId in jobs ) {
+					byName[ jobs[ jobId ].name ] = jobs[ jobId ]
+				}
+				expect( byName.nightly.cron ).toBe( "0 2 * * *" )
+				expect( byName.nightly.nextRun ).toInclude( "T02:00Z[UTC]" )
+				expect( byName.interval.cron ).toBe( "" )
+				expect( byName.interval.nextRun ).toBe( "" )
+			} )
+
+			it( "throws for an invalid cron schedule or timezone and registers nothing", function() {
+				variables.app = new "../../models/BoxExpress"()
+				expect( () => variables.app.schedule( "every tuesday", () => {} ) ).toThrow( "BoxExpress.InvalidArgument" )
+				expect( () => variables.app.schedule( "0 0 30 2 *", () => {} ) ).toThrow( "BoxExpress.InvalidArgument" )
+				expect( () => variables.app.schedule( "0 2 * * *", () => {}, { timezone: "Mars/Olympus" } ) ).toThrow( "BoxExpress.InvalidArgument" )
+				expect( structCount( variables.app.getScheduledJobs() ) ).toBe( 0 )
+			} )
+
 			it( "does not fire before the first interval elapses unless immediate is true", function() {
 				variables.app = new "../../models/BoxExpress"()
 				var tickCount = createObject( "java", "java.util.concurrent.atomic.AtomicInteger" ).init( 0 )

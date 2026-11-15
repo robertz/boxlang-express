@@ -1,0 +1,93 @@
+/**
+ * Runs an app.ws() route's `use` middleware against the upgrade request,
+ * on its own virtual thread, and performs the WebSocket handshake only
+ * if every middleware calls next(). An io.undertow.server.HttpHandler
+ * (via createDynamicProxy), handed requests by WsUpgradeRouter.
+ *
+ * The middleware are ordinary ( req, res, next ) handlers run through a
+ * Router, so a session middleware, an auth check, error-handling
+ * middleware and next( err ) all behave as they do for an HTTP route.
+ * One that answers the request (res.status( 401 ).end()) refuses the
+ * upgrade.
+ */
+class {
+
+	function init( wsHandshakeHandler, routeMiddleware, settings, appLocals, requestKey ) {
+		variables.wsHandshakeHandler = wsHandshakeHandler
+		variables.settings = settings
+		variables.appLocals = appLocals
+		variables.requestKey = requestKey
+		variables.color = new "../AnsiColor"()
+		variables.routers = {}
+		for ( var path in routeMiddleware ) {
+			var router = new "../Router"( settings )
+			for ( var handler in routeMiddleware[ path ] ) {
+				router.use( handler )
+			}
+			variables.routers[ path ] = router
+		}
+		return this
+	}
+
+	function handleRequest( exchange ) {
+		var path = exchange.getRequestPath()
+		var req = ""
+		var res = ""
+		try {
+			var adapter = new UndertowExchangeAdapter( exchange )
+			req = new "../Request"( adapter, variables.settings )
+			res = new "../Response"( adapter, variables.settings, variables.appLocals )
+		} catch ( any e ) {
+			_refuse( exchange, path, "could not read the upgrade request: " & e.message )
+			return
+		}
+
+		var outcome = { passed: false, error: "" }
+		try {
+			variables.routers[ path ].dispatch( req, res, function( err ) {
+				if ( isNull( err ) ) {
+					outcome.passed = true
+				} else {
+					outcome.error = err.message ?: "error"
+				}
+			} )
+		} catch ( any e ) {
+			outcome.error = e.message
+		}
+
+		if ( res.isSent() ) {
+			return
+		}
+		if ( len( outcome.error ) ) {
+			_refuse( exchange, path, outcome.error )
+			return
+		}
+		if ( !outcome.passed ) {
+			_refuse( exchange, path, "a middleware neither called next() nor sent a response" )
+			return
+		}
+
+		try {
+			// Session middleware and the like add their headers (Set-Cookie)
+			// and save their state in a before-send callback, which the
+			// handshake's own 101 response would otherwise never trigger.
+			res._beginUpgrade()
+			exchange.putAttachment( variables.requestKey, req )
+			variables.wsHandshakeHandler.handleRequest( exchange )
+		} catch ( any e ) {
+			_refuse( exchange, path, "handshake failed: " & e.message )
+		}
+	}
+
+	private function _refuse( exchange, path, reason ) {
+		println( variables.color.red( "[BoxExpress] WebSocket upgrade for #reReplace( path, '[\x00-\x1F\x7F]', '?', 'all' )# refused: #reason#" ) )
+		try {
+			if ( !exchange.isResponseStarted() ) {
+				exchange.setStatusCode( 500 )
+			}
+			exchange.endExchange()
+		} catch ( any ignore ) {
+		}
+	}
+
+}

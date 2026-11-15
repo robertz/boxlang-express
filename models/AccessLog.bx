@@ -1,0 +1,41 @@
+/**
+ * Formats the completion-time access log entry HttpBridge builds for
+ * app.set( "log", "access" | "json" ). Kept apart from HttpBridge so the
+ * exact text can be tested without capturing stdout.
+ */
+class {
+
+	function init() {
+		variables.color = new AnsiColor()
+		return this
+	}
+
+	/**
+	 * [2026-11-15 12:00:00] [request-id] GET /path 200 12.5ms 340b 127.0.0.1
+	 */
+	function line( entry ) {
+		var status = entry.status
+		var statusText = status >= 500 ? variables.color.red( status ) : ( status >= 400 ? variables.color.yellow( status ) : variables.color.green( status ) )
+		var idTag = len( entry.id ?: "" ) ? " " & variables.color.dim( "[" & safe( entry.id ) & "]" ) : ""
+		return variables.color.gray( "[#dateTimeFormat( now(), 'yyyy-MM-dd HH:mm:ss' )#]" ) & idTag & " " & variables.color.method( entry.method )
+			& " #safe( entry.path )# " & statusText & " #entry.durationMs#ms #entry.bytes#b " & variables.color.dim( safe( entry.ip ) )
+	}
+
+	/**
+	 * One JSON object. JSON escapes control characters itself, so a line
+	 * break in a header can't start a second log line.
+	 */
+	function json( entry ) {
+		return JSONSerialize( entry )
+	}
+
+	/**
+	 * The path arrives percent-decoded, so it can hold a newline or a
+	 * terminal escape sequence — printed raw, a request could forge log
+	 * lines.
+	 */
+	function safe( value ) {
+		return reReplace( toString( value ), "[\x00-\x1F\x7F-\x9F\u2028\u2029]", "?", "all" )
+	}
+
+}

@@ -1,0 +1,2 @@
+<bx:set data.title = "Page for " & data.name>
+<bx:output><p>Hello, #data.name#</p></bx:output>

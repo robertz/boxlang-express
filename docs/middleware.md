@@ -177,4 +177,5 @@ applies to `res.sendFile()` and `res.download()`.
 - [CORS](cors.md) — `boxExpressCors()`
 - [Rate limiting](rate-limiting.md) — `boxExpressRateLimit()`
 - [CSRF protection](csrf.md) — `boxExpressCsrf()`
+- [Request validation](validation.md) — `boxExpressValidate()`
 - [Error handling](error-handling.md) — default `404`/`500` responses

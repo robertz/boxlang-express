@@ -95,17 +95,39 @@ class {
 	 * background until the OS eventually notices the peer is gone.
 	 */
 	function send( data ) {
+		if ( isBinary( data ) ) {
+			return sendBinary( data )
+		}
+		return _write( isSimpleValue( data ) ? toString( data ) : JSONSerialize( data ), false )
+	}
+
+	/**
+	 * One binary message — a Java byte[], such as fileReadBinary() or a
+	 * raw request body returns. send() does this itself when handed bytes.
+	 */
+	function sendBinary( bytes ) {
+		if ( !isBinary( bytes ) ) {
+			throw( type = "BoxExpress.InvalidArgument", message = "sendBinary() takes binary data (a byte[]); use send() for text" )
+		}
+		return _write( bytes, true )
+	}
+
+	function _write( payload, asBinary ) {
 		if ( variables.closed ) {
 			return this
 		}
-		var payload = isSimpleValue( data ) ? toString( data ) : JSONSerialize( data )
 		var sendFailed = false
 		lock name="#variables.lockName#" type="exclusive" timeout="5" {
 			if ( !variables.closed ) {
 				try {
 					var future = variables.sendExecutor.submit( createDynamicProxy(
 						new ThreadRunnable( function() {
-							createObject( "java", "io.undertow.websockets.core.WebSockets" ).sendTextBlocking( payload, variables.channel )
+							var webSockets = createObject( "java", "io.undertow.websockets.core.WebSockets" )
+							if ( asBinary ) {
+								webSockets.sendBinaryBlocking( createObject( "java", "java.nio.ByteBuffer" ).wrap( payload ), variables.channel )
+							} else {
+								webSockets.sendTextBlocking( payload, variables.channel )
+							}
 						} ),
 						[ "java.lang.Runnable" ]
 					) )

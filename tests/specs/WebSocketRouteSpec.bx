@@ -37,6 +37,21 @@ class extends="testbox.system.BaseSpec" {
 			} )
 		} )
 
+		variables.app.ws( "/binary-echo", ( connection ) => {
+			connection.onBinary( ( bytes ) => connection.sendBinary( bytes ) )
+			connection.onMessage( ( text ) => {
+				if ( text == "bytes-via-send" ) {
+					connection.send( binaryDecode( "00ff7f80", "hex" ) )
+				} else if ( text == "bad" ) {
+					try {
+						connection.sendBinary( "not bytes" )
+					} catch ( any e ) {
+						connection.send( "rejected:" & e.type )
+					}
+				}
+			} )
+		} )
+
 		variables.serverCloseEvents = []
 		variables.app.ws( "/kick", ( connection ) => {
 			connection.onClose( ( code, reason ) => {
@@ -109,6 +124,30 @@ class extends="testbox.system.BaseSpec" {
 				ok.sendText( "small" )
 				expect( ok.readTextFrame() ).toBe( "echo:small" )
 				ok.close()
+			} )
+
+			it( "sends a binary frame with sendBinary(), byte for byte", function() {
+				var client = new "../helpers/WebSocketTestClient"()
+				client.connect( "localhost", variables.testPort, "/binary-echo" )
+				client.sendBinary( binaryDecode( "00010203fffe807f0a0d", "hex" ) )
+				var frame = client.readFrame()
+				client.close()
+				expect( frame.opcode ).toBe( 2 )
+				expect( lCase( binaryEncode( frame.bytes, "hex" ) ) ).toBe( "00010203fffe807f0a0d" )
+			} )
+
+			it( "sends a binary frame from send() when handed bytes, and a text frame otherwise", function() {
+				var client = new "../helpers/WebSocketTestClient"()
+				client.connect( "localhost", variables.testPort, "/binary-echo" )
+				client.sendText( "bytes-via-send" )
+				var binaryFrame = client.readFrame()
+				client.sendText( "bad" )
+				var textFrame = client.readFrame()
+				client.close()
+				expect( binaryFrame.opcode ).toBe( 2 )
+				expect( lCase( binaryEncode( binaryFrame.bytes, "hex" ) ) ).toBe( "00ff7f80" )
+				expect( textFrame.opcode ).toBe( 1 )
+				expect( createObject( "java", "java.lang.String" ).init( textFrame.bytes, "UTF-8" ) ).withContext( "sendBinary() refuses a string" ).toBe( "rejected:BoxExpress.InvalidArgument" )
 			} )
 
 			it( "delivers a binary message to onBinary(), and drops it when none is registered", function() {

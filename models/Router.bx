@@ -391,39 +391,176 @@ class {
 
 		for ( var i = 1; i <= rawSegments.len(); i++ ) {
 			var raw = rawSegments[ i ]
-			if ( raw.left( 1 ) == ":" && raw.right( 1 ) == "?" ) {
-				if ( i != rawSegments.len() ) {
-					throw(
-						message = "Invalid route path ""#path#"" — an optional param (':name?') is only supported as the final path segment",
-						type = "BoxExpress.InvalidRoutePath"
-					)
-				}
-				var paramName = raw.mid( 2, raw.len() - 2 )
-				segments.append( { type: "optionalParam", name: paramName } )
-				paramNames.append( paramName )
-			} else if ( raw.left( 1 ) == ":" ) {
-				if ( raw.len() == 1 ) {
-					throw(
-						message = "Invalid route path ""#path#"" — ':' alone is not a valid param name (did you mean ':name'?)",
-						type = "BoxExpress.InvalidRoutePath"
-					)
-				}
-				var paramName = raw.right( raw.len() - 1 )
-				segments.append( { type: "param", name: paramName } )
-				paramNames.append( paramName )
-			} else if ( raw == "*" ) {
-				if ( i != rawSegments.len() ) {
+			var isLast = ( i == rawSegments.len() )
+
+			if ( raw.left( 1 ) == "*" ) {
+				if ( !isLast ) {
 					throw(
 						message = "Invalid route path ""#path#"" — '*' is only supported as the final path segment",
 						type = "BoxExpress.InvalidRoutePath"
 					)
 				}
-				segments.append( { type: "wildcard" } )
+				// "*" matches the rest of the path; "*name" also captures it.
+				var wildcardName = raw.mid( 2, raw.len() )
+				if ( len( wildcardName ) && !reFind( "^[A-Za-z0-9_]+$", wildcardName ) ) {
+					_invalidPath( path, "'#raw#' is not a valid wildcard name" )
+				}
+				segments.append( { type: "wildcard", name: wildcardName } )
+				if ( len( wildcardName ) ) {
+					paramNames.append( wildcardName )
+				}
+			} else if ( _isPlainParam( raw ) ) {
+				var optional = raw.right( 1 ) == "?"
+				if ( optional && !isLast ) {
+					throw(
+						message = "Invalid route path ""#path#"" — an optional param (':name?') is only supported as the final path segment",
+						type = "BoxExpress.InvalidRoutePath"
+					)
+				}
+				var paramName = raw.mid( 2, raw.len() - ( optional ? 2 : 1 ) )
+				if ( !len( paramName ) ) {
+					throw(
+						message = "Invalid route path ""#path#"" — ':' alone is not a valid param name (did you mean ':name'?)",
+						type = "BoxExpress.InvalidRoutePath"
+					)
+				}
+				segments.append( { type: optional ? "optionalParam" : "param", name: paramName } )
+				paramNames.append( paramName )
+			} else if ( raw.find( ":" ) ) {
+				var compiled = _compileSegment( path, raw, isLast )
+				segments.append( compiled )
+				paramNames.append( compiled.names, true )
 			} else {
 				segments.append( { type: "literal", value: raw } )
 			}
 		}
 		return { segments: segments, paramNames: paramNames }
+	}
+
+	/**
+	 * ":name" or ":name?" with nothing else in the segment — the original
+	 * param syntax, where everything after the colon is the name (so
+	 * ":user-id" stays one param called "user-id"). A segment with a
+	 * constraint, more than one param, or text around a param goes through
+	 * _compileSegment() instead.
+	 */
+	private function _isPlainParam( raw ) {
+		return raw.left( 1 ) == ":" && !raw.find( "(" ) && !raw.find( ":", 2 )
+	}
+
+	/**
+	 * Compiles a segment mixing params with text or constraints into a
+	 * regex over that one segment:
+	 *
+	 *   :id(\d+)        a param that must match a pattern
+	 *   :from-:to        two params around a literal
+	 *   v:version        a param after a literal prefix
+	 *   :name(.+).json   a constrained param before a literal suffix
+	 *   :id(\d+)?       optional, as the final segment
+	 *
+	 * In a compiled segment a param's name is letters, digits and
+	 * underscores, and ends at the first other character.
+	 */
+	private function _compileSegment( path, raw, isLast ) {
+		var regex = ""
+		var names = []
+		var pos = 1
+		var optional = false
+		var soleParam = false
+
+		while ( pos <= raw.len() ) {
+			var ch = raw.mid( pos, 1 )
+			if ( ch != ":" ) {
+				var nextColon = raw.find( ":", pos )
+				var literalEnd = nextColon ? nextColon - 1 : raw.len()
+				regex &= createObject( "java", "java.util.regex.Pattern" ).quote( raw.mid( pos, literalEnd - pos + 1 ) )
+				pos = literalEnd + 1
+				continue
+			}
+
+			var nameMatch = reFind( "^[A-Za-z0-9_]+", raw.mid( pos + 1, raw.len() ), 1, true )
+			if ( !nameMatch.len[ 1 ] ) {
+				_invalidPath( path, "':' in '#raw#' isn't followed by a param name" )
+			}
+			var paramName = raw.mid( pos + 1, nameMatch.len[ 1 ] )
+			if ( names.findNoCase( paramName ) ) {
+				_invalidPath( path, "param ':#paramName#' appears twice in '#raw#'" )
+			}
+			var paramStart = pos
+			pos += 1 + nameMatch.len[ 1 ]
+
+			var constraint = "[^/]+?"
+			if ( raw.mid( pos, 1 ) == "(" ) {
+				var closeAt = _closingParen( raw, pos )
+				if ( !closeAt ) {
+					_invalidPath( path, "the constraint on ':#paramName#' has no closing ')' — a constraint can't contain '/'" )
+				}
+				constraint = raw.mid( pos + 1, closeAt - pos - 1 )
+				if ( !len( constraint ) ) {
+					_invalidPath( path, "the constraint on ':#paramName#' is empty" )
+				}
+				pos = closeAt + 1
+			}
+
+			names.append( paramName )
+			// Named groups, so capture groups inside a constraint don't
+			// shift which group belongs to which param.
+			regex &= "(?<p" & names.len() & ">" & constraint & ")"
+
+			if ( raw.mid( pos, 1 ) == "?" ) {
+				if ( paramStart != 1 || pos != raw.len() ) {
+					_invalidPath( path, "'?' in '#raw#' only works on a param that is the whole segment" )
+				}
+				if ( !isLast ) {
+					throw(
+						message = "Invalid route path ""#path#"" — an optional param (':name?') is only supported as the final path segment",
+						type = "BoxExpress.InvalidRoutePath"
+					)
+				}
+				optional = true
+				pos++
+			}
+		}
+
+		var pattern = ""
+		try {
+			// Case-insensitive, like literal segments.
+			pattern = createObject( "java", "java.util.regex.Pattern" ).compile( "^" & regex & "$", javacast( "int", 2 ) )
+		} catch ( any e ) {
+			_invalidPath( path, "'#raw#' doesn't compile to a valid pattern (#e.message#)" )
+		}
+		return { type: optional ? "optionalPattern" : "pattern", pattern: pattern, names: names }
+	}
+
+	/**
+	 * The position of the ')' closing the '(' at openAt, skipping escaped
+	 * and nested parens; 0 if there isn't one.
+	 */
+	private function _closingParen( text, openAt ) {
+		var depth = 0
+		var inClass = false
+		for ( var i = openAt; i <= text.len(); i++ ) {
+			var ch = text.mid( i, 1 )
+			if ( ch == "\" ) {
+				i++
+			} else if ( inClass ) {
+				inClass = ( ch != "]" )
+			} else if ( ch == "[" ) {
+				inClass = true
+			} else if ( ch == "(" ) {
+				depth++
+			} else if ( ch == ")" ) {
+				depth--
+				if ( depth == 0 ) {
+					return i
+				}
+			}
+		}
+		return 0
+	}
+
+	private function _invalidPath( path, reason ) {
+		throw( message = "Invalid route path ""#path#"" — #reason#", type = "BoxExpress.InvalidRoutePath" )
 	}
 
 	private function _matchPath( patternSegments, requestSegments, exact ) {
@@ -434,13 +571,16 @@ class {
 			var seg = patternSegments[ i ]
 
 			if ( seg.type == "wildcard" ) {
+				if ( len( seg.name ) ) {
+					params[ seg.name ] = i > requestSegments.len() ? "" : requestSegments.slice( i ).toList( "/" )
+				}
 				return { matched: true, params: params, consumed: requestSegments.len() }
 			}
 
 			// Always the final pattern segment (enforced in _parsePath()) — if the
 			// request doesn't have this segment, the route still matches, just
 			// without that param captured (like Express's req.params.id === undefined).
-			if ( seg.type == "optionalParam" && i > requestSegments.len() ) {
+			if ( ( seg.type == "optionalParam" || seg.type == "optionalPattern" ) && i > requestSegments.len() ) {
 				return { matched: true, params: params, consumed: i - 1 }
 			}
 
@@ -450,6 +590,14 @@ class {
 
 			if ( seg.type == "param" || seg.type == "optionalParam" ) {
 				params[ seg.name ] = requestSegments[ i ]
+			} else if ( seg.type == "pattern" || seg.type == "optionalPattern" ) {
+				var matcher = seg.pattern.matcher( requestSegments[ i ] )
+				if ( !matcher.matches() ) {
+					return { matched: false, params: {}, consumed: 0 }
+				}
+				for ( var n = 1; n <= seg.names.len(); n++ ) {
+					params[ seg.names[ n ] ] = matcher.group( "p" & n )
+				}
 			} else if ( seg.value != requestSegments[ i ] ) {
 				return { matched: false, params: {}, consumed: 0 }
 			}

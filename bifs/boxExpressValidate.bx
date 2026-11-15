@@ -1,0 +1,16 @@
+/**
+ * Global BIF wrapping Validate.validate() — request validation
+ * middleware for req.body, req.query and req.params.
+ *
+ *   app.post( "/users", boxExpressJSON(), boxExpressValidate( {
+ *       body: { email: { type: "email", required: true } }
+ *   } ), handler )
+ */
+@BoxBIF
+class {
+
+	function invoke( required struct schema, struct options = {} ) {
+		return new bxModules.boxexpress.models.middleware.Validate().validate( schema, options )
+	}
+
+}

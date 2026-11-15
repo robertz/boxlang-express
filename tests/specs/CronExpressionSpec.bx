@@ -1,0 +1,151 @@
+/**
+ * CronExpression: parsing, and computing the next fire time. Pure date
+ * arithmetic against fixed instants — nothing here waits on a clock.
+ */
+class extends="testbox.system.BaseSpec" {
+
+	private function _at( text, zone = "UTC" ) {
+		return createObject( "java", "java.time.ZonedDateTime" ).parse( text & "[" & zone & "]" )
+	}
+
+	// The next `count` fire times after `from`, as local date-times.
+	private function _next( expression, from, zone = "UTC", count = 1 ) {
+		var cron = new "../../models/CronExpression"( expression, zone )
+		var cursor = from
+		var times = []
+		for ( var i = 1; i <= count; i++ ) {
+			cursor = cron.next( cursor )
+			times.append( cursor.toLocalDateTime().toString() )
+		}
+		return times
+	}
+
+	function run() {
+
+		describe( "CronExpression.next()", function() {
+
+			it( "finds the next daily, hourly and every-minute times", function() {
+				var from = _at( "2026-11-15T12:00:00Z" )
+				assertAll( [
+					() => expect( _next( "0 2 * * *", from, "UTC", 2 ) ).toBe( [ "2026-11-16T02:00", "2026-11-17T02:00" ] ),
+					() => expect( _next( "30 * * * *", from, "UTC", 2 ) ).toBe( [ "2026-11-15T12:30", "2026-11-15T13:30" ] ),
+					() => expect( _next( "* * * * *", from, "UTC", 2 ) ).toBe( [ "2026-11-15T12:01", "2026-11-15T12:02" ] )
+				] )
+			} )
+
+			it( "is strictly after the given time, even when that time is itself a match", function() {
+				assertAll( [
+					() => expect( _next( "0 12 * * *", _at( "2026-11-15T12:00:00Z" ) ) ).toBe( [ "2026-11-16T12:00" ] ),
+					() => expect( _next( "0 12 * * *", _at( "2026-11-15T11:59:59Z" ) ) ).toBe( [ "2026-11-15T12:00" ] )
+				] )
+			} )
+
+			it( "handles steps, ranges, lists and names", function() {
+				// 2026-11-13 is a Friday.
+				var friday = _at( "2026-11-13T17:50:00Z" )
+				assertAll( [
+					() => expect( _next( "*/15 9-17 * * MON-FRI", friday, "UTC", 3 ) ).withContext( "skips the weekend" ).toBe( [ "2026-11-16T09:00", "2026-11-16T09:15", "2026-11-16T09:30" ] ),
+					() => expect( _next( "0 0 1 JAN,jul *", friday, "UTC", 2 ) ).toBe( [ "2027-01-01T00:00", "2027-07-01T00:00" ] ),
+					() => expect( _next( "5/20 * * * *", friday, "UTC", 3 ) ).withContext( "a start with a step runs to the end of the field" ).toBe( [ "2026-11-13T18:05", "2026-11-13T18:25", "2026-11-13T18:45" ] ),
+					() => expect( _next( "10-20/5 8 * * *", friday, "UTC", 4 ) ).toBe( [ "2026-11-14T08:10", "2026-11-14T08:15", "2026-11-14T08:20", "2026-11-15T08:10" ] )
+				] )
+			} )
+
+			it( "treats weekday 0 and 7 both as Sunday", function() {
+				var from = _at( "2026-11-15T12:00:00Z" )
+				expect( _next( "0 12 * * 7", from, "UTC", 2 ) ).toBe( _next( "0 12 * * 0", from, "UTC", 2 ) )
+				expect( _next( "0 12 * * SUN", from ) ).toBe( [ "2026-11-22T12:00" ] )
+			} )
+
+			it( "fires on either match when day-of-month and day-of-week are both restricted", function() {
+				// The 1st and 15th, or any Monday.
+				expect( _next( "0 0 1,15 * 1", _at( "2026-11-15T12:00:00Z" ), "UTC", 4 ) ).toBe( [ "2026-11-16T00:00", "2026-11-23T00:00", "2026-11-30T00:00", "2026-12-01T00:00" ] )
+			} )
+
+			it( "finds a date that only comes round every few years", function() {
+				expect( _next( "0 0 29 2 *", _at( "2026-11-15T12:00:00Z" ) ) ).toBe( [ "2028-02-29T00:00" ] )
+			} )
+
+			it( "takes an optional leading seconds field", function() {
+				expect( _next( "*/20 * * * * *", _at( "2026-11-15T12:00:05Z" ), "UTC", 3 ) ).toBe( [ "2026-11-15T12:00:20", "2026-11-15T12:00:40", "2026-11-15T12:01" ] )
+			} )
+
+			it( "expands the @ shorthands", function() {
+				var from = _at( "2026-11-15T12:00:00Z" )
+				assertAll( [
+					() => expect( _next( "@hourly", from ) ).toBe( [ "2026-11-15T13:00" ] ),
+					() => expect( _next( "@daily", from ) ).toBe( [ "2026-11-16T00:00" ] ),
+					() => expect( _next( "@weekly", from ) ).toBe( [ "2026-11-22T00:00" ] ),
+					() => expect( _next( "@monthly", from ) ).toBe( [ "2026-12-01T00:00" ] ),
+					() => expect( _next( "@YEARLY", from ) ).toBe( [ "2027-01-01T00:00" ] )
+				] )
+			} )
+
+			it( "works in the schedule's own timezone", function() {
+				// 12:00 UTC is 07:00 in New York in November.
+				var from = _at( "2026-11-15T12:00:00Z" )
+				var newYork = new "../../models/CronExpression"( "0 9 * * *", "America/New_York" ).next( from )
+				assertAll( [
+					() => expect( newYork.toLocalDateTime().toString() ).toBe( "2026-11-15T09:00" ),
+					() => expect( newYork.toInstant().toString() ).toBe( "2026-11-15T14:00:00Z" )
+				] )
+			} )
+
+			it( "skips a local time that doesn't exist when the clocks go forward", function() {
+				// US clocks jump from 02:00 to 03:00 on 2027-03-14.
+				expect( _next( "30 2 * * *", _at( "2027-03-13T12:00:00-05:00", "America/New_York" ), "America/New_York", 2 ) ).toBe( [ "2027-03-15T02:30", "2027-03-16T02:30" ] )
+			} )
+
+			it( "fires twice for a local time that happens twice when the clocks go back", function() {
+				// US clocks repeat 01:00-02:00 on 2026-11-01.
+				var cron = new "../../models/CronExpression"( "30 1 * * *", "America/New_York" )
+				var first = cron.next( _at( "2026-10-31T12:00:00-04:00", "America/New_York" ) )
+				var second = cron.next( first )
+				assertAll( [
+					() => expect( first.toInstant().toString() ).toBe( "2026-11-01T05:30:00Z" ),
+					() => expect( second.toInstant().toString() ).toBe( "2026-11-01T06:30:00Z" )
+				] )
+			} )
+
+			it( "reports the gap between fire times", function() {
+				var from = _at( "2026-11-15T12:00:00Z" )
+				assertAll( [
+					() => expect( new "../../models/CronExpression"( "*/5 * * * *", "UTC" ).intervalMsAfter( from ) ).toBe( 300000 ),
+					() => expect( new "../../models/CronExpression"( "0 2 * * *", "UTC" ).intervalMsAfter( from ) ).toBe( 86400000 )
+				] )
+			} )
+
+		} )
+
+		describe( "CronExpression validation", function() {
+
+			it( "rejects malformed expressions with BoxExpress.InvalidArgument", function() {
+				var bad = [ "* * *", "0 0 * * * * *", "", "61 * * * *", "* 24 * * *", "* * 0 * *", "* * * 13 *", "* * * * 8", "*/0 * * * *", "*/x * * * *", "a b c d e", "1-2-3 * * * *", "5-1 * * * *", "-5 * * * *", "1,,2 * * * *x", "* * * FOO *", "@sometimes" ]
+				var accepted = []
+				for ( var expression in bad ) {
+					try {
+						new "../../models/CronExpression"( expression )
+						accepted.append( expression )
+					} catch ( "BoxExpress.InvalidArgument" e ) {
+					}
+				}
+				expect( accepted ).toBe( [] )
+			} )
+
+			it( "rejects a schedule that can never fire", function() {
+				expect( () => new "../../models/CronExpression"( "0 0 30 2 *" ) ).toThrow( "BoxExpress.InvalidArgument", "never fires" )
+			} )
+
+			it( "rejects an unknown timezone", function() {
+				expect( () => new "../../models/CronExpression"( "* * * * *", "Mars/Olympus" ) ).toThrow( "BoxExpress.InvalidArgument", "Unknown timezone" )
+			} )
+
+			it( "says which field is wrong", function() {
+				expect( () => new "../../models/CronExpression"( "0 25 * * *" ) ).toThrow( "BoxExpress.InvalidArgument", "hour field" )
+			} )
+
+		} )
+
+	}
+
+}

@@ -1,0 +1,184 @@
+/**
+ * app.set( "log", "access" | "json" | function ) — the completion-time
+ * access log. Entries are collected through a function sink, and the two
+ * built-in formats are checked on AccessLog directly (BoxLang's println
+ * can't be captured by swapping System.out).
+ */
+class extends="testbox.system.BaseSpec" {
+
+	private function _app() {
+		var app = new "../../models/BoxExpress"()
+		app.get( "/ok", ( req, res ) => res.send( "hello" ) )
+		app.get( "/boom", ( req, res ) => {
+			throw( "kaboom" )
+		} )
+		app.get( "/slow", ( req, res ) => {
+			sleep( 120 )
+			res.status( 201 ).json( { done: true } )
+		} )
+		app.get( "/hang", ( req, res ) => {
+			req.setTimeout( 100 )
+			sleep( 3000 )
+			res.send( "never" )
+		} )
+		var api = new "../../models/Router"()
+		api.get( "/items/:id", ( req, res ) => res.json( { id: req.params.id } ) )
+		app.use( "/api", api )
+		return app
+	}
+
+	private function _collect( app, requestOptions ) {
+		var entries = []
+		requestOptions.log = ( entry, req, res ) => {
+			entries.append( entry )
+		}
+		app.inject( requestOptions )
+		return entries
+	}
+
+	private function _plain( text ) {
+		return reReplace( text, "\x1B\[[0-9;]*m", "", "all" )
+	}
+
+	function run() {
+
+		describe( "access log entries", function() {
+
+			it( "reports method, path, status, size and duration once the response is sent", function() {
+				var entries = _collect( _app(), { url: "/slow", headers: { "User-Agent": "spec/1.0", "Referer": "https://example.com/from" } } )
+				assertAll( [
+					() => expect( entries.len() ).toBe( 1 ),
+					() => expect( entries[ 1 ].method ).toBe( "GET" ),
+					() => expect( entries[ 1 ].path ).toBe( "/slow" ),
+					() => expect( entries[ 1 ].status ).toBe( 201 ),
+					() => expect( entries[ 1 ].bytes ).toBe( len( '{"done":true}' ) ),
+					() => expect( entries[ 1 ].durationMs ).toBeGTE( 100 ),
+					() => expect( entries[ 1 ].durationMs ).toBeLT( 2000 ),
+					() => expect( entries[ 1 ].ip ).toBe( "127.0.0.1" ),
+					() => expect( entries[ 1 ].userAgent ).toBe( "spec/1.0" ),
+					() => expect( entries[ 1 ].referer ).toBe( "https://example.com/from" )
+				] )
+			} )
+
+			it( "logs the full path of a request handled inside a mounted router, without its query string", function() {
+				var entries = _collect( _app(), { url: "/api/items/7?token=secret" } )
+				assertAll( [
+					() => expect( entries[ 1 ].path ).toBe( "/api/items/7" ),
+					() => expect( JSONSerialize( entries[ 1 ] ) ).notToInclude( "secret" )
+				] )
+			} )
+
+			it( "logs the status the client actually got for a 404, an error and a timeout", function() {
+				var app = _app()
+				var timedOut = _collect( app, { url: "/hang" } )
+				assertAll( [
+					() => expect( _collect( app, { url: "/nope" } )[ 1 ].status ).toBe( 404 ),
+					() => expect( _collect( app, { url: "/boom" } )[ 1 ].status ).toBe( 500 ),
+					() => expect( timedOut[ 1 ].status ).toBe( 503 ),
+					() => expect( timedOut[ 1 ].timedOut ).toBeTrue(),
+					() => expect( structKeyExists( _collect( app, { url: "/ok" } )[ 1 ], "timedOut" ) ).toBeFalse()
+				] )
+			} )
+
+			it( "includes the request id when request ids are on", function() {
+				var app = _app()
+				app.set( "requestId", true )
+				var entries = _collect( app, { url: "/ok", headers: { "X-Request-Id": "abc-123" } } )
+				assertAll( [
+					() => expect( entries[ 1 ].id ).toBe( "abc-123" ),
+					() => expect( structKeyExists( _collect( _app(), { url: "/ok" } )[ 1 ], "id" ) ).toBeFalse()
+				] )
+			} )
+
+			it( "hands a function sink the request and response too", function() {
+				var seen = {}
+				_app().inject( { url: "/ok?x=1", log: ( entry, req, res ) => {
+					seen.query = req.query.x
+					seen.status = res.getStatusCode()
+				} } )
+				expect( seen ).toBe( { query: "1", status: 200 } )
+			} )
+
+			it( "still answers the request when the sink throws", function() {
+				var res = _app().inject( { url: "/ok", log: ( entry ) => {
+					throw( "sink broke" )
+				} } )
+				assertAll( [
+					() => expect( res.statusCode ).toBe( 200 ),
+					() => expect( res.body ).toBe( "hello" )
+				] )
+			} )
+
+		} )
+
+		describe( "built-in formats (AccessLog)", function() {
+
+			it( "formats a readable line with status, duration and size", function() {
+				var entry = _collect( _app(), { url: "/ok?token=secret" } )[ 1 ]
+				var line = _plain( new "../../models/AccessLog"().line( entry ) )
+				assertAll( [
+					() => expect( reFind( "^\[\d{4}-\d\d-\d\d \d\d:\d\d:\d\d\] GET /ok 200 [0-9.]+ms 5b 127\.0\.0\.1$", line ) ).withContext( line ).toBe( 1 ),
+					() => expect( line ).notToInclude( "secret" )
+				] )
+			} )
+
+			it( "puts the request id in the line when there is one", function() {
+				var app = _app()
+				app.set( "requestId", true )
+				var entry = _collect( app, { url: "/ok", headers: { "X-Request-Id": "abc-123" } } )[ 1 ]
+				expect( _plain( new "../../models/AccessLog"().line( entry ) ) ).toInclude( "] [abc-123] GET /ok 200" )
+			} )
+
+			it( "keeps control characters in the path from breaking or forging a line", function() {
+				var entry = _collect( _app(), { url: "/a%0Ab%1B[31m" } )[ 1 ]
+				var line = _plain( new "../../models/AccessLog"().line( entry ) )
+				assertAll( [
+					() => expect( line.listLen( char( 10 ) ) ).toBe( 1 ),
+					() => expect( line ).toInclude( "GET /a?b?[31m 404" )
+				] )
+			} )
+
+			it( "formats one JSON object per request, fields in a fixed order", function() {
+				var entry = _collect( _app(), { url: "/api/items/7?q=1", headers: { "User-Agent": 'evil"' & char( 9 ) & "agent" } } )[ 1 ]
+				var printed = new "../../models/AccessLog"().json( entry )
+				var parsed = JSONDeserialize( printed )
+				assertAll( [
+					() => expect( printed.listLen( char( 10 ) ) ).toBe( 1 ),
+					() => expect( printed ).withContext( "a control character is escaped, not printed" ).notToInclude( char( 9 ) ),
+					() => expect( parsed.path ).toBe( "/api/items/7" ),
+					() => expect( parsed.status ).toBe( 200 ),
+					() => expect( parsed.userAgent ).toInclude( "agent" ),
+					() => expect( left( printed, 8 ) ).toBe( '{"time":' )
+				] )
+			} )
+
+			it( "runs every mode through a real request without failing it", function() {
+				var app = _app()
+				assertAll( [
+					() => expect( app.inject( { url: "/ok", log: "json" } ).body ).toBe( "hello" ),
+					() => expect( app.inject( { url: "/ok", log: "access" } ).body ).toBe( "hello" ),
+					() => expect( app.inject( { url: "/ok", log: true } ).body ).toBe( "hello" ),
+					() => expect( app.inject( { url: "/ok", log: false } ).body ).toBe( "hello" )
+				] )
+			} )
+
+		} )
+
+		describe( "app.set( 'log' ) validation", function() {
+
+			it( "accepts the documented values and rejects anything else", function() {
+				var app = _app()
+				assertAll( [
+					() => expect( () => app.set( "log", "verbose" ) ).toThrow( "BoxExpress.InvalidArgument" ),
+					() => expect( () => app.set( "log", {} ) ).toThrow( "BoxExpress.InvalidArgument" ),
+					() => expect( app.set( "log", "JSON" ).getSetting( "log" ) ).toBe( "JSON" ),
+					() => expect( app.set( "log", "access" ).getSetting( "log" ) ).toBe( "access" ),
+					() => expect( app.set( "log", false ).getSetting( "log" ) ).toBeFalse()
+				] )
+			} )
+
+		} )
+
+	}
+
+}

@@ -1,0 +1,1 @@
+<bx:output>before #partial( "partials/nav", { active: "inner", name: "overridden" } )# after name=#data.name# active=#data.active ?: "unset"#</bx:output>

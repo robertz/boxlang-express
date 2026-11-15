@@ -521,15 +521,54 @@ class {
 	 */
 	function render( view, data = {} ) {
 		// app.locals < res.locals < the data passed here, each overriding the last —
-		// same precedence as Express. Reassigning the local `data` (not a new var)
-		// so the bx:include below, which shares this function's scope, sees the
-		// merged struct under the same name the .bxm template expects.
+		// same precedence as Express.
 		var mergedData = {}
 		mergedData.append( variables.appLocals )
 		mergedData.append( this.locals )
 		mergedData.append( data )
-		data = mergedData
 
+		var output = _renderToString( view, mergedData )
+
+		// The view has run by now, so anything it set on `data` (a page
+		// title, extra scripts) is there for the layout to read.
+		// data.layout: a view name picks a layout for this render, false
+		// turns the app's default off.
+		var layout = variables.settings[ "view layout" ] ?: ""
+		var requested = mergedData.layout ?: true
+		if ( isSimpleValue( requested ) ) {
+			if ( !isBoolean( requested ) ) {
+				layout = requested
+			} else if ( !requested ) {
+				layout = ""
+			}
+		}
+		if ( len( layout ) ) {
+			mergedData.body = output
+			output = _renderToString( layout, mergedData )
+		}
+
+		type( "text/html; charset=utf-8" )
+		return _end( output.getBytes( "UTF-8" ) )
+	}
+
+	/**
+	 * Renders another view and returns its HTML, for use inside a view or
+	 * layout: #partial( "partials/nav" )#. It sees the same `data` as the
+	 * view calling it, plus anything passed here.
+	 */
+	function partial( view, data = {} ) {
+		var partialData = {}
+		partialData.append( variables.renderData ?: {} )
+		partialData.append( data )
+		return _renderToString( view, partialData )
+	}
+
+	/**
+	 * Runs one .bxm file from the views directory and returns its output.
+	 * The parameter has to be called `data`: the include below shares this
+	 * function's scope, and that's the name templates read.
+	 */
+	private function _renderToString( view, data ) {
 		var viewsDir = variables.settings[ "views" ] ?: javacast( "null", "" )
 		if ( isNull( viewsDir ) ) {
 			throw(
@@ -567,13 +606,20 @@ class {
 
 		var templatePath = realCandidate.toString()
 		var output = ""
+		// What partial() merges its own data over. Saved and restored so a
+		// partial's data doesn't leak back into the view that called it.
+		var outerRenderData = variables.renderData ?: {}
+		variables.renderData = data
 
-		bx:savecontent variable="output" {
-			include "#templatePath#"
+		try {
+			bx:savecontent variable="output" {
+				include "#templatePath#"
+			}
+		} finally {
+			variables.renderData = outerRenderData
 		}
 
-		type( "text/html; charset=utf-8" )
-		return _end( output.getBytes( "UTF-8" ) )
+		return output
 	}
 
 	/**
@@ -638,6 +684,22 @@ class {
 			emitter.close()
 		}
 
+		return this
+	}
+
+	/**
+	 * Marks the response as taken over by a WebSocket handshake, running
+	 * the before-send callbacks first — the handshake writes its own 101,
+	 * so nothing else would run them.
+	 */
+	function _beginUpgrade() {
+		if ( variables.sent ) {
+			throw( message = "Response already sent for this request", type = "BoxExpress.ResponseAlreadySent" )
+		}
+		variables.sent = true
+		for ( var callback in variables.beforeSendCallbacks ) {
+			callback()
+		}
 		return this
 	}
 

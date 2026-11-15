@@ -46,3 +46,57 @@ are operational detail, so don't leave the endpoint open on a public
 listener. Requests made through `app.inject()` aren't counted. There are
 deliberately no per-route latency histograms — raw paths would blow up the
 number of series, and bucket boundaries are an app-specific choice.
+
+## Access log
+
+By default each request prints one line as it *arrives* — method, path
+and client address. That tells you a request came in, but not how it
+went. Three other settings log each request once it's *answered*, with
+its status and how long it took:
+
+| `app.set( "log", ... )` | Output |
+|---|---|
+| `true` (default) | A line on arrival: `[2026-11-15 12:00:00] GET /users/42 127.0.0.1` |
+| `"access"` | A line on completion: `[2026-11-15 12:00:00] GET /users/42 200 12.5ms 340b 127.0.0.1` |
+| `"json"` | One JSON object per line on completion, for a log collector |
+| a function | Called with the entry on completion; prints nothing itself |
+| `false` | Nothing |
+
+```js
+app.set( "log", "json" )
+// {"time":"2026-11-15T12:00:00-05:00","method":"GET","path":"/users/42","status":200,
+//  "durationMs":12.5,"bytes":340,"ip":"127.0.0.1","userAgent":"curl/8.4.0","referer":"","id":"..."}
+```
+
+The entry's fields: `time` (ISO 8601), `method`, `path`, `status`,
+`durationMs`, `bytes` (body bytes sent), `ip`, `userAgent`, `referer`,
+plus `id` when request IDs (above) are on and `timedOut: true`
+for a request that hit its [timeout](limits.md#request-timeout). `status`
+is what the client actually received, including the framework's own
+`404`, `500`, `413` and `503` responses.
+
+A function gets the same entry, and the request and response, to send
+wherever you like — or to add fields of your own:
+
+```js
+app.set( "log", ( entry, req, res ) => {
+	entry.user = req.session.userId ?: ""
+	writeLog( text = JSONSerialize( entry ), log = "access" )
+} )
+```
+
+Things worth knowing:
+
+- **`path` never includes the query string.** Query strings carry tokens
+  and search terms often enough that they stay out of the log by default.
+  A function sink can read `req.originalUrl` if you want them.
+- **Control characters can't forge a line.** `"access"` prints them as
+  `?`, and JSON escapes them.
+- **A streamed response is logged when it ends**, so an SSE connection
+  open for an hour logs one entry with a duration of an hour.
+- **WebSocket connections aren't logged**; they don't pass through the
+  request pipeline.
+- A sink that throws is reported on stdout and otherwise ignored — the
+  response has already been sent.
+- Printing is a synchronized write. `"access"` and `"json"` cost the same
+  one line per request as the default.

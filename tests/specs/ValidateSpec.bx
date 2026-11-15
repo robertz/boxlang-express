@@ -1,0 +1,309 @@
+/**
+ * boxExpressValidate() / Validate.validate(): schema checks on req.body,
+ * req.query and req.params.
+ */
+class extends="testbox.system.BaseSpec" {
+
+	function beforeAll() {
+		variables.testPort = 4373
+		variables.baseUrl = "http://localhost:#variables.testPort#"
+		variables.client = new "../helpers/HttpClient"()
+		variables.liveApp = _app( { body: { email: { type: "email", required: true }, age: { type: "integer", min: 18 } }, query: { page: { type: "integer", default: 1 } } } )
+		variables.liveApp.set( "log", false )
+		variables.liveApp.listen( port = variables.testPort, options = { block: false } )
+		sleep( 300 )
+	}
+
+	function afterAll() {
+		variables.liveApp.close()
+	}
+
+	// An app with one route, POST /items/:id, guarded by `schema`.
+	private function _app( schema, options = {} ) {
+		var app = new "../../models/BoxExpress"()
+		var parsers = new "../../models/middleware/BodyParsers"()
+		app.use( parsers.json(), parsers.urlencoded(), parsers.text() )
+		app.post( "/items/:id", new "../../models/middleware/Validate"().validate( schema, options ), ( req, res ) => {
+			res.json( { body: req.body, query: req.query, valid: req.valid } )
+		} )
+		return app
+	}
+
+	private function _send( schema, requestBody = {}, queryString = "", options = {} ) {
+		return _app( schema, options ).inject( { method: "POST", url: "/items/7" & queryString, body: requestBody } )
+	}
+
+	private function _messages( injectResponse ) {
+		var byField = {}
+		for ( var item in injectResponse.json().errors ) {
+			byField[ item.in & ":" & item.field ] = item.message
+		}
+		return byField
+	}
+
+	function run() {
+
+		describe( "passing validation", function() {
+
+			it( "calls the handler and exposes the declared fields on req.valid", function() {
+				var res = _send( { body: { name: { type: "string", required: true } } }, { name: "Ada", extra: "kept" } )
+				assertAll( [
+					() => expect( res.statusCode ).toBe( 200 ),
+					() => expect( res.json().valid.body ).withContext( "only what the schema names" ).toBe( { name: "Ada" } ),
+					() => expect( res.json().body.extra ).withContext( "req.body itself keeps unknown fields by default" ).toBe( "kept" )
+				] )
+			} )
+
+			it( "converts strings to the declared types", function() {
+				var res = _send( {
+					query: { page: { type: "integer" }, ratio: { type: "number" }, active: { type: "boolean" }, off: { type: "boolean" } },
+					params: { id: { type: "integer" } }
+				}, {}, "?page=3&ratio=0.25&active=true&off=0" )
+				var valid = res.json().valid
+				assertAll( [
+					() => expect( res.body ).toInclude( '"page":3' ),
+					() => expect( res.body ).toInclude( '"ratio":0.25' ),
+					() => expect( valid.query.active ).toBeTrue(),
+					() => expect( valid.query.off ).toBeFalse(),
+					() => expect( res.body ).withContext( "the route param, as a number" ).toInclude( '"params":{"id":7}' ),
+					() => expect( res.json().query.page ).withContext( "req.query is updated in place too" ).toBe( 3 )
+				] )
+			} )
+
+			it( "fills in defaults for missing and empty values", function() {
+				var res = _send( {
+					query: { page: { type: "integer", default: 1 }, sort: { type: "string", default: "name" }, q: { type: "integer", default: 9 } }
+				}, {}, "?q=" )
+				assertAll( [
+					() => expect( res.json().valid.query ).toBe( { page: 1, sort: "name", q: 9 } ),
+					() => expect( res.json().query.sort ).toBe( "name" )
+				] )
+			} )
+
+			it( "trims when asked, before checking length", function() {
+				var res = _send( { body: { name: { type: "string", trim: true, maxLength: 3 } } }, { name: "  Ada  " } )
+				expect( res.json().valid.body.name ).toBe( "Ada" )
+			} )
+
+			it( "accepts each format type", function() {
+				var res = _send( { body: {
+					email: { type: "email" }, site: { type: "url" }, day: { type: "date" }, at: { type: "date" },
+					id1: { type: "uuid" }, id2: { type: "uuid" }, anything: { type: "any" }
+				} }, {
+					email: "ada@example.co.uk", site: "https://example.com/a?b=1", day: "2026-11-15", at: "2026-11-15T09:30:00Z",
+					id1: "123e4567-e89b-12d3-a456-426614174000", id2: createUUID(), anything: [ 1, { a: 2 } ]
+				} )
+				expect( res.statusCode ).withContext( res.body ).toBe( 200 )
+			} )
+
+			it( "leaves an optional field out of req.valid when it wasn't sent", function() {
+				var res = _send( { body: { nickname: { type: "string" } } }, {} )
+				assertAll( [
+					() => expect( res.statusCode ).toBe( 200 ),
+					() => expect( res.json().valid.body ).toBe( {} )
+				] )
+			} )
+
+		} )
+
+		describe( "failing validation", function() {
+
+			it( "answers 400 with every problem, without running the handler", function() {
+				var res = _send( { body: { email: { type: "email", required: true }, age: { type: "integer", min: 18 } } }, { email: "nope", age: 12 } )
+				var messages = _messages( res )
+				assertAll( [
+					() => expect( res.statusCode ).toBe( 400 ),
+					() => expect( res.json().message ).toBe( "Validation failed" ),
+					() => expect( messages[ "body:email" ] ).toBe( "must be a valid email address" ),
+					() => expect( messages[ "body:age" ] ).toBe( "must be at least 18" ),
+					() => expect( structKeyExists( res.json(), "valid" ) ).toBeFalse()
+				] )
+			} )
+
+			it( "treats a missing, null or empty value as missing for a required field", function() {
+				var schema = { body: { name: { type: "string", required: true }, count: { type: "integer", required: true } } }
+				assertAll( [
+					() => expect( _messages( _send( schema, {} ) )[ "body:name" ] ).toBe( "is required" ),
+					() => expect( _messages( _send( schema, { name: "", count: "" } ) ) ).toBe( { "body:name": "is required", "body:count": "is required" } ),
+					() => expect( _send( schema, { name: "   ", count: 1 } ).statusCode ).withContext( "whitespace counts as present unless trim is on" ).toBe( 200 ),
+					() => expect( _app( schema ).inject( { method: "POST", url: "/items/7", headers: { "Content-Type": "application/json" }, body: '{"name":null,"count":1}' } ).statusCode ).toBe( 400 )
+				] )
+			} )
+
+			it( "rejects wrong types rather than guessing", function() {
+				var schema = { body: {
+					n: { type: "integer" }, f: { type: "number" }, b: { type: "boolean" }, s: { type: "string" },
+					a: { type: "array" }, o: { type: "struct" }, u: { type: "url" }, d: { type: "date" }, id: { type: "uuid" }
+				} }
+				var messages = _messages( _send( schema, { n: "1.5", f: "abc", b: "maybe", s: [ "x" ], a: "x", o: [ 1 ], u: "javascript:alert(1)", d: "15/11/2026", id: "not-a-uuid" } ) )
+				assertAll( [
+					() => expect( structCount( messages ) ).toBe( 9 ),
+					() => expect( messages[ "body:n" ] ).toBe( "must be a whole number" ),
+					() => expect( messages[ "body:b" ] ).toBe( "must be true or false" ),
+					() => expect( messages[ "body:u" ] ).toBe( "must be an http or https URL" ),
+					() => expect( messages[ "body:o" ] ).toBe( "must be an object" )
+				] )
+			} )
+
+			it( "does not accept number-like strings that only look whole", function() {
+				var schema = { body: { n: { type: "integer" } } }
+				assertAll( [
+					() => expect( _send( schema, { n: "1e3" } ).statusCode ).toBe( 400 ),
+					() => expect( _send( schema, { n: " 7" } ).statusCode ).toBe( 400 ),
+					() => expect( _send( schema, { n: "0x10" } ).statusCode ).toBe( 400 ),
+					() => expect( _send( schema, { n: true } ).statusCode ).toBe( 400 ),
+					() => expect( _send( schema, { n: "-12" } ).json().valid.body.n ).toBe( -12 )
+				] )
+			} )
+
+			it( "enforces min, max, lengths, pattern and oneOf", function() {
+				var schema = { body: {
+					low: { type: "integer", min: 5 }, high: { type: "number", max: 1.5 },
+					short: { type: "string", minLength: 3 }, long: { type: "string", maxLength: 3 },
+					code: { type: "string", pattern: "^[A-Z]{3}$" }, role: { type: "string", oneOf: [ "admin", "member" ] }
+				} }
+				var messages = _messages( _send( schema, { low: 4, high: 1.6, short: "ab", long: "abcd", code: "ab1", role: "Admin" } ) )
+				assertAll( [
+					() => expect( structCount( messages ) ).toBe( 6 ),
+					() => expect( messages[ "body:role" ] ).withContext( "oneOf is case-sensitive" ).toBe( "must be one of: admin, member" ),
+					() => expect( _send( schema, { low: 5, high: 1.5, short: "abc", long: "abc", code: "ABC", role: "admin" } ).statusCode ).toBe( 200 )
+				] )
+			} )
+
+			it( "validates array items and nested structs, naming the path", function() {
+				var schema = { body: {
+					tags: { type: "array", maxItems: 3, items: { type: "string", minLength: 2 } },
+					address: { type: "struct", fields: { city: { type: "string", required: true }, zip: { type: "string", pattern: "^[0-9]{5}$" } } }
+				} }
+				var messages = _messages( _send( schema, { tags: [ "ok", "x" ], address: { zip: "abc" } } ) )
+				var tooMany = _messages( _send( schema, { tags: [ "aa", "bb", "cc", "dd" ] } ) )
+				assertAll( [
+					() => expect( messages[ "body:tags[2]" ] ).toBe( "must be at least 2 characters" ),
+					() => expect( messages[ "body:address.city" ] ).toBe( "is required" ),
+					() => expect( messages[ "body:address.zip" ] ).toBe( "is not in the expected format" ),
+					() => expect( tooMany[ "body:tags" ] ).toBe( "must have at most 3 items" )
+				] )
+			} )
+
+			it( "runs a custom validate function, using its string as the message", function() {
+				var schema = { body: { n: { type: "integer", validate: ( value, req ) => value % 2 == 0 ? true : "must be even" }, m: { type: "integer", validate: ( value ) => false } } }
+				var messages = _messages( _send( schema, { n: 3, m: 1 } ) )
+				assertAll( [
+					() => expect( messages[ "body:n" ] ).toBe( "must be even" ),
+					() => expect( messages[ "body:m" ] ).toBe( "is not valid" ),
+					() => expect( _send( { body: { n: schema.body.n } }, { n: 4 } ).statusCode ).toBe( 200 )
+				] )
+			} )
+
+			it( "uses a rule's own message when it has one", function() {
+				var messages = _messages( _send( { body: { age: { type: "integer", min: 18, message: "You must be 18 or over" } } }, { age: 3 } ) )
+				expect( messages[ "body:age" ] ).toBe( "You must be 18 or over" )
+			} )
+
+			it( "reports a body that isn't an object", function() {
+				var app = _app( { body: { name: { type: "string" } } } )
+				var res = app.inject( { method: "POST", url: "/items/7", headers: { "Content-Type": "text/plain" }, body: "just text" } )
+				assertAll( [
+					() => expect( res.statusCode ).toBe( 400 ),
+					() => expect( _messages( res )[ "body:" ] ).toBe( "must be an object" )
+				] )
+			} )
+
+			it( "validates route params", function() {
+				var app = _app( { params: { id: { type: "integer", min: 1 } } } )
+				assertAll( [
+					() => expect( app.inject( { method: "POST", url: "/items/abc" } ).statusCode ).toBe( 400 ),
+					() => expect( app.inject( { method: "POST", url: "/items/0" } ).statusCode ).toBe( 400 ),
+					() => expect( app.inject( { method: "POST", url: "/items/5" } ).statusCode ).toBe( 200 )
+				] )
+			} )
+
+		} )
+
+		describe( "options", function() {
+
+			it( "strips or rejects fields the schema doesn't name", function() {
+				var schema = { body: { name: { type: "string" }, address: { type: "struct", fields: { city: { type: "string" } } } } }
+				var sent = { name: "Ada", isAdmin: true, address: { city: "X", secret: 1 } }
+				var stripped = _send( schema, sent, "", { unknown: "strip" } ).json()
+				var rejected = _send( schema, sent, "", { unknown: "reject" } )
+				assertAll( [
+					() => expect( stripped.body ).toBe( { name: "Ada", address: { city: "X" } } ),
+					() => expect( rejected.statusCode ).toBe( 400 ),
+					() => expect( _messages( rejected ) ).toBe( { "body:isAdmin": "is not allowed", "body:address.secret": "is not allowed" } )
+				] )
+			} )
+
+			it( "takes a different failure status", function() {
+				expect( _send( { body: { a: { type: "integer", required: true } } }, {}, "", { status: 422 } ).statusCode ).toBe( 422 )
+			} )
+
+			it( "hands failures to onError instead of responding", function() {
+				var res = _send( { body: { a: { type: "integer", required: true } } }, {}, "", { onError: ( errors, req, res, next ) => {
+					res.status( 409 ).send( "custom: " & errors[ 1 ].field & " " & errors[ 1 ].message )
+				} } )
+				assertAll( [
+					() => expect( res.statusCode ).toBe( 409 ),
+					() => expect( res.body ).toBe( "custom: a is required" )
+				] )
+			} )
+
+		} )
+
+		describe( "schema mistakes", function() {
+
+			it( "throws BoxExpress.InvalidArgument when the route is registered", function() {
+				var validator = new "../../models/middleware/Validate"()
+				var bad = [
+					{ body: { a: { typ: "string" } } },
+					{ body: { a: { type: "strng" } } },
+					{ headers: {} },
+					{ body: { a: "string" } },
+					{ body: { a: { type: "string", oneOf: "x" } } },
+					{ body: { a: { type: "string", pattern: "([" } } },
+					{ body: { a: { validate: "nope" } } },
+					{ body: { a: { type: "struct", fields: { b: { type: "wat" } } } } },
+					{ body: { a: { type: "array", items: { requried: true } } } }
+				]
+				var accepted = 0
+				for ( var schema in bad ) {
+					try {
+						validator.validate( schema )
+						accepted++
+					} catch ( "BoxExpress.InvalidArgument" e ) {
+					}
+				}
+				assertAll( [
+					() => expect( accepted ).toBe( 0 ),
+					() => expect( () => validator.validate( {}, { unknown: "ignore" } ) ).toThrow( "BoxExpress.InvalidArgument" )
+				] )
+			} )
+
+		} )
+
+		describe( "validation against a live server", function() {
+
+			it( "validates a real JSON body and query string", function() {
+				var good = variables.client.post( variables.baseUrl & "/items/7?page=2", '{"email":"ada@example.com","age":"30"}', "application/json" )
+				var bad = variables.client.post( variables.baseUrl & "/items/7?page=two", '{"age":5}', "application/json" )
+				var goodBody = JSONDeserialize( good.body )
+				var badBody = JSONDeserialize( bad.body )
+				assertAll( [
+					() => expect( good.statusCode ).toBe( 200 ),
+					() => expect( goodBody.valid.body.age ).toBe( 30 ),
+					() => expect( goodBody.valid.query.page ).toBe( 2 ),
+					() => expect( bad.statusCode ).toBe( 400 ),
+					() => expect( badBody.errors.len() ).toBe( 3 )
+				] )
+			} )
+
+			it( "validates a form post, where every value arrives as a string", function() {
+				var result = variables.client.post( variables.baseUrl & "/items/7", "email=ada%40example.com&age=41", "application/x-www-form-urlencoded" )
+				expect( JSONDeserialize( result.body ).valid.body ).toBe( { email: "ada@example.com", age: 41 } )
+			} )
+
+		} )
+
+	}
+
+}

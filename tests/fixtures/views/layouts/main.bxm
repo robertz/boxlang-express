@@ -1,0 +1,1 @@
+<bx:output><html><head><title>#encodeForHTML( data.title ?: "Untitled" )#</title></head><body>#partial( "partials/nav", { active: data.section ?: "none" } )#<main>#data.body#</main></body></html></bx:output>

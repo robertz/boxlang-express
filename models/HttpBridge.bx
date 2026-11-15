@@ -16,6 +16,7 @@ class {
 		// can't be referenced by name, see StompMessage.bx's init().
 		variables.metrics = metrics
 		variables.color = new AnsiColor()
+		variables.accessLog = new AccessLog()
 		return this
 	}
 
@@ -39,7 +40,7 @@ class {
 			// synchronized write, so concurrent requests briefly serialize on it).
 			// Unlike this, the error paths below always log: those are actual
 			// server-side failures, not routine traffic.
-			if ( variables.settings[ "log" ] ?: true ) {
+			if ( _logMode() == "receipt" ) {
 				println( variables.color.gray( "[#dateTimeFormat( now(), 'yyyy-MM-dd HH:mm:ss' )#]" ) & _idTag( requestId ) & " " & variables.color.method( req.method ) & " #_logSafe( req.path )# " & variables.color.dim( _logSafe( req.ip ) ) )
 			}
 		} catch ( any e ) {
@@ -95,9 +96,67 @@ class {
 				} catch ( any ignore ) {
 				}
 			}
+			_logCompleted( req, res, requestId, startedNs )
 			if ( !isSimpleValue( variables.metrics ) ) {
 				variables.metrics.recordRequest( res.getStatusCode(), createObject( "java", "java.lang.System" ).nanoTime() - startedNs )
 			}
+		}
+	}
+
+	/**
+	 * What app.set( "log", ... ) asks for: "receipt" (true, the default — a
+	 * line as each request arrives), "access" or "json" (a line once it's
+	 * answered, with status and duration), "custom" (a function gets the
+	 * entry), or "off".
+	 */
+	private function _logMode() {
+		var setting = variables.settings[ "log" ] ?: true
+		if ( isCustomFunction( setting ) || isClosure( setting ) ) {
+			return "custom"
+		}
+		if ( isBoolean( setting ) ) {
+			return setting ? "receipt" : "off"
+		}
+		return lCase( setting )
+	}
+
+	/**
+	 * The completion-time access log. Never lets a logging failure reach
+	 * the request: the response has already been sent by now.
+	 */
+	private function _logCompleted( req, res, requestId, startedNs ) {
+		var mode = _logMode()
+		if ( mode != "access" && mode != "json" && mode != "custom" ) {
+			return
+		}
+		try {
+			var durationMs = round( ( createObject( "java", "java.lang.System" ).nanoTime() - startedNs ) / 10000 ) / 100
+			// Ordered, so every line has its fields in the same place.
+			var entry = [
+				time: dateTimeFormat( now(), "iso" ),
+				method: req.method,
+				path: req.originalUrl.listFirst( "?" ),
+				status: res.getStatusCode(),
+				durationMs: durationMs,
+				bytes: res.getBytesWritten(),
+				ip: req.ip,
+				userAgent: req.headers[ "User-Agent" ] ?: "",
+				referer: req.headers[ "Referer" ] ?: ""
+			]
+			if ( len( requestId ) ) {
+				entry.id = requestId
+			}
+			if ( req.timedOut ) {
+				entry.timedOut = true
+			}
+			if ( mode == "custom" ) {
+				var sink = variables.settings[ "log" ]
+				sink( entry, req, res )
+			} else {
+				println( mode == "json" ? variables.accessLog.json( entry ) : variables.accessLog.line( entry ) )
+			}
+		} catch ( any e ) {
+			println( variables.color.red( "[BoxExpress] access log failed: #e.message#" ) )
 		}
 	}
 
@@ -142,7 +201,7 @@ class {
 		if ( res.isSent() ) {
 			return
 		}
-		println( variables.color.gray( "[#dateTimeFormat( now(), 'yyyy-MM-dd HH:mm:ss' )#]" ) & _idTag( requestId ) & " " & variables.color.red( "#req.method# #_logSafe( req.originalUrl )# timed out after #req.timedOutAfterMs ?: 0#ms" ) )
+		println( variables.color.gray( "[#dateTimeFormat( now(), 'yyyy-MM-dd HH:mm:ss' )#]" ) & _idTag( requestId ) & " " & variables.color.red( "#req.method# #_logSafe( req.originalUrl.listFirst( '?' ) )# timed out after #req.timedOutAfterMs ?: 0#ms" ) )
 		try {
 			res.set( "Connection", "close" )
 			res.status( 503 ).json( { error: true, message: "Request timed out" } )

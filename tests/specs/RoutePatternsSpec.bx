@@ -1,0 +1,206 @@
+/**
+ * Route path patterns beyond plain :name — constrained params, several
+ * params or literal text in one segment, and named wildcards.
+ */
+class extends="testbox.system.BaseSpec" {
+
+	function beforeAll() {
+		variables.testPort = 4372
+		variables.baseUrl = "http://localhost:#variables.testPort#"
+		variables.client = new "../helpers/HttpClient"()
+		variables.liveApp = _app()
+		variables.liveApp.set( "log", false )
+		variables.liveApp.listen( port = variables.testPort, options = { block: false } )
+		sleep( 300 )
+	}
+
+	function afterAll() {
+		variables.liveApp.close()
+	}
+
+	private function _app() {
+		var app = new "../../models/BoxExpress"()
+		var show = ( req, res ) => res.json( req.params )
+		app.get( "/users/:id(\d+)", ( req, res ) => res.json( { route: "numeric", id: req.params.id } ) )
+		app.get( "/users/:name", ( req, res ) => res.json( { route: "name", name: req.params.name } ) )
+		app.get( "/flights/:from-:to", show )
+		app.get( "/api/v:version/ping", show )
+		app.get( "/files/:name(.+).json", show )
+		app.get( "/pages/:n(\d+)?", ( req, res ) => res.json( { n: req.params.n ?: "none" } ) )
+		app.get( "/hex/:color([0-9a-f]{6}|[0-9a-f]{3})", show )
+		app.get( "/dates/:y(\d{4})-:m(\d\d)-:d(\d\d)", show )
+		app.get( "/grouped/:pair((a|b)-(c|d))/:tail", show )
+		app.get( "/legacy/:user-id", show )
+		app.get( "/assets/*rest", show )
+		app.get( "/bare/*", ( req, res ) => res.json( { count: structCount( req.params ) } ) )
+
+		app.param( "orderId", ( req, res, next, value ) => {
+			req.params.orderId = "order-" & value
+			next()
+		} )
+		app.get( "/orders/:orderId(\d+)", show )
+
+		var tenant = new "../../models/Router"()
+		tenant.get( "/info", ( req, res ) => res.json( { tenant: req.params.tenant, baseUrl: req.baseUrl } ) )
+		app.use( "/t/:tenant([a-z]{3})", tenant )
+		return app
+	}
+
+	private function _get( path ) {
+		return _app().inject( path )
+	}
+
+	function run() {
+
+		describe( "constrained params", function() {
+
+			it( "matches only when the segment fits the pattern, falling through otherwise", function() {
+				var app = _app()
+				assertAll( [
+					() => expect( app.inject( "/users/42" ).json() ).toBe( { route: "numeric", id: "42" } ),
+					() => expect( app.inject( "/users/ada" ).json() ).toBe( { route: "name", name: "ada" } ),
+					() => expect( app.inject( "/users/42abc" ).json().route ).withContext( "the pattern must match the whole segment" ).toBe( "name" )
+				] )
+			} )
+
+			it( "supports alternation and quantifiers", function() {
+				var app = _app()
+				assertAll( [
+					() => expect( app.inject( "/hex/ff00aa" ).json().color ).toBe( "ff00aa" ),
+					() => expect( app.inject( "/hex/fff" ).json().color ).toBe( "fff" ),
+					() => expect( app.inject( "/hex/ff00" ).statusCode ).toBe( 404 ),
+					() => expect( app.inject( "/hex/gggggg" ).statusCode ).toBe( 404 )
+				] )
+			} )
+
+			it( "matches case-insensitively, like literal segments, and keeps the original case", function() {
+				expect( _get( "/hex/FF00AA" ).json().color ).toBe( "FF00AA" )
+			} )
+
+			it( "keeps params straight when a constraint has groups of its own", function() {
+				expect( _get( "/grouped/a-d/end" ).json() ).toBe( { pair: "a-d", tail: "end" } )
+			} )
+
+			it( "can be optional as the final segment", function() {
+				var app = _app()
+				assertAll( [
+					() => expect( app.inject( "/pages" ).json().n ).toBe( "none" ),
+					() => expect( app.inject( "/pages/3" ).json().n ).toBe( "3" ),
+					() => expect( app.inject( "/pages/x" ).statusCode ).withContext( "present but not matching is not a match" ).toBe( 404 )
+				] )
+			} )
+
+			it( "runs app.param() handlers for a constrained param", function() {
+				expect( _get( "/orders/17" ).json().orderId ).toBe( "order-17" )
+			} )
+
+			it( "works in a mount path, with the matched value in req.baseUrl", function() {
+				var app = _app()
+				assertAll( [
+					() => expect( app.inject( "/t/abc/info" ).json() ).toBe( { tenant: "abc", baseUrl: "/t/abc" } ),
+					() => expect( app.inject( "/t/toolong/info" ).statusCode ).toBe( 404 )
+				] )
+			} )
+
+			it( "cannot be made to match across a slash", function() {
+				expect( _get( "/files/a/b.json" ).statusCode ).toBe( 404 )
+			} )
+
+		} )
+
+		describe( "several params or literal text in one segment", function() {
+
+			it( "splits a segment around a literal", function() {
+				var app = _app()
+				assertAll( [
+					() => expect( app.inject( "/flights/LAX-JFK" ).json() ).toBe( { from: "LAX", to: "JFK" } ),
+					() => expect( app.inject( "/flights/nodash" ).statusCode ).toBe( 404 ),
+					() => expect( app.inject( "/flights/-JFK" ).statusCode ).withContext( "a param is never empty" ).toBe( 404 )
+				] )
+			} )
+
+			it( "takes a literal prefix or suffix", function() {
+				var app = _app()
+				assertAll( [
+					() => expect( app.inject( "/api/v2/ping" ).json().version ).toBe( "2" ),
+					() => expect( app.inject( "/api/2/ping" ).statusCode ).toBe( 404 ),
+					() => expect( app.inject( "/files/report.json" ).json().name ).toBe( "report" ),
+					() => expect( app.inject( "/files/a.b.json" ).json().name ).toBe( "a.b" ),
+					() => expect( app.inject( "/files/report.txt" ).statusCode ).toBe( 404 )
+				] )
+			} )
+
+			it( "treats regex characters in the literal text literally", function() {
+				// The "." in ".json" must not match any character.
+				expect( _get( "/files/reportXjson" ).statusCode ).toBe( 404 )
+			} )
+
+			it( "combines constraints and literals", function() {
+				var app = _app()
+				assertAll( [
+					() => expect( app.inject( "/dates/2026-11-15" ).json() ).toBe( { y: "2026", m: "11", d: "15" } ),
+					() => expect( app.inject( "/dates/26-11-15" ).statusCode ).toBe( 404 )
+				] )
+			} )
+
+			it( "leaves a lone :name segment as one param, hyphens and all", function() {
+				expect( _get( "/legacy/7" ).json() ).toBe( { "user-id": "7" } )
+			} )
+
+		} )
+
+		describe( "named wildcards", function() {
+
+			it( "captures the rest of the path", function() {
+				var app = _app()
+				assertAll( [
+					() => expect( app.inject( "/assets/css/site.css" ).json().rest ).toBe( "css/site.css" ),
+					() => expect( app.inject( "/assets/one" ).json().rest ).toBe( "one" ),
+					() => expect( app.inject( "/assets" ).json().rest ).toBe( "" )
+				] )
+			} )
+
+			it( "leaves a bare * capturing nothing, as before", function() {
+				expect( _get( "/bare/a/b" ).json().count ).toBe( 0 )
+			} )
+
+		} )
+
+		describe( "invalid patterns", function() {
+
+			it( "throws BoxExpress.InvalidRoutePath at registration", function() {
+				var bad = [ "/a/:id(\d+", "/a/:(x)", "/a/:id()", "/a/:x-:x", "/a/:id(\d+)?/b", "/a/v:n?", "/a/:id([)", "/a/:id(a/b)", "/a/*bad-name", "/a/*rest/b", "/a/:id(*)" ]
+				var accepted = []
+				for ( var path in bad ) {
+					try {
+						new "../../models/BoxExpress"().get( path, ( req, res ) => res.send( "x" ) )
+						accepted.append( path )
+					} catch ( "BoxExpress.InvalidRoutePath" e ) {
+					}
+				}
+				expect( accepted ).toBe( [] )
+			} )
+
+		} )
+
+		describe( "patterns against a live server", function() {
+
+			it( "routes on a constraint and extracts composite params from a real URL", function() {
+				var numeric = JSONDeserialize( variables.client.get( variables.baseUrl & "/users/42" ).body )
+				var named = JSONDeserialize( variables.client.get( variables.baseUrl & "/users/ada" ).body )
+				var flight = JSONDeserialize( variables.client.get( variables.baseUrl & "/flights/LAX-JFK" ).body )
+				var encoded = JSONDeserialize( variables.client.get( variables.baseUrl & "/files/my%20report.json" ).body )
+				assertAll( [
+					() => expect( numeric.route ).toBe( "numeric" ),
+					() => expect( named.route ).toBe( "name" ),
+					() => expect( flight ).toBe( { from: "LAX", to: "JFK" } ),
+					() => expect( encoded.name ).withContext( "matched against the decoded path" ).toBe( "my report" ),
+					() => expect( variables.client.get( variables.baseUrl & "/assets/img/logo.png" ).body ).toInclude( "img/logo.png" )
+				] )
+			} )
+
+		} )
+
+	}
+
+}

@@ -1,0 +1,234 @@
+/**
+ * app.ws( path, handler, { use: [...] } ) — middleware run against the
+ * upgrade request before the WebSocket handshake.
+ */
+class extends="testbox.system.BaseSpec" {
+
+	function beforeAll() {
+		variables.testPort = 4371
+		variables.baseUrl = "http://localhost:#variables.testPort#"
+		variables.http = new "../helpers/HttpClient"()
+		variables.crlf = char( 13 ) & char( 10 )
+		variables.middlewareRuns = createObject( "java", "java.util.concurrent.atomic.AtomicInteger" ).init()
+
+		var app = new "../../models/BoxExpress"()
+		app.set( "log", false )
+		var sessionMiddleware = new "../../models/middleware/Session"().session()
+		app.use( sessionMiddleware )
+		app.get( "/login/:user", ( req, res ) => {
+			req.session.user = req.params.user
+			res.send( "ok" )
+		} )
+
+		var requireUser = ( req, res, next ) => {
+			variables.middlewareRuns.incrementAndGet()
+			if ( !len( req.session.user ?: "" ) ) {
+				return res.status( 401 ).send( "log in first" )
+			}
+			req.greeting = "hello " & req.session.user
+			next()
+		}
+
+		app.ws( "/private", ( connection, req ) => {
+			connection.onMessage( ( text ) => connection.send( req.greeting & " | " & connection.req.session.user & " | " & req.query.room & " | " & text ) )
+		}, { use: [ sessionMiddleware, requireUser ] } )
+
+		app.ws( "/single", ( connection, req ) => {
+			connection.onMessage( ( text ) => connection.send( "tagged:" & req.tag ) )
+		}, { use: ( req, res, next ) => {
+			req.tag = "one"
+			next()
+		} } )
+
+		app.ws( "/open", ( connection ) => {
+			connection.onMessage( ( text ) => connection.send( "open:" & structKeyExists( connection, "req" ) ) )
+		} )
+
+		app.ws( "/throws", ( connection ) => {}, { use: ( req, res, next ) => {
+			throw( "secret internal detail" )
+		} } )
+
+		app.ws( "/next-error", ( connection ) => {}, { use: [
+			( req, res, next ) => next( "denied" ),
+			( err, req, res, next ) => res.status( 403 ).send( "handled by error middleware" )
+		] } )
+
+		app.ws( "/silent", ( connection ) => {}, { use: ( req, res, next ) => {
+		} } )
+
+		app.ws( "/new-session", ( connection, req ) => {
+			connection.onMessage( ( text ) => connection.send( "sid:" & req.sessionID ) )
+		}, { use: [ sessionMiddleware, ( req, res, next ) => {
+			req.session.viaSocket = true
+			next()
+		} ] } )
+
+		variables.app = app
+		app.listen( port = variables.testPort, options = { block: false } )
+		sleep( 300 )
+	}
+
+	function afterAll() {
+		variables.app.close()
+	}
+
+	/**
+	 * A raw upgrade request. { status, headers, body } for whatever comes
+	 * back before the server closes or goes quiet.
+	 */
+	private function _upgrade( path, extraHeaders = {} ) {
+		var sock = createObject( "java", "java.net.Socket" ).init( "127.0.0.1", variables.testPort )
+		sock.setSoTimeout( 1500 )
+		var handshake = "GET #path# HTTP/1.1" & variables.crlf & "Host: localhost:#variables.testPort#" & variables.crlf
+			& "Upgrade: websocket" & variables.crlf & "Connection: Upgrade" & variables.crlf
+			& "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==" & variables.crlf & "Sec-WebSocket-Version: 13" & variables.crlf
+		for ( var headerName in extraHeaders ) {
+			handshake &= headerName & ": " & extraHeaders[ headerName ] & variables.crlf
+		}
+		sock.getOutputStream().write( ( handshake & variables.crlf ).getBytes( "ISO-8859-1" ) )
+		sock.getOutputStream().flush()
+
+		var collected = createObject( "java", "java.io.ByteArrayOutputStream" ).init()
+		try {
+			while ( true ) {
+				var byte = sock.getInputStream().read()
+				if ( byte == -1 ) {
+					break
+				}
+				collected.write( byte )
+				// A refusal has a short body after the blank line; a 101 has none.
+				if ( collected.toString( "ISO-8859-1" ).find( variables.crlf & variables.crlf ) && collected.toString( "ISO-8859-1" ).find( " 101 " ) ) {
+					break
+				}
+			}
+		} catch ( any e ) {
+		}
+		sock.close()
+		var text = collected.toString( "ISO-8859-1" )
+		var head = text.listToArray( variables.crlf & variables.crlf, false, true )
+		return {
+			status: val( listGetAt( listFirst( text, variables.crlf ), 2, " " ) ),
+			headers: head.len() ? head[ 1 ] : "",
+			body: head.len() > 1 ? head[ 2 ] : ""
+		}
+	}
+
+	private function _loginCookie( user ) {
+		return listFirst( variables.http.get( variables.baseUrl & "/login/" & user ).setCookie, ";" )
+	}
+
+	private function _ask( path, extraHeaders = {} ) {
+		var client = new "../helpers/WebSocketTestClient"()
+		var status = client.connect( "localhost", variables.testPort, path, extraHeaders )
+		var reply = ""
+		if ( status.find( " 101 " ) ) {
+			client.sendText( "ping" )
+			reply = client.readTextFrameWithTimeout( 2000 )
+		}
+		client.close()
+		return { status: status, reply: reply }
+	}
+
+	function run() {
+
+		describe( "WebSocket upgrade middleware", function() {
+
+			it( "accepts the upgrade when every middleware calls next(), and hands the handler the request", function() {
+				var result = _ask( "/private?room=lobby", { "Cookie": _loginCookie( "ada" ) } )
+				assertAll( [
+					() => expect( result.status ).toInclude( "101" ),
+					() => expect( result.reply ).withContext( "req from middleware, connection.req, the query string" ).toBe( "hello ada | ada | lobby | ping" )
+				] )
+			} )
+
+			it( "refuses the upgrade with the middleware's own response", function() {
+				var before = variables.middlewareRuns.get()
+				var refused = _upgrade( "/private" )
+				assertAll( [
+					() => expect( refused.status ).toBe( 401 ),
+					() => expect( refused.body ).toBe( "log in first" ),
+					() => expect( variables.middlewareRuns.get() ).toBe( before + 1 )
+				] )
+			} )
+
+			it( "keeps each connection's request separate", function() {
+				var ada = _ask( "/private?room=a", { "Cookie": _loginCookie( "ada" ) } )
+				var grace = _ask( "/private?room=b", { "Cookie": _loginCookie( "grace" ) } )
+				assertAll( [
+					() => expect( ada.reply ).toBe( "hello ada | ada | a | ping" ),
+					() => expect( grace.reply ).toBe( "hello grace | grace | b | ping" )
+				] )
+			} )
+
+			it( "takes a single middleware function as well as an array", function() {
+				expect( _ask( "/single" ).reply ).toBe( "tagged:one" )
+			} )
+
+			it( "leaves a route registered without `use` exactly as it was", function() {
+				var result = _ask( "/open" )
+				assertAll( [
+					() => expect( result.status ).toInclude( "101" ),
+					() => expect( result.reply ).withContext( "no req on the connection" ).toBe( "open:false" )
+				] )
+			} )
+
+			it( "refuses with a bare 500 when a middleware throws, without leaking the message", function() {
+				var refused = _upgrade( "/throws" )
+				assertAll( [
+					() => expect( refused.status ).toBe( 500 ),
+					() => expect( refused.headers & refused.body ).notToInclude( "secret internal detail" )
+				] )
+			} )
+
+			it( "lets error-handling middleware answer a next( err )", function() {
+				var refused = _upgrade( "/next-error" )
+				assertAll( [
+					() => expect( refused.status ).toBe( 403 ),
+					() => expect( refused.body ).toBe( "handled by error middleware" )
+				] )
+			} )
+
+			it( "refuses when a middleware neither calls next() nor responds, instead of hanging", function() {
+				expect( _upgrade( "/silent" ).status ).toBe( 500 )
+			} )
+
+			it( "still checks the Origin before running any middleware", function() {
+				var before = variables.middlewareRuns.get()
+				var refused = _upgrade( "/private", { "Origin": "https://evil.example", "Cookie": _loginCookie( "ada" ) } )
+				assertAll( [
+					() => expect( refused.status ).toBe( 403 ),
+					() => expect( variables.middlewareRuns.get() ).withContext( "middleware never ran" ).toBe( before )
+				] )
+			} )
+
+			it( "sends a session cookie set during the upgrade on the 101 response, and saves the session", function() {
+				var accepted = _upgrade( "/new-session" )
+				var cookieLine = ""
+				for ( var line in accepted.headers.listToArray( variables.crlf ) ) {
+					if ( line.findNoCase( "Set-Cookie: connect.sid=" ) == 1 ) {
+						cookieLine = line
+					}
+				}
+				var sessionCookie = listFirst( listRest( cookieLine, " " ), ";" )
+				// The same cookie on a later upgrade finds the saved session.
+				var again = _ask( "/new-session", { "Cookie": sessionCookie } )
+				assertAll( [
+					() => expect( accepted.status ).toBe( 101 ),
+					() => expect( cookieLine ).notToBe( "" ),
+					() => expect( again.reply ).toBe( "sid:" & listLast( sessionCookie, "=" ) )
+				] )
+			} )
+
+			it( "rejects a `use` that isn't a function or an array of them", function() {
+				var app = new "../../models/BoxExpress"()
+				assertAll( [
+					() => expect( () => app.ws( "/x", ( connection ) => {}, { use: "session" } ) ).toThrow( "BoxExpress.InvalidArgument" ),
+					() => expect( () => app.ws( "/x", ( connection ) => {}, { use: [ () => {}, 42 ] } ) ).toThrow( "BoxExpress.InvalidArgument" )
+				] )
+			} )
+
+		} )
+
+	}
+
+}

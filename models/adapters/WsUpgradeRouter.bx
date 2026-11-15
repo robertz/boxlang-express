@@ -10,7 +10,13 @@
  */
 class {
 
-	function init( wsHandshakeHandler, wsRoutePaths, httpHandler, routeOrigins = {}, settings = {} ) {
+	function init( wsHandshakeHandler, wsRoutePaths, httpHandler, routeOrigins = {}, settings = {}, routeMiddleware = {}, middlewareHandler = "" ) {
+		// Routes registered with { use: [...] }: their upgrade requests go
+		// to middlewareHandler (a WsUpgradeMiddleware) on a virtual thread
+		// instead of straight to the handshake.
+		variables.routeMiddleware = routeMiddleware
+		variables.middlewareHandler = middlewareHandler
+		variables.middlewareExecutor = createObject( "java", "java.util.concurrent.Executors" ).newVirtualThreadPerTaskExecutor()
 		variables.wsHandshakeHandler = wsHandshakeHandler
 		variables.wsRoutePaths = wsRoutePaths
 		variables.httpHandler = httpHandler
@@ -31,6 +37,10 @@ class {
 			if ( !_originAllowed( exchange, variables.routeOrigins[ exchange.getRequestPath() ] ?: "same-origin" ) ) {
 				exchange.setStatusCode( 403 )
 				exchange.endExchange()
+				return
+			}
+			if ( structKeyExists( variables.routeMiddleware, exchange.getRequestPath() ) ) {
+				exchange.dispatch( variables.middlewareExecutor, variables.middlewareHandler )
 				return
 			}
 			variables.wsHandshakeHandler.handleRequest( exchange )

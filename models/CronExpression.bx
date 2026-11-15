@@ -1,0 +1,175 @@
+/**
+ * A cron schedule for app.schedule( "0 2 * * *", ... ): parses the
+ * expression once and answers "when does this next fire after T?".
+ *
+ * Five fields — minute hour day-of-month month day-of-week — or six with
+ * a leading seconds field. Each field takes *, a value, a range (1-5), a
+ * list (1,15,30) and a step (every 15 from the start, or 10-40/5). Months
+ * and weekdays
+ * also take three-letter names (JAN, MON); weekday 0 and 7 are both
+ * Sunday. @hourly, @daily, @weekly, @monthly and @yearly are shorthands.
+ *
+ * When day-of-month and day-of-week are both restricted, a day matching
+ * either one fires — the standard cron rule.
+ */
+class {
+
+	static {
+		MACROS = {
+			"@yearly": "0 0 1 1 *", "@annually": "0 0 1 1 *", "@monthly": "0 0 1 * *",
+			"@weekly": "0 0 * * 0", "@daily": "0 0 * * *", "@midnight": "0 0 * * *", "@hourly": "0 * * * *"
+		}
+		MONTH_NAMES = { jan: 1, feb: 2, mar: 3, apr: 4, may: 5, jun: 6, jul: 7, aug: 8, sep: 9, oct: 10, nov: 11, dec: 12 }
+		DAY_NAMES = { sun: 0, mon: 1, tue: 2, wed: 3, thu: 4, fri: 5, sat: 6 }
+	}
+
+	/**
+	 * timezone is a zone id ("America/New_York", "UTC"); "" means the
+	 * server's own.
+	 */
+	function init( required string expression, string timezone = "" ) {
+		variables.expression = trim( expression )
+		var zoneClass = createObject( "java", "java.time.ZoneId" )
+		try {
+			variables.zone = len( timezone ) ? zoneClass.of( timezone ) : zoneClass.systemDefault()
+		} catch ( any e ) {
+			throw( type = "BoxExpress.InvalidArgument", message = "Unknown timezone ""#timezone#"" for cron schedule ""#variables.expression#""" )
+		}
+
+		var normalized = static.MACROS[ lCase( variables.expression ) ] ?: variables.expression
+		var fields = normalized.reReplace( "\s+", " ", "all" ).listToArray( " " )
+		if ( fields.len() == 5 ) {
+			fields.prepend( "0" )
+		}
+		if ( fields.len() != 6 ) {
+			_invalid( "expected 5 fields (minute hour day-of-month month day-of-week), or 6 with seconds first" )
+		}
+
+		variables.seconds = _parseField( fields[ 1 ], 0, 59, {}, "seconds" )
+		variables.minutes = _parseField( fields[ 2 ], 0, 59, {}, "minute" )
+		variables.hours = _parseField( fields[ 3 ], 0, 23, {}, "hour" )
+		variables.daysOfMonth = _parseField( fields[ 4 ], 1, 31, {}, "day-of-month" )
+		variables.months = _parseField( fields[ 5 ], 1, 12, static.MONTH_NAMES, "month" )
+		// 7 is accepted as Sunday, then folded onto 0.
+		variables.daysOfWeek = _parseField( fields[ 6 ], 0, 7, static.DAY_NAMES, "day-of-week" )
+		if ( structKeyExists( variables.daysOfWeek, "7" ) ) {
+			variables.daysOfWeek[ "0" ] = true
+			structDelete( variables.daysOfWeek, "7" )
+		}
+		variables.domRestricted = left( fields[ 4 ], 1 ) != "*"
+		variables.dowRestricted = left( fields[ 6 ], 1 ) != "*"
+
+		// Fails here, at schedule() time, for a date that never comes
+		// (30 February) rather than silently never firing.
+		next( createObject( "java", "java.time.ZonedDateTime" ).now( variables.zone ) )
+		return this
+	}
+
+	function getExpression() {
+		return variables.expression
+	}
+
+	/**
+	 * The first fire time strictly after `from` (a java.time.ZonedDateTime),
+	 * as a ZonedDateTime in this schedule's timezone.
+	 */
+	function next( from ) {
+		var candidate = from.withZoneSameInstant( variables.zone ).withNano( 0 ).plusSeconds( 1 )
+		var lastYear = candidate.getYear() + 8
+
+		while ( candidate.getYear() <= lastYear ) {
+			if ( !structKeyExists( variables.months, candidate.getMonthValue() ) ) {
+				candidate = candidate.withDayOfMonth( 1 ).withHour( 0 ).withMinute( 0 ).withSecond( 0 ).plusMonths( 1 )
+			} else if ( !_dayMatches( candidate ) ) {
+				candidate = candidate.withHour( 0 ).withMinute( 0 ).withSecond( 0 ).plusDays( 1 )
+			} else if ( !structKeyExists( variables.hours, candidate.getHour() ) ) {
+				candidate = candidate.withMinute( 0 ).withSecond( 0 ).plusHours( 1 )
+			} else if ( !structKeyExists( variables.minutes, candidate.getMinute() ) ) {
+				candidate = candidate.withSecond( 0 ).plusMinutes( 1 )
+			} else if ( !structKeyExists( variables.seconds, candidate.getSecond() ) ) {
+				candidate = candidate.plusSeconds( 1 )
+			} else {
+				return candidate
+			}
+		}
+		_invalid( "it never fires" )
+	}
+
+	/**
+	 * Milliseconds between the next two fire times after `from` — the
+	 * schedule's cadence, as near as one number can say it.
+	 */
+	function intervalMsAfter( from ) {
+		var first = next( from )
+		return next( first ).toInstant().toEpochMilli() - first.toInstant().toEpochMilli()
+	}
+
+	private function _dayMatches( candidate ) {
+		var domMatches = structKeyExists( variables.daysOfMonth, candidate.getDayOfMonth() )
+		// java.time numbers Monday 1 .. Sunday 7; cron numbers Sunday 0.
+		var dowMatches = structKeyExists( variables.daysOfWeek, candidate.getDayOfWeek().getValue() % 7 )
+		if ( variables.domRestricted && variables.dowRestricted ) {
+			return domMatches || dowMatches
+		}
+		return domMatches && dowMatches
+	}
+
+	/**
+	 * One field -> a struct whose keys are the values it allows.
+	 */
+	private function _parseField( field, lowest, highest, names, label ) {
+		var allowed = {}
+		for ( var part in field.listToArray( "," ) ) {
+			var step = 1
+			var range = part
+			if ( part.find( "/" ) ) {
+				if ( part.listLen( "/" ) != 2 ) {
+					_invalid( "bad step in the #label# field: ""#part#""" )
+				}
+				range = part.listFirst( "/" )
+				step = part.listLast( "/" )
+				if ( !reFind( "^[0-9]+$", step ) || step < 1 ) {
+					_invalid( "bad step in the #label# field: ""#part#""" )
+				}
+			}
+
+			var first = lowest
+			var last = highest
+			if ( range != "*" ) {
+				var bounds = range.listToArray( "-" )
+				if ( bounds.len() < 1 || bounds.len() > 2 || range.left( 1 ) == "-" || range.right( 1 ) == "-" ) {
+					_invalid( "bad value in the #label# field: ""#part#""" )
+				}
+				first = _value( bounds[ 1 ], names, label )
+				// "5/15" means "from 5, every 15"; a bare "5" means only 5.
+				last = bounds.len() == 2 ? _value( bounds[ 2 ], names, label ) : ( part.find( "/" ) ? highest : first )
+			}
+			if ( first < lowest || last > highest || first > last ) {
+				_invalid( "the #label# field takes #lowest#-#highest#, got ""#part#""" )
+			}
+			for ( var value = first; value <= last; value += step ) {
+				allowed[ toString( int( value ) ) ] = true
+			}
+		}
+		if ( structIsEmpty( allowed ) ) {
+			_invalid( "the #label# field is empty" )
+		}
+		return allowed
+	}
+
+	private function _value( token, names, label ) {
+		var named = names[ lCase( token ) ] ?: ""
+		if ( len( named ) ) {
+			return named
+		}
+		if ( !reFind( "^[0-9]+$", token ) ) {
+			_invalid( "bad value in the #label# field: ""#token#""" )
+		}
+		return int( token )
+	}
+
+	private function _invalid( reason ) {
+		throw( type = "BoxExpress.InvalidArgument", message = "Invalid cron schedule ""#variables.expression#"": #reason#" )
+	}
+
+}

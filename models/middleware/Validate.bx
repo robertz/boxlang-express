@@ -1,0 +1,355 @@
+/**
+ * Request validation middleware: checks req.body, req.query and
+ * req.params against a schema before the handler runs, converts values to
+ * the declared types, fills in defaults, and answers 400 with a list of
+ * what's wrong.
+ *
+ *   app.post( "/users", boxExpressJSON(), boxExpressValidate( {
+ *       body: {
+ *           email: { type: "email", required: true },
+ *           age: { type: "integer", min: 18 },
+ *           role: { type: "string", oneOf: [ "admin", "member" ], default: "member" }
+ *       },
+ *       query: { notify: { type: "boolean", default: false } }
+ *   } ), ( req, res ) => { ... } )
+ *
+ * Helper methods are public (underscore-prefixed) rather than private:
+ * the middleware closure runs outside this class — see ARCHITECTURE.md.
+ */
+class {
+
+	static {
+		TYPES = "any,string,integer,number,boolean,email,url,uuid,date,array,struct"
+		RULES = "type,required,default,min,max,minLength,maxLength,pattern,oneOf,trim,items,minItems,maxItems,fields,validate,message"
+		SECTIONS = "body,query,params"
+	}
+
+	/**
+	 * options:
+	 *   status   response status for a failed validation (default 400)
+	 *   unknown  what to do with fields the schema doesn't name: "allow"
+	 *            (default), "strip" (remove them) or "reject" (an error)
+	 *   onError  ( errors, req, res, next ) => {...} to answer a failure
+	 *            yourself instead of the default JSON response
+	 */
+	function validate( required struct schema, struct options = {} ) {
+		for ( var section in schema ) {
+			if ( !listFindNoCase( static.SECTIONS, section ) ) {
+				_schemaError( "unknown section ""#section#"" — a schema has body, query and params" )
+			}
+			_checkFields( schema[ section ], section )
+		}
+		var status = options.status ?: 400
+		var unknown = lCase( options.unknown ?: "allow" )
+		if ( !listFind( "allow,strip,reject", unknown ) ) {
+			_schemaError( "options.unknown must be ""allow"", ""strip"" or ""reject""" )
+		}
+		var onError = options.onError ?: ""
+		var self = this
+
+		return function( req, res, next ) {
+			var errors = []
+			var valid = {}
+			for ( var section in [ "params", "query", "body" ] ) {
+				if ( !structKeyExists( schema, section ) ) {
+					continue
+				}
+				var source = req[ section ]
+				if ( !isStruct( source ) ) {
+					// A text or raw body, or a JSON array, where fields were expected.
+					errors.append( { "in": section, field: "", message: "must be an object" } )
+					continue
+				}
+				valid[ section ] = self._validateFields( source, schema[ section ], section, "", unknown, errors, req )
+			}
+
+			if ( errors.len() ) {
+				if ( !isSimpleValue( onError ) ) {
+					return onError( errors, req, res, next )
+				}
+				return res.status( status ).json( { error: true, message: "Validation failed", errors: errors } )
+			}
+			// Only the fields the schema names, converted — safe to hand
+			// straight to a model without a client adding fields of its own.
+			req.valid = valid
+			next()
+		}
+	}
+
+	/**
+	 * Validates `source` in place against `fields`; returns a struct of just
+	 * the declared fields.
+	 */
+	function _validateFields( source, fields, section, prefix, unknown, errors, req ) {
+		var clean = {}
+		for ( var name in fields ) {
+			var rule = fields[ name ]
+			var path = prefix & name
+			var present = structKeyExists( source, name ) && !isNull( source[ name ] )
+			var value = present ? source[ name ] : ""
+
+			if ( present && isSimpleValue( value ) ) {
+				if ( rule.trim ?: false ) {
+					value = trim( value )
+				}
+				// "?page=" and an empty form field mean "not given".
+				if ( !len( value ) && ( ( rule.type ?: "any" ) != "string" || ( rule.required ?: false ) ) ) {
+					present = false
+				}
+			}
+
+			if ( !present ) {
+				if ( structKeyExists( rule, "default" ) ) {
+					source[ name ] = rule.default
+					clean[ name ] = rule.default
+				} else if ( rule.required ?: false ) {
+					errors.append( { "in": section, field: path, message: rule.message ?: "is required" } )
+				}
+				continue
+			}
+
+			var result = _validateValue( value, rule, section, path, unknown, errors, req )
+			if ( result.ok ) {
+				source[ name ] = result.value
+				clean[ name ] = result.value
+			}
+		}
+
+		if ( unknown != "allow" ) {
+			for ( var key in source.keyArray() ) {
+				if ( structKeyExists( fields, key ) ) {
+					continue
+				}
+				if ( unknown == "strip" ) {
+					structDelete( source, key )
+				} else {
+					errors.append( { "in": section, field: prefix & key, message: "is not allowed" } )
+				}
+			}
+		}
+		return clean
+	}
+
+	/**
+	 * { ok, value } — value converted to the rule's type. Appends to errors
+	 * when ok is false.
+	 */
+	function _validateValue( value, rule, section, path, unknown, errors, req ) {
+		var type = lCase( rule.type ?: "any" )
+		var converted = _convert( value, type )
+		if ( !converted.ok ) {
+			errors.append( { "in": section, field: path, message: rule.message ?: converted.message } )
+			return { ok: false }
+		}
+		var typed = converted.value
+		var problem = ""
+
+		if ( type == "integer" || type == "number" ) {
+			if ( structKeyExists( rule, "min" ) && typed < rule.min ) {
+				problem = "must be at least #rule.min#"
+			} else if ( structKeyExists( rule, "max" ) && typed > rule.max ) {
+				problem = "must be at most #rule.max#"
+			}
+		} else if ( isSimpleValue( typed ) && type != "boolean" ) {
+			if ( structKeyExists( rule, "minLength" ) && len( typed ) < rule.minLength ) {
+				problem = "must be at least #rule.minLength# characters"
+			} else if ( structKeyExists( rule, "maxLength" ) && len( typed ) > rule.maxLength ) {
+				problem = "must be at most #rule.maxLength# characters"
+			} else if ( structKeyExists( rule, "pattern" ) && !reFind( rule.pattern, typed ) ) {
+				problem = "is not in the expected format"
+			}
+		} else if ( type == "array" ) {
+			if ( structKeyExists( rule, "minItems" ) && typed.len() < rule.minItems ) {
+				problem = "must have at least #rule.minItems# items"
+			} else if ( structKeyExists( rule, "maxItems" ) && typed.len() > rule.maxItems ) {
+				problem = "must have at most #rule.maxItems# items"
+			}
+		}
+
+		if ( !len( problem ) && structKeyExists( rule, "oneOf" ) && isSimpleValue( typed ) ) {
+			var allowed = false
+			for ( var option in rule.oneOf ) {
+				// compare(): BoxLang's == would treat "1" and "1.0", or
+				// "Admin" and "admin", as the same choice.
+				if ( compare( toString( option ), toString( typed ) ) == 0 ) {
+					allowed = true
+					break
+				}
+			}
+			if ( !allowed ) {
+				problem = "must be one of: " & rule.oneOf.toList( ", " )
+			}
+		}
+
+		if ( len( problem ) ) {
+			errors.append( { "in": section, field: path, message: rule.message ?: problem } )
+			return { ok: false }
+		}
+
+		var before = errors.len()
+		if ( type == "array" && structKeyExists( rule, "items" ) ) {
+			for ( var i = 1; i <= typed.len(); i++ ) {
+				if ( isNull( typed[ i ] ) ) {
+					errors.append( { "in": section, field: path & "[" & i & "]", message: "is required" } )
+					continue
+				}
+				var item = _validateValue( typed[ i ], rule.items, section, path & "[" & i & "]", unknown, errors, req )
+				if ( item.ok ) {
+					typed[ i ] = item.value
+				}
+			}
+		} else if ( type == "struct" && structKeyExists( rule, "fields" ) ) {
+			typed = _validateFields( typed, rule.fields, section, path & ".", unknown, errors, req )
+		}
+		if ( errors.len() > before ) {
+			return { ok: false }
+		}
+
+		if ( structKeyExists( rule, "validate" ) ) {
+			var check = rule.validate
+			var verdict = check( typed, req )
+			if ( isNull( verdict ) ) {
+				verdict = true
+			}
+			if ( !isBoolean( verdict ) || !verdict ) {
+				var customMessage = ( isSimpleValue( verdict ) && !isBoolean( verdict ) ) ? verdict : "is not valid"
+				errors.append( { "in": section, field: path, message: rule.message ?: customMessage } )
+				return { ok: false }
+			}
+		}
+
+		return { ok: true, value: typed }
+	}
+
+	/**
+	 * { ok, value, message } — a query string and a form body are all
+	 * strings, so "42" becomes 42 for an integer field and "true" becomes
+	 * true for a boolean one.
+	 */
+	function _convert( value, type ) {
+		switch ( type ) {
+			case "any":
+				return { ok: true, value: value }
+			case "string":
+				return isSimpleValue( value ) ? { ok: true, value: toString( value ) } : { ok: false, message: "must be a string" }
+			case "integer":
+				if ( isSimpleValue( value ) && reFind( "^-?[0-9]{1,18}$", toString( value ) ) ) {
+					return { ok: true, value: javacast( "long", toString( value ) ) }
+				}
+				return { ok: false, message: "must be a whole number" }
+			case "number":
+				if ( isSimpleValue( value ) && reFind( "^-?([0-9]+\.?[0-9]*|\.[0-9]+)([eE][-+]?[0-9]+)?$", toString( value ) ) ) {
+					return { ok: true, value: javacast( "double", toString( value ) ) }
+				}
+				return { ok: false, message: "must be a number" }
+			case "boolean":
+				if ( isSimpleValue( value ) ) {
+					var text = lCase( toString( value ) )
+					if ( listFind( "true,1,yes,on", text ) ) {
+						return { ok: true, value: true }
+					}
+					if ( listFind( "false,0,no,off", text ) ) {
+						return { ok: true, value: false }
+					}
+				}
+				return { ok: false, message: "must be true or false" }
+			case "email":
+				if ( isSimpleValue( value ) && len( value ) <= 254 && reFind( "^[^@\s]+@[^@\s.]+(\.[^@\s.]+)+$", toString( value ) ) ) {
+					return { ok: true, value: toString( value ) }
+				}
+				return { ok: false, message: "must be a valid email address" }
+			case "url":
+				if ( isSimpleValue( value ) && _isHttpUrl( toString( value ) ) ) {
+					return { ok: true, value: toString( value ) }
+				}
+				return { ok: false, message: "must be an http or https URL" }
+			case "uuid":
+				// The standard 8-4-4-4-12 form, and the 8-4-4-16 form
+				// BoxLang's own createUUID() produces.
+				if ( isSimpleValue( value ) && reFind( "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-([0-9a-fA-F]{4}-[0-9a-fA-F]{12}|[0-9a-fA-F]{16})$", toString( value ) ) ) {
+					return { ok: true, value: toString( value ) }
+				}
+				return { ok: false, message: "must be a UUID" }
+			case "date":
+				if ( isSimpleValue( value ) && _isIsoDate( toString( value ) ) ) {
+					return { ok: true, value: toString( value ) }
+				}
+				return { ok: false, message: "must be an ISO 8601 date (2026-11-15 or 2026-11-15T09:30:00Z)" }
+			case "array":
+				return isArray( value ) ? { ok: true, value: value } : { ok: false, message: "must be an array" }
+			case "struct":
+				return ( isStruct( value ) && !isArray( value ) ) ? { ok: true, value: value } : { ok: false, message: "must be an object" }
+		}
+		return { ok: false, message: "has an unsupported type" }
+	}
+
+	function _isHttpUrl( text ) {
+		try {
+			var uri = createObject( "java", "java.net.URI" ).init( text )
+			var scheme = lCase( uri.getScheme() ?: "" )
+			return ( scheme == "http" || scheme == "https" ) && len( uri.getHost() ?: "" ) > 0
+		} catch ( any e ) {
+			return false
+		}
+	}
+
+	function _isIsoDate( text ) {
+		for ( var parser in [ "java.time.LocalDate", "java.time.OffsetDateTime", "java.time.LocalDateTime" ] ) {
+			try {
+				createObject( "java", parser ).parse( text )
+				return true
+			} catch ( any e ) {
+			}
+		}
+		return false
+	}
+
+	/**
+	 * Catches a misspelled rule or type when the route is registered,
+	 * rather than having it silently validate nothing.
+	 */
+	function _checkFields( fields, where ) {
+		if ( !isStruct( fields ) ) {
+			_schemaError( "#where# must be a struct of field rules" )
+		}
+		for ( var name in fields ) {
+			var rule = fields[ name ]
+			var label = where & "." & name
+			if ( !isStruct( rule ) ) {
+				_schemaError( "#label# must be a struct of rules, like { type: ""string"" }" )
+			}
+			for ( var key in rule ) {
+				if ( !listFindNoCase( static.RULES, key ) ) {
+					_schemaError( "#label# has an unknown rule ""#key#""" )
+				}
+			}
+			if ( !listFindNoCase( static.TYPES, rule.type ?: "any" ) ) {
+				_schemaError( "#label# has an unknown type ""#rule.type#"" — use one of #static.TYPES.replace( ",", ", ", "all" )#" )
+			}
+			if ( structKeyExists( rule, "validate" ) && !( isCustomFunction( rule.validate ) || isClosure( rule.validate ) ) ) {
+				_schemaError( "#label#.validate must be a function" )
+			}
+			if ( structKeyExists( rule, "oneOf" ) && !isArray( rule.oneOf ) ) {
+				_schemaError( "#label#.oneOf must be an array" )
+			}
+			if ( structKeyExists( rule, "pattern" ) ) {
+				try {
+					reFind( rule.pattern, "" )
+				} catch ( any e ) {
+					_schemaError( "#label#.pattern is not a valid regular expression" )
+				}
+			}
+			if ( structKeyExists( rule, "fields" ) ) {
+				_checkFields( rule.fields, label )
+			}
+			if ( structKeyExists( rule, "items" ) ) {
+				_checkFields( { item: rule.items }, label & "[]" )
+			}
+		}
+	}
+
+	function _schemaError( reason ) {
+		throw( type = "BoxExpress.InvalidArgument", message = "boxExpressValidate: " & reason )
+	}
+
+}

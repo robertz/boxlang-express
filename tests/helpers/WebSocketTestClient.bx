@@ -102,6 +102,14 @@ class {
 	 * own frames actually send, not the full spec's 64-bit extended form.
 	 */
 	function readTextFrame() {
+		return createObject( "java", "java.lang.String" ).init( readFrame().bytes, "UTF-8" )
+	}
+
+	/**
+	 * The next data frame as { opcode, bytes } — opcode 1 is text, 2 is
+	 * binary, 8 is close.
+	 */
+	function readFrame() {
 		var inStream = variables.socket.getInputStream()
 		// Ping/pong frames (opcodes 9/10) are keepalive noise a real WebSocket
 		// client hides from the application, so skip them here too.
@@ -125,7 +133,7 @@ class {
 			}
 			var opcode = bitAnd( byte1, 15 )
 			if ( opcode != 9 && opcode != 10 ) {
-				return createObject( "java", "java.lang.String" ).init( bodyBytes, "UTF-8" )
+				return { opcode: opcode, bytes: bodyBytes }
 			}
 		}
 	}

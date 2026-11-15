@@ -35,6 +35,10 @@ class extends="testbox.system.BaseSpec" {
 			res.json( { isBinary: isBinary( req.body ), length: req.body.len() } )
 		} )
 
+		variables.app.post( "/validated", boxExpressValidate( { body: { a: { type: "integer", required: true } } } ), ( req, res ) => {
+			res.json( req.valid.body )
+		} )
+
 		variables.app.get( "/session-count", ( req, res ) => {
 			req.session.views = ( req.session.views ?: 0 ) + 1
 			res.json( { views: req.session.views } )
@@ -105,6 +109,13 @@ class extends="testbox.system.BaseSpec" {
 				var body = JSONDeserialize( result.body )
 				expect( body.isBinary ).toBeTrue()
 				expect( body.length ).toBe( 5 )
+			} )
+
+			it( "boxExpressValidate() checks and converts the request body", function() {
+				var good = variables.client.post( variables.baseUrl & "/validated", '{"a":"5"}', "application/json" )
+				var bad = variables.client.post( variables.baseUrl & "/validated", '{"a":"five"}', "application/json" )
+				expect( JSONDeserialize( good.body ).a ).toBe( 5 )
+				expect( bad.statusCode ).toBe( 400 )
 			} )
 
 			it( "boxExpressStatic() serves files", function() {

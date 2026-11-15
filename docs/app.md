@@ -18,7 +18,7 @@
 - `app.ws(path, callback)` — WebSocket routes; see
   [WebSockets](websockets.md).
 - `app.schedule(intervalMs, callback, options)` / `app.getScheduledJobs()`
-  — fixed-interval recurring jobs; see [Scheduler](scheduler.md).
+  — recurring jobs, by interval or cron schedule; see [Scheduler](scheduler.md).
 - `app.getClusterManager()` — cross-process peer discovery, manager
   election, and the STOMP relay mesh; see [Cluster
   support](cluster.md).
@@ -59,6 +59,10 @@ TLS itself) will usually queue connections before this limit is ever
 reached — but it's there for a direct-exposure deployment or a deliberately
 higher ceiling.
 
+(`app.set( "log", "access" )` or `"json"` logs each request on
+completion instead, with its status and duration — see
+[Observability](observability.md#access-log).)
+
 Every request gets a line on stdout as soon as it's received —
 `[2026-08-10 10:45:41] GET /users/42 127.0.0.1`. Turn it off with
 `app.set("log", false)` — useful for a high-throughput deployment that
@@ -69,7 +73,7 @@ lines or send escape sequences to a terminal.
 ## More on the app object
 
 - [Testing your app without a server](testing.md) — `app.inject()`
-- [Observability](observability.md) — request IDs and `app.metrics()`
+- [Observability](observability.md) — request IDs, `app.metrics()` and the access log
 - [Timeouts and size limits](limits.md) — `requestTimeoutMs`, `maxBodySize`, header and keep-alive timeouts
 - [Health checks and graceful shutdown](health-and-shutdown.md) — `app.health()` / `app.shutdown()`
 - [Auto-restart on file change](auto-restart.md) — `app.set("reloadOnChange", true)`

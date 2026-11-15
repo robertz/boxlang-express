@@ -34,7 +34,7 @@ built-in middleware factories — `boxExpressJSON()`, `boxExpressUrlencoded()`,
 `boxExpressText()`, `boxExpressRaw()`,
 `boxExpressStatic()`, `boxExpressUpload()`, `boxExpressSession()`,
 `boxExpressHelmet()`, `boxExpressCors()`, `boxExpressRateLimit()`,
-`boxExpressCsrf()`, `boxExpressStomp()` (see
+`boxExpressCsrf()`, `boxExpressValidate()`, `boxExpressStomp()` (see
 [Middleware](docs/middleware.md)) — and
 `boxExpressRouter()`, wrapping `new
 bxModules.boxexpress.models.Router()` and mirroring Express's own
@@ -99,7 +99,7 @@ Core:
 - [Router](docs/routing.md) — mountable sub-apps, route params, chainable routes
 - [Request](docs/request.md) — including content negotiation (`req.accepts()`, `req.is()`)
 - [Response](docs/response.md) — header helpers, `res.format()`, cookies and signed cookies, range requests
-- [Views](docs/views.md) — `res.render()`, `app.locals` / `res.locals`
+- [Views](docs/views.md) — `res.render()`, layouts and partials, `app.locals` / `res.locals`
 - [Error handling](docs/error-handling.md) — default `404`/`500` responses
 - [Timeouts and size limits](docs/limits.md) — `requestTimeoutMs`, `maxBodySize`, `req.setTimeout()`
 
@@ -112,19 +112,20 @@ Middleware:
 - [CORS](docs/cors.md) — `boxExpressCors()`
 - [Rate limiting](docs/rate-limiting.md) — `boxExpressRateLimit()`
 - [CSRF protection](docs/csrf.md) — `boxExpressCsrf()`
+- [Request validation](docs/validation.md) — `boxExpressValidate()`
 
 Realtime and background work:
 
 - [Server-Sent Events](docs/sse.md) — `res.sse()`
 - [WebSockets](docs/websockets.md) — `app.ws()`
 - [STOMP](docs/stomp.md) — `boxExpressStomp()`
-- [Scheduler](docs/scheduler.md) — `app.schedule()`
+- [Scheduler](docs/scheduler.md) — `app.schedule()`, intervals and cron schedules
 - [Cluster support](docs/cluster.md) — `app.getClusterManager()`
 
 Operations:
 
 - [Testing without a server](docs/testing.md) — `app.inject()`
-- [Observability](docs/observability.md) — request IDs, `app.metrics()`
+- [Observability](docs/observability.md) — request IDs, `app.metrics()`, access log
 - [Health checks and graceful shutdown](docs/health-and-shutdown.md)
 - [Auto-restart on file change](docs/auto-restart.md)
 

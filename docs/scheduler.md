@@ -1,9 +1,8 @@
 # Scheduler (`app.schedule`)
 
-`app.schedule(intervalMs, callback, options)` registers a fixed-interval
-recurring job — the `setInterval` equivalent, not a cron scheduler
-(deliberately no cron-expression parsing in this pass — see the
-non-goals below). Lazily creates one internal `Scheduler` instance on
+`app.schedule(intervalMs, callback, options)` registers a recurring job
+— every so many milliseconds (the `setInterval` equivalent), or at
+clock times given as a [cron schedule](#cron-schedules). Lazily creates one internal `Scheduler` instance on
 the first call; an app that never calls `schedule()` pays nothing for
 it.
 
@@ -72,11 +71,59 @@ failures, skipped ticks, whether it's running, and its last success.
 Skipped ticks count only overlap skips; a non-manager instance passing
 over a clustered job doesn't count as a skip.
 
-Explicit non-goals for this first version: **no cron-expression
-parsing** (fixed-interval only), **no persistence across restarts**
+Explicit non-goals: **no persistence across restarts**
 (in-memory only, single process — a restart forgets every scheduled
 job), and **no missed-run catch-up** after downtime. See
 [Scheduler.bx](../models/Scheduler.bx).
+
+## Cron schedules
+
+Pass a cron expression instead of an interval to run a job at clock
+times — "every night at 2", "every 15 minutes during office hours":
+
+```js
+app.schedule( "0 2 * * *", () => purgeOldUploads(), { name: "nightly-purge" } )
+app.schedule( "*/15 9-17 * * MON-FRI", () => syncInventory() )
+app.schedule( "0 9 1 * *", () => sendInvoices(), { timezone: "America/New_York" } )
+```
+
+Five fields, in the usual order:
+
+| Field | Values |
+|---|---|
+| minute | `0`-`59` |
+| hour | `0`-`23` |
+| day of month | `1`-`31` |
+| month | `1`-`12` or `JAN`-`DEC` |
+| day of week | `0`-`7` or `SUN`-`SAT` (`0` and `7` are both Sunday) |
+
+Each field takes `*`, a single value, a range (`9-17`), a list
+(`1,15`), and a step (`*/15`, `10-40/5`, or `5/20` for "from 5, every
+20"). A sixth field in front adds seconds (`*/10 * * * * *` is every ten
+seconds). `@hourly`, `@daily`, `@weekly`, `@monthly` and `@yearly` are
+shorthands.
+
+When both day-of-month and day-of-week are restricted, the job runs on a
+day matching *either* — `0 0 1,15 * MON` is the 1st, the 15th, and every
+Monday. That's the standard cron rule, and it surprises people.
+
+Times are in the server's timezone unless `options.timezone` names
+another (`"UTC"`, `"Europe/London"`). On the day the clocks go forward, a
+time in the skipped hour doesn't run that day; on the day they go back, a
+time in the repeated hour runs twice. Schedule in `"UTC"` if either
+matters.
+
+An expression that's malformed, names an unknown timezone, or can never
+fire (`0 0 30 2 *`) throws `BoxExpress.InvalidArgument` from
+`schedule()`. Everything else works as for an interval job: the handle
+and `job.cancel()`, `name`, `allowOverlap`, `clustered`, and `immediate`
+(which runs the job once right away *as well as* on its schedule).
+`getScheduledJobs()` reports a cron job's expression as `cron` and when
+it next fires as `nextRun`.
+
+Still true of cron jobs: nothing is persisted, and a run that was due
+while the process was down is not made up afterwards. A job that must
+not be missed needs a durable queue, not an in-process timer.
 
 To run a job exactly once across a cluster of instances instead of once
 per instance, see `options.clustered` under [Cluster

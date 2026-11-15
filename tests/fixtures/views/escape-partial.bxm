@@ -1,0 +1,1 @@
+<bx:output>#partial( data.which )#</bx:output>

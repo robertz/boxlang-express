@@ -1,0 +1,190 @@
+/**
+ * res.render() layouts (app.set( "view layout" ), data.layout) and
+ * partial().
+ */
+class extends="testbox.system.BaseSpec" {
+
+	function beforeAll() {
+		variables.testPort = 4367
+		variables.baseUrl = "http://localhost:#variables.testPort#"
+		variables.client = new "../helpers/HttpClient"()
+		variables.liveApp = _app( "layouts/main" )
+		variables.liveApp.set( "log", false )
+		variables.liveApp.listen( port = variables.testPort, options = { block: false } )
+		sleep( 300 )
+	}
+
+	function afterAll() {
+		variables.liveApp.close()
+	}
+
+	private function _app( defaultLayout = "" ) {
+		var app = new "../../models/BoxExpress"()
+		app.set( "views", expandPath( "tests/fixtures/views" ) )
+		app.set( "env", "development" )
+		if ( len( defaultLayout ) ) {
+			app.set( "view layout", defaultLayout )
+		}
+		app.locals.siteName = "Site"
+		app.get( "/plain", ( req, res ) => res.render( "greeting", { name: "Ada" } ) )
+		app.get( "/page", ( req, res ) => res.render( "page", { name: "Ada", section: "docs" } ) )
+		app.get( "/page/:layout", ( req, res ) => {
+			var choice = req.params.layout
+			res.render( "page", { name: "Ada", layout: choice == "off" ? false : ( choice == "on" ? true : "layouts/" & choice ) } )
+		} )
+		app.get( "/local-layout", ( req, res ) => {
+			res.locals.layout = "layouts/alt"
+			res.render( "page", { name: "Ada" } )
+		} )
+		app.get( "/partial", ( req, res ) => res.render( "with-partial", { name: "Ada" } ) )
+		app.get( "/escape", ( req, res ) => res.render( "escape-partial", { which: req.query.which } ) )
+		return app
+	}
+
+	private function _flat( text ) {
+		return reReplace( trim( text ), "\s*[\r\n]+\s*", "", "all" )
+	}
+
+	function run() {
+
+		describe( "layouts", function() {
+
+			it( "renders a view on its own when no layout is set", function() {
+				expect( _flat( _app().inject( "/page" ).body ) ).toBe( "<p>Hello, Ada</p>" )
+			} )
+
+			it( "wraps every view in app.set( 'view layout' ), with the view's HTML as data.body", function() {
+				var body = _flat( _app( "layouts/main" ).inject( "/plain" ).body )
+				assertAll( [
+					() => expect( body ).toInclude( "<main><h1>Hello, Ada!</h1></main>" ),
+					() => expect( body ).toInclude( "<title>Untitled</title>" ),
+					() => expect( left( body, 6 ) ).toBe( "<html>" )
+				] )
+			} )
+
+			it( "lets the view set values the layout reads, since the view runs first", function() {
+				expect( _app( "layouts/main" ).inject( "/page" ).body ).toInclude( "<title>Page for Ada</title>" )
+			} )
+
+			it( "gives the layout the same data as the view", function() {
+				expect( _app( "layouts/main" ).inject( "/page" ).body ).toInclude( 'site="Site" active="docs" name="Ada"' )
+			} )
+
+			it( "takes a layout for one render from data.layout, with or without a default", function() {
+				assertAll( [
+					() => expect( _flat( _app().inject( "/page/alt" ).body ) ).toBe( "<alt><p>Hello, Ada</p></alt>" ),
+					() => expect( _flat( _app( "layouts/main" ).inject( "/page/alt" ).body ) ).toBe( "<alt><p>Hello, Ada</p></alt>" ),
+					() => expect( _flat( _app().inject( "/local-layout" ).body ) ).withContext( "res.locals.layout works too" ).toBe( "<alt><p>Hello, Ada</p></alt>" )
+				] )
+			} )
+
+			it( "skips the default layout for layout: false, and keeps it for layout: true", function() {
+				var app = _app( "layouts/main" )
+				assertAll( [
+					() => expect( _flat( app.inject( "/page/off" ).body ) ).toBe( "<p>Hello, Ada</p>" ),
+					() => expect( app.inject( "/page/on" ).body ).toInclude( "<main>" ),
+					() => expect( _flat( _app().inject( "/page/on" ).body ) ).withContext( "true with no default is no layout" ).toBe( "<p>Hello, Ada</p>" )
+				] )
+			} )
+
+			it( "fails with ViewNotFound for a layout that doesn't exist, sending nothing of the view", function() {
+				var res = _app().inject( "/page/missing" )
+				assertAll( [
+					() => expect( res.statusCode ).toBe( 500 ),
+					() => expect( res.json().message ).toInclude( "View not found: layouts/missing" ),
+					() => expect( res.body ).notToInclude( "Hello, Ada" )
+				] )
+			} )
+
+			it( "sends text/html once, with a Content-Length for the whole wrapped page", function() {
+				var res = _app( "layouts/main" ).inject( "/page" )
+				assertAll( [
+					() => expect( res.header( "Content-Type" ) ).toBe( "text/html; charset=utf-8" ),
+					() => expect( res.header( "Content-Length" ) ).toBe( toString( res.bodyBytes.len() ) )
+				] )
+			} )
+
+		} )
+
+		describe( "partial()", function() {
+
+			it( "renders another view inline, seeing the caller's data plus its own", function() {
+				var body = _flat( _app().inject( "/partial" ).body )
+				expect( body ).toInclude( 'before <nav site="Site" active="inner" name="overridden"></nav>' )
+			} )
+
+			it( "does not leak its data back into the view that called it", function() {
+				expect( _flat( _app().inject( "/partial" ).body ) ).toInclude( "after name=Ada active=unset" )
+			} )
+
+			it( "works inside a layout", function() {
+				expect( _app( "layouts/main" ).inject( "/plain" ).body ).toInclude( '<nav site="Site" active="none" name="Ada"></nav>' )
+			} )
+
+			it( "cannot reach a file outside the views directory", function() {
+				var app = _app()
+				var res = app.inject( { url: "/escape", query: { which: "../public/hello.txt" } } )
+				var absolute = app.inject( { url: "/escape", query: { which: expandPath( "tests/fixtures/public/hello.txt" ) } } )
+				assertAll( [
+					() => expect( res.statusCode ).toBe( 500 ),
+					() => expect( res.body ).notToInclude( "static fixture" ),
+					() => expect( absolute.statusCode ).toBe( 500 ),
+					() => expect( absolute.body ).notToInclude( "static fixture" )
+				] )
+			} )
+
+		} )
+
+		describe( "layouts against a live server", function() {
+
+			it( "serves a view wrapped in its layout, partial included", function() {
+				var result = variables.client.get( variables.baseUrl & "/page" )
+				var body = _flat( result.body )
+				assertAll( [
+					() => expect( result.contentType ).toBe( "text/html; charset=utf-8" ),
+					() => expect( body ).toInclude( "<title>Page for Ada</title>" ),
+					() => expect( body ).toInclude( 'active="docs"' ),
+					() => expect( body ).toInclude( "<main><p>Hello, Ada</p></main>" )
+				] )
+			} )
+
+			it( "gives concurrent requests their own render data", function() {
+				var results = createObject( "java", "java.util.concurrent.ConcurrentHashMap" ).init()
+				var threads = []
+				for ( var i = 1; i <= 12; i++ ) {
+					threads.append( _getInThread( i % 2 == 0 ? "/page" : "/partial", "r" & i, results ) )
+				}
+				for ( var t in threads ) {
+					t.join()
+				}
+				var wrong = 0
+				for ( var entry in results.entrySet().toArray() ) {
+					var index = val( entry.getKey().mid( 2, 5 ) )
+					var expected = index % 2 == 0 ? 'active="docs"' : 'active="inner"'
+					if ( !entry.getValue().find( expected ) ) {
+						wrong++
+					}
+				}
+				assertAll( [
+					() => expect( results.size() ).toBe( 12 ),
+					() => expect( wrong ).toBe( 0 )
+				] )
+			} )
+
+		} )
+
+	}
+
+	// A function of its own so each thread's closure gets its own index.
+	private function _getInThread( path, key, results ) {
+		var t = createObject( "java", "java.lang.Thread" ).init( createDynamicProxy(
+			new "../../models/ThreadRunnable"( function() {
+				results.put( key, new "../helpers/HttpClient"().get( variables.baseUrl & path ).body )
+			} ),
+			[ "java.lang.Runnable" ]
+		) )
+		t.start()
+		return t
+	}
+
+}

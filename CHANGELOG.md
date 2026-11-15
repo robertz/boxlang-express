@@ -101,6 +101,73 @@
   with the same secret reads these cookies and vice versa. No `j:` JSON
   cookies. Setting a secret changes nothing for an app that doesn't sign:
   only values starting `s:` are affected.
+- **View layouts and partials** (`models/Response.bx`; see
+  [docs/views.md](docs/views.md)): `app.set( "view layout", name )` wraps
+  every `res.render()` in a layout view, which gets the rendered view as
+  `data.body`. The view runs first, so it can set a title or anything
+  else on `data` for the layout to read. `layout` in the render data (or
+  `res.locals`) picks another layout for one render, or `false` for none.
+  `partial( view, data )` renders another view inline, with the caller's
+  data plus its own. Until now every view had to include its own header
+  and footer. **`layout` is now a reserved key in render data.**
+- **Access log** (`models/HttpBridge.bx`, new `models/AccessLog.bx`; see
+  [docs/observability.md](docs/observability.md)): `app.set( "log",
+  "access" )` or `"json"` logs each request when it's answered, with
+  status, duration and bytes sent; a function receives the entry instead.
+  The default (`true`) is unchanged — a line on arrival — which can't
+  say how a request went, and getting status and duration meant writing
+  logging middleware around `res.getStatusCode()`. The logged path
+  leaves out the query string. An invalid `"log"` value now throws at
+  `app.set()`. The timeout log line no longer prints the query string
+  either.
+- **Binary WebSocket sends** (`models/WebSocketConnection.bx`):
+  `connection.sendBinary( bytes )`, and `connection.send()` sends a
+  binary frame when handed a `byte[]`. A connection could receive binary
+  messages (`onBinary()`) but only ever answer in text.
+- **Cron schedules** (new `models/CronExpression.bx`,
+  `models/Scheduler.bx`; see [docs/scheduler.md](docs/scheduler.md)):
+  `app.schedule( "0 2 * * *", callback )` runs a job at clock times.
+  Five fields or six with seconds, ranges, lists, steps, month and
+  weekday names, `@daily`-style shorthands, and `options.timezone`. An
+  interval can't say "every night at 2" — the first run lands wherever
+  the process happened to start. Cron parsing was left out of the first
+  scheduler on purpose as a separable feature; this is it. A cron job is
+  driven by a one-shot timer re-armed after each run, since the gap
+  between fire times isn't constant. A malformed expression, or one that
+  can never fire, throws at `schedule()`.
+- **Middleware for WebSocket upgrades** (`models/BoxExpress.bx`, new
+  `models/adapters/WsUpgradeMiddleware.bx`; see
+  [docs/websockets.md](docs/websockets.md)): `app.ws( path, handler,
+  { use: [ ... ] } )` runs ordinary middleware against the upgrade
+  request. The socket opens only if they all call `next()`; one that
+  responds refuses the upgrade. The handler receives the request as a
+  second argument and as `connection.req`. Authenticating a socket used
+  to mean re-reading the session cookie from `connection.cookies` and
+  looking the session up by hand. Opt-in per route rather than running
+  the `app.use()` chain, which would let an app's catch-all 404 handler
+  answer every upgrade.
+- **Path patterns** (`models/Router.bx`; see
+  [docs/routing.md](docs/routing.md)): a param can carry a regex
+  constraint (`/users/:id(\d+)`), share a segment with literal text or
+  other params (`/flights/:from-:to`, `/api/v:version`,
+  `/files/:name(.+).json`), and a trailing `*name` captures the rest of
+  the path. A route that needed a numeric id had to accept anything and
+  reject it in the handler. A segment that is only `:name` is parsed as
+  before, so `/:user-id` is still one param. **A literal colon inside a
+  path segment (`/time/12:30`) is now read as the start of a param**, and
+  a segment starting with `*` is a named wildcard. A wildcard or optional
+  param is still final-segment only.
+- **Request validation** (new `models/middleware/Validate.bx`,
+  `bifs/boxExpressValidate.bx`; see
+  [docs/validation.md](docs/validation.md)): `boxExpressValidate(
+  schema )` checks `req.body`, `req.query` and `req.params` before the
+  handler runs, converts values to the declared types, fills defaults,
+  and answers `400` listing every problem. `req.valid` holds only the
+  fields the schema names, so it can be passed to a model without a
+  client slipping extra fields in. Types cover strings, numbers,
+  booleans, email, URL, UUID, ISO dates, arrays and nested structs, with
+  a `validate` function for anything else. A schema with an unknown type
+  or rule name throws at registration.
 - **One MIME table** (new `models/MimeTypes.bx`): `res.sendFile()` and
   `boxExpressStatic()` each had their own, and they disagreed —
   `sendFile()` sent `.avif`, `.ttf`, `.otf`, `.ogg`, `.map` and

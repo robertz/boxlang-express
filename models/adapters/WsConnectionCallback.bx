@@ -44,8 +44,11 @@ class {
 	 * already defined and this single-threaded resolution is the only one
 	 * that will ever happen.
 	 */
-	function init( wsRoutes, maxMessageSize = 1048576, idleTimeoutMs = 0 ) {
+	function init( wsRoutes, maxMessageSize = 1048576, idleTimeoutMs = 0, requestKey = "" ) {
 		variables.wsRoutes = wsRoutes
+		// Where WsUpgradeMiddleware leaves the upgrade's Request for a route
+		// registered with { use: [...] }.
+		variables.requestKey = requestKey
 		variables.idleTimeoutMs = javacast( "long", idleTimeoutMs )
 		variables.openConnections = createObject( "java", "java.util.concurrent.ConcurrentHashMap" ).init()
 		variables.maxMessageSize = javacast( "long", maxMessageSize )
@@ -103,6 +106,14 @@ class {
 		}
 
 		var connection = new "../WebSocketConnection"( channel, _extractHeaders( exchange ) )
+		// "" unless the route ran middleware — see WsUpgradeMiddleware.bx.
+		var upgradeRequest = ""
+		if ( !isSimpleValue( variables.requestKey ) ) {
+			upgradeRequest = exchange.getAttachment( variables.requestKey ) ?: ""
+		}
+		if ( !isSimpleValue( upgradeRequest ) ) {
+			connection.req = upgradeRequest
+		}
 		var handlerAdapter = new "WsMessageHandlerAdapter"( connection )
 		var handlerProxy = createDynamicProxy( handlerAdapter, [ "boxexpress.ws.WebSocketMessageHandler" ] )
 		var listener = variables.listenerClass.init( handlerProxy, variables.maxMessageSize )
@@ -125,7 +136,11 @@ class {
 		variables.executor.submit( createDynamicProxy(
 			new "../ThreadRunnable"( function() {
 				try {
-					handlerFn( connection )
+					if ( isSimpleValue( upgradeRequest ) ) {
+						handlerFn( connection )
+					} else {
+						handlerFn( connection, upgradeRequest )
+					}
 				} catch ( any e ) {
 					println( "[WsConnectionCallback] onConnect handler threw: " & e.message )
 				}
