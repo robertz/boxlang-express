@@ -14,6 +14,82 @@ class {
 		return 'W/"' & file.length() & "-" & file.lastModified() & '"'
 	}
 
+	/**
+	 * The ETag for a buffered body under app.set( "etag", ... ): "weak",
+	 * "strong" (true means weak), or a function( bodyBytes, encoding )
+	 * returning the whole header value. "" when the setting is off or the
+	 * function returns nothing. The format is the npm `etag` package's:
+	 * the length in hex, then the first 27 characters of the base64 SHA-1.
+	 */
+	function bodyEtag( setting, bodyBytes, encoding ) {
+		if ( isCustomFunction( setting ) || isClosure( setting ) ) {
+			return toString( setting( bodyBytes, encoding ) ?: "" )
+		}
+		if ( isBoolean( setting ) && !setting ) {
+			return ""
+		}
+		var digest = createObject( "java", "java.security.MessageDigest" ).getInstance( "SHA-1" ).digest( bodyBytes )
+		var hash = createObject( "java", "java.util.Base64" ).getEncoder().encodeToString( digest ).left( 27 )
+		var tag = '"' & createObject( "java", "java.lang.Integer" ).toHexString( javacast( "int", bodyBytes.len() ) ) & "-" & hash & '"'
+		return compareNoCase( toString( setting ), "strong" ) == 0 ? tag : "W/" & tag
+	}
+
+	/**
+	 * Whether the client's cached copy is still good, by the rules of the
+	 * npm `fresh` package Express 5 uses: only for a GET or HEAD whose
+	 * status is 2xx or 304; never with "Cache-Control: no-cache" on the
+	 * request; If-None-Match ("*", or a list compared weakly) decides when
+	 * present, otherwise If-Modified-Since against Last-Modified. Reads the
+	 * request's headers and the response's ETag/Last-Modified through the
+	 * exchange adapter, so req.fresh and Response._end() share it.
+	 */
+	function isFresh( exchangeAdapter, statusCode ) {
+		var method = exchangeAdapter.getMethod()
+		if ( method != "GET" && method != "HEAD" ) {
+			return false
+		}
+		if ( !( ( statusCode >= 200 && statusCode < 300 ) || statusCode == 304 ) ) {
+			return false
+		}
+		var ifNoneMatch = trim( exchangeAdapter.getRequestHeader( "If-None-Match" ) ?: "" )
+		var ifModifiedSince = trim( exchangeAdapter.getRequestHeader( "If-Modified-Since" ) ?: "" )
+		if ( !len( ifNoneMatch ) && !len( ifModifiedSince ) ) {
+			return false
+		}
+		if ( _saysNoCache( exchangeAdapter.getRequestHeader( "Cache-Control" ) ?: "" ) ) {
+			return false
+		}
+
+		if ( len( ifNoneMatch ) ) {
+			if ( ifNoneMatch == "*" ) {
+				return true
+			}
+			var etag = exchangeAdapter.getHeader( "ETag" ) ?: ""
+			if ( !len( etag ) ) {
+				return false
+			}
+			var bare = reReplace( etag, "^W/", "" )
+			for ( var candidate in listToArray( ifNoneMatch, "," ) ) {
+				if ( compare( reReplace( trim( candidate ), "^W/", "" ), bare ) == 0 ) {
+					return true
+				}
+			}
+			return false
+		}
+
+		var lastModified = exchangeAdapter.getHeader( "Last-Modified" ) ?: ""
+		if ( !len( lastModified ) ) {
+			return false
+		}
+		try {
+			var formatter = createObject( "java", "java.time.format.DateTimeFormatter" ).RFC_1123_DATE_TIME
+			var zoned = createObject( "java", "java.time.ZonedDateTime" )
+			return zoned.parse( lastModified, formatter ).toEpochSecond() <= zoned.parse( ifModifiedSince, formatter ).toEpochSecond()
+		} catch ( any e ) {
+			return false
+		}
+	}
+
 	function lastModifiedHeader( file ) {
 		var instant = createObject( "java", "java.time.Instant" ).ofEpochMilli( file.lastModified() )
 		var zdt = instant.atZone( createObject( "java", "java.time.ZoneOffset" ).UTC )
@@ -23,9 +99,13 @@ class {
 	/**
 	 * If-None-Match takes precedence over If-Modified-Since when both are present,
 	 * same as RFC 7232 — a client that supports ETags shouldn't also need date
-	 * comparison to fall back on.
+	 * comparison to fall back on. A request with "Cache-Control: no-cache"
+	 * (a hard reload) is never answered with a 304.
 	 */
-	function isNotModified( ifNoneMatch, ifModifiedSince, etag, file ) {
+	function isNotModified( ifNoneMatch, ifModifiedSince, etag, file, cacheControl = "" ) {
+		if ( _saysNoCache( cacheControl ) ) {
+			return false
+		}
 		if ( len( ifNoneMatch ) ) {
 			// A list of tags, or "*"; compared case-sensitively (BoxLang's == isn't),
 			// and weakly — a W/ prefix on either side doesn't prevent a match.
@@ -55,6 +135,10 @@ class {
 		} catch ( any e ) {
 			return false
 		}
+	}
+
+	private function _saysNoCache( cacheControl ) {
+		return reFindNoCase( "(^|,)\s*no-cache\s*(,|$)", cacheControl ) > 0
 	}
 
 }

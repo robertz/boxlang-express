@@ -79,6 +79,10 @@ class {
 		return javacast( "null", "" )
 	}
 
+	function removeHeader( name ) {
+		variables.responseHeaders = variables.responseHeaders.filter( ( h ) => compareNoCase( h.name, name ) != 0 )
+	}
+
 	function sendBody( statusCode, bodyBytes ) {
 		variables.statusCode = statusCode
 		setHeader( "Content-Length", toString( bodyBytes.len() ) )

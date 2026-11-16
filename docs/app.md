@@ -74,6 +74,7 @@ lines or send escape sequences to a terminal.
 
 - [Testing your app without a server](testing.md) — `app.inject()`
 - [Observability](observability.md) — request IDs, `app.metrics()` and the access log
+- [ETags and conditional requests](response.md#etags-and-conditional-requests) — `app.set( "etag", "weak" )`
 - [Timeouts and size limits](limits.md) — `requestTimeoutMs`, `maxBodySize`, header and keep-alive timeouts
 - [Health checks and graceful shutdown](health-and-shutdown.md) — `app.health()` / `app.shutdown()`
 - [Auto-restart on file change](auto-restart.md) — `app.set("reloadOnChange", true)`

@@ -26,6 +26,10 @@ app.post( "/upload", boxExpressUpload( { dest: expandPath( "./uploads" ) } ), ( 
 } )
 ```
 
+A field sent more than once (a multi-select, checkboxes sharing a name) is
+an array in `req.body`, in the order sent; a field sent once is a string —
+the same rule as [query strings](request.md#query-strings).
+
 A part with no `name` in its `Content-Disposition` is answered with a
 400 (`Malformed multipart body`).
 

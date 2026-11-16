@@ -16,6 +16,8 @@ class {
 			405: "Method Not Allowed", 406: "Not Acceptable", 409: "Conflict", 422: "Unprocessable Entity",
 			500: "Internal Server Error", 502: "Bad Gateway", 503: "Service Unavailable"
 		}
+		// Stateless, so one instance serves every response.
+		CONDITIONAL = new ConditionalGet()
 	}
 
 	function init( exchangeAdapter, settings = {}, appLocals = {} ) {
@@ -338,7 +340,7 @@ class {
 		if ( !isNull( contentType ) ) {
 			type( contentType )
 		}
-		return _end( bytes )
+		return _end( bytes, "" )
 	}
 
 	/**
@@ -374,7 +376,7 @@ class {
 			throw( message = "File not found: #filePath#", type = "BoxExpress.FileNotFound" )
 		}
 
-		var conditional = new ConditionalGet()
+		var conditional = static.CONDITIONAL
 		var etag = conditional.etagFor( fileObj )
 		set( "ETag", etag )
 		set( "Last-Modified", conditional.lastModifiedHeader( fileObj ) )
@@ -384,7 +386,7 @@ class {
 
 		var ifNoneMatch = variables.exchangeAdapter.getRequestHeader( "If-None-Match" )
 		var ifModifiedSince = variables.exchangeAdapter.getRequestHeader( "If-Modified-Since" )
-		if ( conditional.isNotModified( ifNoneMatch, ifModifiedSince, etag, fileObj ) ) {
+		if ( conditional.isNotModified( ifNoneMatch, ifModifiedSince, etag, fileObj, variables.exchangeAdapter.getRequestHeader( "Cache-Control" ) ) ) {
 			return status( 304 ).end()
 		}
 
@@ -703,7 +705,7 @@ class {
 		return this
 	}
 
-	private function _end( bodyBytes ) {
+	private function _end( bodyBytes, encoding = "utf-8" ) {
 		if ( variables.sent ) {
 			throw( message = "Response already sent for this request", type = "BoxExpress.ResponseAlreadySent" )
 		}
@@ -720,7 +722,29 @@ class {
 		// HEAD response still reports the size a GET would have sent; the
 		// adapter's sendHeadersOnly() then tells the underlying engine not to
 		// expect (or wait for) an actual body write.
-		var isHead = variables.exchangeAdapter.getMethod() == "HEAD"
+		var method = variables.exchangeAdapter.getMethod()
+		var isHead = method == "HEAD"
+
+		if ( method == "GET" || isHead ) {
+			var conditional = static.CONDITIONAL
+			var isSuccess = variables.statusCode >= 200 && variables.statusCode < 300
+			if ( isSuccess && bodyBytes.len() && isNull( variables.exchangeAdapter.getHeader( "ETag" ) ) ) {
+				var etag = conditional.bodyEtag( variables.settings[ "etag" ] ?: false, bodyBytes, encoding )
+				if ( len( etag ) ) {
+					set( "ETag", etag )
+				}
+			}
+			if ( conditional.isFresh( variables.exchangeAdapter, variables.statusCode ) ) {
+				variables.statusCode = 304
+			}
+		}
+		if ( variables.statusCode == 304 ) {
+			variables.exchangeAdapter.removeHeader( "Content-Type" )
+			variables.exchangeAdapter.removeHeader( "Content-Length" )
+			variables.exchangeAdapter.removeHeader( "Transfer-Encoding" )
+			bodyBytes = "".getBytes( "UTF-8" )
+		}
+
 		variables.bytesWritten = bodyBytes.len()
 
 		if ( bodyBytes.len() == 0 ) {

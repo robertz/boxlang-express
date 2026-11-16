@@ -7,7 +7,13 @@
  * touch Undertow's API at all. rawExchange() is the one deliberate
  * exception — see UndertowExchangeAdapter.bx's docblock.
  */
-class {
+class accessors=true invokeImplicitAccessor=true {
+
+	// Read as req.fresh / req.stale; computed on each read by getFresh() and
+	// getStale(), since the answer depends on what the handler has set on
+	// the response so far.
+	property name="fresh";
+	property name="stale";
 
 	function init( exchangeAdapter, settings = {} ) {
 		variables.exchangeAdapter = exchangeAdapter
@@ -17,7 +23,7 @@ class {
 		this.method = exchangeAdapter.getMethod()
 		this.path = exchangeAdapter.getPath()
 		this.originalUrl = this.path & ( len( queryString ) ? "?" & queryString : "" )
-		this.query = _parseQueryString( queryString )
+		this.query = new QueryString().parse( queryString )
 		this.params = {}
 		this.body = {}
 		this.files = {}
@@ -40,6 +46,7 @@ class {
 		// Set by RequestWatchdog when this request ran past its timeout.
 		this.timedOut = false
 		variables.watchdog = ""
+		variables.response = ""
 		variables.watchId = ""
 		variables.bufferedBody = ""
 
@@ -87,6 +94,21 @@ class {
 	 */
 	function _setBufferedBody( bodyBytes ) {
 		variables.bufferedBody = createObject( "java", "java.io.ByteArrayInputStream" ).init( bodyBytes )
+	}
+
+	/**
+	 * req.fresh: true when the client's cached copy matches the ETag or
+	 * Last-Modified set on the response so far — see ConditionalGet.isFresh().
+	 */
+	function getFresh() {
+		if ( isSimpleValue( variables.response ) ) {
+			return false
+		}
+		return new ConditionalGet().isFresh( variables.exchangeAdapter, variables.response.getStatusCode() )
+	}
+
+	function getStale() {
+		return !getFresh()
 	}
 
 	function get( name ) {
@@ -177,28 +199,6 @@ class {
 		return variables.exchangeAdapter.getRequestBodyStream()
 	}
 
-	private function _parseQueryString( rawQuery ) {
-		var result = {}
-		if ( isNull( rawQuery ) || !len( rawQuery ) ) {
-			return result
-		}
-		for ( var pair in rawQuery.listToArray( "&" ) ) {
-			var eqPos = pair.find( "=" )
-			if ( eqPos ) {
-				// eqPos - 1 or pair.len() - eqPos can be zero (an empty key or an
-				// empty value, e.g. "key=") — BoxLang's left()/right() throw "Count
-				// cannot be zero" for a zero count. Same class of bug BodyParsers.bx
-				// already guards against.
-				var rawKey = eqPos == 1 ? "" : pair.left( eqPos - 1 )
-				var rawValue = eqPos == pair.len() ? "" : pair.right( pair.len() - eqPos )
-				result[ _decode( rawKey ) ] = _decode( rawValue )
-			} else {
-				result[ _decode( pair ) ] = ""
-			}
-		}
-		return result
-	}
-
 	private function _parseCookies( cookieHeader ) {
 		var result = {}
 		if ( !len( cookieHeader ) ) {
@@ -208,7 +208,7 @@ class {
 			var trimmedPair = pair.trim()
 			var eqPos = trimmedPair.find( "=" )
 			if ( eqPos ) {
-				// Same zero-count left()/right() guard as _parseQueryString() above.
+				// left()/right() throw on a zero count (an empty name or value).
 				var cookieName = ( eqPos == 1 ? "" : trimmedPair.left( eqPos - 1 ) ).trim()
 				var cookieValue = ( eqPos == trimmedPair.len() ? "" : trimmedPair.right( trimmedPair.len() - eqPos ) ).trim()
 				result[ cookieName ] = _decode( cookieValue )

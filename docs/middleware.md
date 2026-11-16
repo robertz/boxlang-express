@@ -67,6 +67,14 @@ it parses; `app.set( "maxBodySize", bytes )` caps every request — see
 A body that won't parse (broken JSON, a malformed `%` escape in a
 urlencoded body) is answered with a 400.
 
+`urlencoded()` reads a form the way `req.query` reads a query string: a
+field that appears once is a string, and a repeated one — a multi-select,
+a group of checkboxes sharing a name — is an array in the order sent
+(`tag=a&tag=b` gives `{ tag: [ "a", "b" ] }`). Brackets in a field name
+are not parsed: `tag[]` and `user[name]` are literal keys. See [Query
+strings](request.md#query-strings), including why a field you expect to
+be a string should be validated.
+
 A body over the limit gets a `413` response and never reaches your route
 handler. A JSON body that doesn't parse gets a `400`
 (`{ error: true, message: "Malformed JSON body" }`), answered directly like

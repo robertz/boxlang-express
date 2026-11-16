@@ -1,0 +1,273 @@
+/**
+ * app.set( "etag" ), req.fresh / req.stale and the automatic 304 on
+ * buffered responses. Through app.inject() and against a live server.
+ */
+class extends="testbox.system.BaseSpec" {
+
+	function beforeAll() {
+		variables.testPort = 4374
+		variables.baseUrl = "http://localhost:#variables.testPort#"
+		variables.client = new "../helpers/HttpClient"()
+		variables.liveApp = _app( "weak" )
+		variables.liveApp.set( "log", false )
+		variables.liveApp.listen( port = variables.testPort, options = { block: false } )
+		sleep( 300 )
+	}
+
+	function afterAll() {
+		variables.liveApp.close()
+	}
+
+	// The body every route below sends, and the tags the `etag` npm package gives it.
+	variables.HELLO_WEAK = 'W/"b-Kq5sNclPz7QV2+lfQIuc6R7oRu0"'
+	variables.HELLO_STRONG = '"b-Kq5sNclPz7QV2+lfQIuc6R7oRu0"'
+
+	private function _app( etagSetting = "" ) {
+		var app = new "../../models/BoxExpress"()
+		if ( !isSimpleValue( etagSetting ) || len( etagSetting ) ) {
+			app.set( "etag", etagSetting )
+		}
+		app.all( "/hello", ( req, res ) => res.send( "hello world" ) )
+		app.get( "/json", ( req, res ) => res.json( { hello: "world" } ) )
+		app.get( "/bytes", ( req, res ) => res.sendBytes( "hello world".getBytes( "UTF-8" ), "application/octet-stream" ) )
+		app.get( "/empty", ( req, res ) => res.send( "" ) )
+		app.get( "/missing", ( req, res ) => res.status( 404 ).send( "hello world" ) )
+		app.get( "/preset", ( req, res ) => res.set( "ETag", '"mine"' ).send( "hello world" ) )
+		app.get( "/dated", ( req, res ) => res.set( "Last-Modified", "Tue, 10 Nov 2026 10:00:00 GMT" ).send( "hello world" ) )
+		app.get( "/fresh", ( req, res ) => {
+			var before = req.fresh
+			res.set( "ETag", '"v1"' )
+			res.set( "X-Fresh", "#before#/#req.fresh#/#req.stale#" )
+			res.send( "hello world" )
+		} )
+		app.get( "/written", ( req, res ) => {
+			res.send( "hello world" )
+			variables.lastBytesWritten = res.getBytesWritten()
+			variables.lastStatus = res.getStatusCode()
+		} )
+		app.get( "/file", ( req, res ) => res.sendFile( expandPath( "/tests/fixtures/views/page.bxm" ) ) )
+		return app
+	}
+
+	private function _get( app, path, headers = {}, method = "GET" ) {
+		return app.inject( { method: method, url: path, headers: headers } )
+	}
+
+	function run() {
+
+		describe( "app.set( ""etag"" )", function() {
+
+			it( "sets no ETag by default or when false", function() {
+				assertAll( [
+					() => expect( _get( _app(), "/hello" ).header( "ETag" ) ).toBe( "" ),
+					() => expect( _get( _app( false ), "/hello" ).header( "ETag" ) ).toBe( "" )
+				] )
+			} )
+
+			it( "sets a weak tag in the etag package's format", function() {
+				assertAll( [
+					() => expect( compare( _get( _app( "weak" ), "/hello" ).header( "ETag" ), variables.HELLO_WEAK ) ).toBe( 0 ),
+					() => expect( compare( _get( _app( true ), "/hello" ).header( "ETag" ), variables.HELLO_WEAK ) ).toBe( 0 ),
+					() => expect( compare( _get( _app( "weak" ), "/bytes" ).header( "ETag" ), variables.HELLO_WEAK ) ).toBe( 0 ),
+					() => expect( _get( _app( "weak" ), "/json" ).header( "ETag" ) ).toMatch( '^W/"[0-9a-f]+-[A-Za-z0-9+/]{27}"$' )
+				] )
+			} )
+
+			it( "sets a strong tag", function() {
+				expect( compare( _get( _app( "strong" ), "/hello" ).header( "ETag" ), variables.HELLO_STRONG ) ).toBe( 0 )
+			} )
+
+			it( "calls a function with the body bytes and encoding", function() {
+				var app = _app( ( bodyBytes, encoding ) => '"custom-#bodyBytes.len()#-#encoding#"' )
+				var none = _app( ( bodyBytes, encoding ) => "" )
+				assertAll( [
+					() => expect( _get( app, "/hello" ).header( "ETag" ) ).toBe( '"custom-11-utf-8"' ),
+					() => expect( _get( app, "/bytes" ).header( "ETag" ) ).toBe( '"custom-11-"' ),
+					() => expect( _get( none, "/hello" ).header( "ETag" ) ).toBe( "" )
+				] )
+			} )
+
+			it( "rejects an invalid value", function() {
+				expect( () => new "../../models/BoxExpress"().set( "etag", "sometimes" ) ).toThrow( "BoxExpress.InvalidArgument" )
+			} )
+
+			it( "leaves POST, non-2xx and empty responses untagged", function() {
+				var app = _app( "weak" )
+				assertAll( [
+					() => expect( _get( app, "/hello", {}, "POST" ).header( "ETag" ) ).toBe( "" ),
+					() => expect( _get( app, "/missing" ).header( "ETag" ) ).toBe( "" ),
+					() => expect( _get( app, "/empty" ).header( "ETag" ) ).toBe( "" )
+				] )
+			} )
+
+			it( "respects an ETag the handler set", function() {
+				expect( _get( _app( "weak" ), "/preset" ).header( "ETag" ) ).toBe( '"mine"' )
+			} )
+
+			it( "tags a HEAD response without sending a body", function() {
+				var res = _get( _app( "weak" ), "/hello", {}, "HEAD" )
+				assertAll( [
+					() => expect( compare( res.header( "ETag" ), variables.HELLO_WEAK ) ).toBe( 0 ),
+					() => expect( res.header( "Content-Length" ) ).toBe( "11" ),
+					() => expect( res.body ).toBe( "" )
+				] )
+			} )
+
+		} )
+
+		describe( "conditional requests", function() {
+
+			it( "answers a matching If-None-Match with an empty 304", function() {
+				var res = _get( _app( "weak" ), "/hello", { "If-None-Match": variables.HELLO_WEAK } )
+				assertAll( [
+					() => expect( res.statusCode ).toBe( 304 ),
+					() => expect( res.body ).toBe( "" ),
+					() => expect( compare( res.header( "ETag" ), variables.HELLO_WEAK ) ).toBe( 0 ),
+					() => expect( res.header( "Content-Type" ) ).toBe( "" ),
+					() => expect( res.header( "Content-Length" ) ).toBe( "" )
+				] )
+			} )
+
+			it( "sends the body when the tag doesn't match", function() {
+				var res = _get( _app( "weak" ), "/hello", { "If-None-Match": '"something-else"' } )
+				assertAll( [
+					() => expect( res.statusCode ).toBe( 200 ),
+					() => expect( res.body ).toBe( "hello world" )
+				] )
+			} )
+
+			it( "compares case-sensitively", function() {
+				expect( _get( _app( "weak" ), "/hello", { "If-None-Match": lCase( variables.HELLO_WEAK ) } ).statusCode ).toBe( 200 )
+			} )
+
+			it( "matches *, a list of tags, and weak against strong", function() {
+				var app = _app( "weak" )
+				assertAll( [
+					() => expect( _get( app, "/hello", { "If-None-Match": "*" } ).statusCode ).toBe( 304 ),
+					() => expect( _get( app, "/hello", { "If-None-Match": '"a", #variables.HELLO_WEAK#, "b"' } ).statusCode ).toBe( 304 ),
+					() => expect( _get( app, "/hello", { "If-None-Match": variables.HELLO_STRONG } ).statusCode ).toBe( 304 ),
+					() => expect( _get( _app( "strong" ), "/hello", { "If-None-Match": variables.HELLO_WEAK } ).statusCode ).toBe( 304 )
+				] )
+			} )
+
+			it( "sends the body when the request says Cache-Control: no-cache", function() {
+				var res = _get( _app( "weak" ), "/hello", { "If-None-Match": variables.HELLO_WEAK, "Cache-Control": "max-age=0, no-cache" } )
+				assertAll( [
+					() => expect( res.statusCode ).toBe( 200 ),
+					() => expect( res.body ).toBe( "hello world" )
+				] )
+			} )
+
+			it( "answers a matching HEAD with 304", function() {
+				expect( _get( _app( "weak" ), "/hello", { "If-None-Match": variables.HELLO_WEAK }, "HEAD" ).statusCode ).toBe( 304 )
+			} )
+
+			it( "never answers 304 to a POST or for a non-2xx status", function() {
+				var app = _app( "weak" )
+				assertAll( [
+					() => expect( _get( app, "/hello", { "If-None-Match": "*" }, "POST" ).statusCode ).toBe( 200 ),
+					() => expect( _get( app, "/missing", { "If-None-Match": "*" } ).statusCode ).toBe( 404 )
+				] )
+			} )
+
+			it( "honours validators the handler set, even with etag off", function() {
+				var app = _app()
+				assertAll( [
+					() => expect( _get( app, "/preset", { "If-None-Match": '"mine"' } ).statusCode ).toBe( 304 ),
+					() => expect( _get( app, "/dated", { "If-Modified-Since": "Tue, 10 Nov 2026 10:00:00 GMT" } ).statusCode ).toBe( 304 ),
+					() => expect( _get( app, "/dated", { "If-Modified-Since": "Mon, 09 Nov 2026 10:00:00 GMT" } ).statusCode ).toBe( 200 ),
+					() => expect( _get( app, "/dated", { "If-Modified-Since": "not a date" } ).statusCode ).toBe( 200 ),
+					() => expect( _get( app, "/hello", { "If-Modified-Since": "Tue, 10 Nov 2026 10:00:00 GMT" } ).statusCode ).toBe( 200 )
+				] )
+			} )
+
+			it( "lets If-None-Match decide when both headers are sent", function() {
+				var res = _get( _app(), "/dated", { "If-None-Match": '"nope"', "If-Modified-Since": "Tue, 10 Nov 2026 10:00:00 GMT" } )
+				expect( res.statusCode ).toBe( 200 )
+			} )
+
+			it( "reports 304 and zero bytes written", function() {
+				_get( _app( "weak" ), "/written", { "If-None-Match": variables.HELLO_WEAK } )
+				assertAll( [
+					() => expect( variables.lastStatus ).toBe( 304 ),
+					() => expect( variables.lastBytesWritten ).toBe( 0 )
+				] )
+			} )
+
+			it( "sends a file in full when the request says Cache-Control: no-cache", function() {
+				var app = _app()
+				var staticApp = new "../../models/BoxExpress"()
+				staticApp.use( new "../../models/middleware/StaticFiles"().serve( expandPath( "/tests/fixtures/public" ) ) )
+				var fileTag = _get( app, "/file" ).header( "ETag" )
+				var staticTag = _get( staticApp, "/hello.txt" ).header( "ETag" )
+				assertAll( [
+					() => expect( _get( app, "/file", { "If-None-Match": fileTag } ).statusCode ).toBe( 304 ),
+					() => expect( _get( app, "/file", { "If-None-Match": fileTag, "Cache-Control": "no-cache" } ).statusCode ).toBe( 200 ),
+					() => expect( _get( staticApp, "/hello.txt", { "If-None-Match": staticTag } ).statusCode ).toBe( 304 ),
+					() => expect( _get( staticApp, "/hello.txt", { "If-None-Match": staticTag, "Cache-Control": "no-cache" } ).statusCode ).toBe( 200 )
+				] )
+			} )
+
+			it( "leaves sendFile()'s own conditional handling alone", function() {
+				var app = _app( "weak" )
+				var first = _get( app, "/file" )
+				var second = _get( app, "/file", { "If-None-Match": first.header( "ETag" ) } )
+				assertAll( [
+					() => expect( first.header( "ETag" ) ).toMatch( '^W/"[0-9]+-[0-9]+"$' ),
+					() => expect( second.statusCode ).toBe( 304 ),
+					() => expect( second.header( "ETag" ) ).toBe( first.header( "ETag" ) )
+				] )
+			} )
+
+		} )
+
+		describe( "req.fresh / req.stale", function() {
+
+			it( "follows the validators set on the response so far", function() {
+				var app = _app()
+				assertAll( [
+					() => expect( _get( app, "/fresh", { "If-None-Match": '"v1"' } ).header( "X-Fresh" ) ).toBe( "false/true/false" ),
+					() => expect( _get( app, "/fresh", { "If-None-Match": '"v0"' } ).header( "X-Fresh" ) ).toBe( "false/false/true" ),
+					() => expect( _get( app, "/fresh" ).header( "X-Fresh" ) ).toBe( "false/false/true" ),
+					() => expect( _get( app, "/fresh", { "If-None-Match": '"v1"', "Cache-Control": "no-cache" } ).header( "X-Fresh" ) ).toBe( "false/false/true" )
+				] )
+			} )
+
+		} )
+
+		describe( "ETags against a live server", function() {
+
+			it( "revalidates a response with the tag it was given", function() {
+				var first = variables.client.get( variables.baseUrl & "/hello" )
+				var again = variables.client.getWithHeaders( variables.baseUrl & "/hello", { "If-None-Match": first.etag } )
+				var changed = variables.client.getWithHeaders( variables.baseUrl & "/hello", { "If-None-Match": '"old"' } )
+				var injected = _get( _app( "weak" ), "/hello", { "If-None-Match": first.etag } )
+				assertAll( [
+					() => expect( first.statusCode ).toBe( 200 ),
+					() => expect( compare( first.etag, variables.HELLO_WEAK ) ).toBe( 0 ),
+					() => expect( again.statusCode ).toBe( 304 ),
+					() => expect( again.body ).toBe( "" ),
+					() => expect( again.hasHeader( "Content-Type" ) ).toBeFalse(),
+					() => expect( again.hasHeader( "Content-Length" ) ).toBeFalse(),
+					() => expect( compare( again.etag, variables.HELLO_WEAK ) ).toBe( 0 ),
+					() => expect( changed.statusCode ).toBe( 200 ),
+					() => expect( changed.body ).toBe( "hello world" ),
+					() => expect( injected.statusCode ).withContext( "inject() parity" ).toBe( again.statusCode ),
+					() => expect( injected.header( "ETag" ) ).toBe( again.etag )
+				] )
+			} )
+
+			it( "serves the next request on the same connection after a 304", function() {
+				var again = variables.client.getWithHeaders( variables.baseUrl & "/hello", { "If-None-Match": variables.HELLO_WEAK } )
+				var next = variables.client.get( variables.baseUrl & "/json" )
+				assertAll( [
+					() => expect( again.statusCode ).toBe( 304 ),
+					() => expect( JSONDeserialize( next.body ).hello ).toBe( "world" )
+				] )
+			} )
+
+		} )
+
+	}
+
+}

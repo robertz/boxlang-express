@@ -135,7 +135,7 @@ class extends="testbox.system.BaseSpec" {
 					n: { type: "integer" }, f: { type: "number" }, b: { type: "boolean" }, s: { type: "string" },
 					a: { type: "array" }, o: { type: "struct" }, u: { type: "url" }, d: { type: "date" }, id: { type: "uuid" }
 				} }
-				var messages = _messages( _send( schema, { n: "1.5", f: "abc", b: "maybe", s: [ "x" ], a: "x", o: [ 1 ], u: "javascript:alert(1)", d: "15/11/2026", id: "not-a-uuid" } ) )
+				var messages = _messages( _send( schema, { n: "1.5", f: "abc", b: "maybe", s: [ "x" ], a: { x: 1 }, o: [ 1 ], u: "javascript:alert(1)", d: "15/11/2026", id: "not-a-uuid" } ) )
 				assertAll( [
 					() => expect( structCount( messages ) ).toBe( 9 ),
 					() => expect( messages[ "body:n" ] ).toBe( "must be a whole number" ),
@@ -215,6 +215,43 @@ class extends="testbox.system.BaseSpec" {
 					() => expect( app.inject( { method: "POST", url: "/items/abc" } ).statusCode ).toBe( 400 ),
 					() => expect( app.inject( { method: "POST", url: "/items/0" } ).statusCode ).toBe( 400 ),
 					() => expect( app.inject( { method: "POST", url: "/items/5" } ).statusCode ).toBe( 200 )
+				] )
+			} )
+
+		} )
+
+		describe( "repeated keys", function() {
+
+			it( "rejects an array where one value is declared", function() {
+				var schema = { query: { name: { type: "string" }, page: { type: "integer" }, active: { type: "boolean" } } }
+				var messages = _messages( _send( schema, {}, "?name=a&name=b&page=1&page=2&active=true&active=false" ) )
+				assertAll( [
+					() => expect( messages[ "query:name" ] ).toBe( "must be a string" ),
+					() => expect( messages[ "query:page" ] ).toBe( "must be a whole number" ),
+					() => expect( messages[ "query:active" ] ).toBe( "must be true or false" )
+				] )
+			} )
+
+			it( "accepts one value or several for an array field", function() {
+				var schema = { query: { tag: { type: "array", items: { type: "integer" }, maxItems: 2 } } }
+				assertAll( [
+					() => expect( _send( schema, {}, "?tag=1" ).json().valid.query.tag ).toBe( [ 1 ] ),
+					() => expect( _send( schema, {}, "?tag=1&tag=2" ).json().valid.query.tag ).toBe( [ 1, 2 ] ),
+					() => expect( _send( schema, {}, "?tag=1&tag=2&tag=3" ).statusCode ).toBe( 400 ),
+					() => expect( _send( schema, {}, "?tag=x" ).statusCode ).toBe( 400 ),
+					() => expect( _send( schema, { tag: "1" } ).statusCode ).withContext( "body isn't in this schema" ).toBe( 200 )
+				] )
+			} )
+
+			it( "doesn't let an array skip oneOf, pattern or length rules on an untyped field", function() {
+				var schema = { query: { role: { oneOf: [ "admin", "member" ] }, code: { pattern: "^[a-z]+$" }, nick: { maxLength: 3 } } }
+				var messages = _messages( _send( schema, {}, "?role=root&role=admin&code=1&code=2&nick=toolong&nick=x" ) )
+				assertAll( [
+					() => expect( messages[ "query:role" ] ).toBe( "must be a single value" ),
+					() => expect( messages[ "query:code" ] ).toBe( "must be a single value" ),
+					() => expect( messages[ "query:nick" ] ).toBe( "must be a single value" ),
+					() => expect( _send( schema, {}, "?role=admin&code=abc&nick=al" ).statusCode ).toBe( 200 ),
+					() => expect( _send( { body: { role: { oneOf: [ "admin" ] } } }, { role: [ "root" ] } ).statusCode ).toBe( 400 )
 				] )
 			} )
 

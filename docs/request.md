@@ -4,6 +4,7 @@
 `req.headers`, `req.get(name)`, `req.cookies`, `req.signedCookies` (see
 [Signed cookies](response.md#signed-cookies)), `req.ip`, `req.protocol`,
 `req.secure`, `req.hostname`, `req.subdomains`, `req.xhr`, `req.baseUrl`,
+`req.fresh` / `req.stale` (see [Conditional requests](response.md#etags-and-conditional-requests)),
 `req.setTimeout(ms)` / `req.timedOut` (see [Timeouts and size
 limits](limits.md)),
 `req.accepts(...)`, `req.acceptsLanguages(...)`, `req.is(...)` (see
@@ -18,6 +19,44 @@ Cookie and query values are URL-decoded. One with a malformed escape
 (`discount=50%`, `%zz`) is kept as its raw text rather than failing the
 request — a cookie can be set by any script or sibling subdomain, so a bad
 one shouldn't lock a visitor out.
+
+## Query strings
+
+`req.query` follows Express 5's default ("simple") parser, the semantics
+of Node's `querystring` module:
+
+| Request | `req.query` |
+|---|---|
+| `?tag=a` | `{ tag: "a" }` |
+| `?tag=a&tag=b` | `{ tag: [ "a", "b" ] }` |
+| `?tag=&flag` | `{ tag: "", flag: "" }` |
+| `?tag[]=a&tag[]=b` | `{ "tag[]": [ "a", "b" ] }` |
+| `?user[name]=Ada` | `{ "user[name]": "Ada" }` |
+
+A key that appears once is a string; a key that repeats is an array, in
+the order the values appeared. Brackets are not parsed — there is no
+nested (`a[b]=1`) or `a[]=1` syntax, which was Express 4's "extended"
+mode — so those keys stay literal. `boxExpressUrlencoded()` parses form
+bodies the same way.
+
+**Any client can repeat a key**, so a value you expect to be a string can
+arrive as an array, and string code (`len()`, `&`, `trim()`) then throws.
+Declare what you expect with [`boxExpressValidate()`](validation.md) — a
+`string` or `integer` field answers `400` for an array, and an `array`
+field accepts one value or several — or normalise by hand:
+
+```js
+var tags = req.query.tag ?: []
+if ( !isArray( tags ) ) {
+	tags = [ tags ]
+}
+```
+
+One difference from Express: a BoxLang struct's keys are
+case-insensitive, so `?Tag=a&tag=b` is one key, `{ Tag: [ "a", "b" ] }`,
+where Express would give two.
+
+## Client address and proxies
 
 `req.ip` is always the direct TCP peer by default — safe, since a client
 can't spoof it, but wrong behind a reverse proxy (it'll report the proxy's
@@ -124,3 +163,7 @@ compress or transcode responses.
   	res.status( 201 ).location( req.baseUrl & "/users/" & user.id ).json( user )
   } )
   ```
+- `req.fresh` / `req.stale` — whether the client's cached copy still
+  matches the `ETag` or `Last-Modified` set on the response so far.
+  `req.stale` is the opposite. See [ETags and conditional
+  requests](response.md#etags-and-conditional-requests).

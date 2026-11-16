@@ -1,0 +1,125 @@
+/**
+ * req.query: a key that appears once is a string, a repeated key is an
+ * array (Express 5's "simple" parser). Through app.inject() and against a
+ * live server.
+ */
+class extends="testbox.system.BaseSpec" {
+
+	function beforeAll() {
+		variables.testPort = 4375
+		variables.baseUrl = "http://localhost:#variables.testPort#"
+		variables.client = new "../helpers/HttpClient"()
+		variables.liveApp = _app()
+		variables.liveApp.set( "log", false )
+		variables.liveApp.listen( port = variables.testPort, options = { block: false } )
+		sleep( 300 )
+	}
+
+	function afterAll() {
+		variables.liveApp.close()
+	}
+
+	private function _app() {
+		var app = new "../../models/BoxExpress"()
+		app.get( "/q", ( req, res ) => res.json( req.query ) )
+		return app
+	}
+
+	private function _query( queryString ) {
+		return _app().inject( "/q?" & queryString ).json()
+	}
+
+	function run() {
+
+		describe( "req.query", function() {
+
+			it( "keeps a key that appears once as a string", function() {
+				expect( _query( "tag=a" ) ).toBe( { tag: "a" } )
+			} )
+
+			it( "collects a repeated key into an array, in order", function() {
+				assertAll( [
+					() => expect( _query( "tag=a&tag=b" ).tag ).toBe( [ "a", "b" ] ),
+					() => expect( _query( "tag=c&tag=a&tag=b" ).tag ).toBe( [ "c", "a", "b" ] )
+				] )
+			} )
+
+			it( "mixes repeated and single keys", function() {
+				expect( _query( "tag=a&page=2&tag=b&sort=name" ) ).toBe( { tag: [ "a", "b" ], page: "2", sort: "name" } )
+			} )
+
+			it( "reads an empty value and a key with no = as empty strings", function() {
+				var parsed = _query( "empty=&bare&tag=&tag=x" )
+				assertAll( [
+					() => expect( parsed.empty ).toBe( "" ),
+					() => expect( parsed.bare ).toBe( "" ),
+					() => expect( parsed.tag ).toBe( [ "", "x" ] )
+				] )
+			} )
+
+			it( "decodes escaped & and = inside a value, and + as a space", function() {
+				var parsed = _query( "expr=a%26b%3Dc&name=Ada+Lovelace&plus=1%2B1" )
+				assertAll( [
+					() => expect( parsed.expr ).toBe( "a&b=c" ),
+					() => expect( parsed.name ).toBe( "Ada Lovelace" ),
+					() => expect( parsed.plus ).toBe( "1+1" )
+				] )
+			} )
+
+			it( "keeps the raw text of a malformed escape", function() {
+				expect( _query( "rate=50%&tag=%zz" ) ).toBe( { rate: "50%", tag: "%zz" } )
+			} )
+
+			it( "treats brackets as part of the key name", function() {
+				var parsed = _query( "tag[]=a&tag[]=b&user[name]=Ada" )
+				assertAll( [
+					() => expect( parsed[ "tag[]" ] ).toBe( [ "a", "b" ] ),
+					() => expect( parsed[ "user[name]" ] ).toBe( "Ada" ),
+					() => expect( structKeyExists( parsed, "tag" ) ).toBeFalse()
+				] )
+			} )
+
+			it( "merges keys that differ only in case", function() {
+				var parsed = _query( "Tag=a&tag=b" )
+				assertAll( [
+					() => expect( structCount( parsed ) ).toBe( 1 ),
+					() => expect( parsed.tag ).toBe( [ "a", "b" ] )
+				] )
+			} )
+
+			it( "round-trips an array passed as inject()'s query option", function() {
+				var parsed = _app().inject( { url: "/q?page=1", query: { tag: [ "a", "b" ], sort: "name" } } ).json()
+				expect( parsed ).toBe( { page: "1", tag: [ "a", "b" ], sort: "name" } )
+			} )
+
+			it( "accepts an inject() URL that is only a query string", function() {
+				var app = new "../../models/BoxExpress"()
+				app.get( "/", ( req, res ) => res.json( req.query ) )
+				assertAll( [
+					() => expect( app.inject( "/?tag=a" ).json() ).toBe( { tag: "a" } ),
+					() => expect( app.inject( "?tag=a" ).statusCode ).notToBe( 500 )
+				] )
+			} )
+
+			it( "is an empty struct with no query string", function() {
+				expect( _app().inject( "/q" ).json() ).toBe( {} )
+			} )
+
+		} )
+
+		describe( "req.query against a live server", function() {
+
+			it( "parses the same way as inject()", function() {
+				var queryString = "tag=a&tag=b&tag=c&page=2&empty=&bare&expr=a%26b%3Dc&tag[]=x"
+				var live = JSONDeserialize( variables.client.get( variables.baseUrl & "/q?" & replace( replace( queryString, "[", "%5B", "all" ), "]", "%5D", "all" ) ).body )
+				assertAll( [
+					() => expect( live ).toBe( _query( queryString ) ),
+					() => expect( live.tag ).toBe( [ "a", "b", "c" ] )
+				] )
+			} )
+
+		} )
+
+	}
+
+}

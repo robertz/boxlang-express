@@ -195,6 +195,17 @@ class extends="testbox.system.BaseSpec" {
 				] )
 			} )
 
+			it( "collects a repeated multipart field into an array", function() {
+				var app = new "../../models/BoxExpress"()
+				app.use( new "../../models/middleware/Multipart"().upload() )
+				app.post( "/form", ( req, res ) => res.json( req.body ) )
+				var crlf = char( 13 ) & char( 10 )
+				var part = ( name, value ) => "--b" & crlf & 'Content-Disposition: form-data; name="' & name & '"' & crlf & crlf & value & crlf
+				var multipartBody = part( "tag", "a" ) & part( "note", "hi" ) & part( "tag", "b" ) & part( "tag", "c" ) & "--b--" & crlf
+				var body = app.inject( { method: "POST", url: "/form", headers: { "Content-Type": "multipart/form-data; boundary=b" }, body: multipartBody } ).json()
+				expect( body ).toBe( { tag: [ "a", "b", "c" ], note: "hi" } )
+			} )
+
 			it( "does not let a catch-all parser replace a multipart upload's fields", function() {
 				var app = new "../../models/BoxExpress"()
 				app.use( new "../../models/middleware/Multipart"().upload(), new "../../models/middleware/BodyParsers"().raw( { type: "*/*" } ) )
@@ -278,6 +289,44 @@ class extends="testbox.system.BaseSpec" {
 					() => expect( _post( _appWith( parsers.text( { verify: reject } ) ), "text/plain", "a" ).statusCode ).toBe( 403 ),
 					() => expect( _post( _appWith( parsers.raw( { verify: reject } ) ), "application/octet-stream", "a" ).statusCode ).toBe( 403 )
 				] )
+			} )
+
+		} )
+
+		describe( "BodyParsers.urlencoded() repeated keys", function() {
+
+			var form = ( body ) => {
+				var app = new "../../models/BoxExpress"()
+				app.use( new "../../models/middleware/BodyParsers"().urlencoded() )
+				app.post( "/form", ( req, res ) => res.json( req.body ) )
+				return app.inject( { method: "POST", url: "/form", headers: { "Content-Type": "application/x-www-form-urlencoded" }, body: body } )
+			}
+
+			it( "keeps a single key as a string and collects a repeated one into an array", function() {
+				assertAll( [
+					() => expect( form( "tag=a" ).json() ).toBe( { tag: "a" } ),
+					() => expect( form( "tag=a&tag=b" ).json().tag ).toBe( [ "a", "b" ] ),
+					() => expect( form( "tag=c&name=Ada&tag=a&tag=b" ).json() ).toBe( { tag: [ "c", "a", "b" ], name: "Ada" } )
+				] )
+			} )
+
+			it( "reads empty values, bare keys, escapes and + the way req.query does", function() {
+				var parsed = form( "empty=&bare&expr=a%26b%3Dc&name=Ada+Lovelace&plus=1%2B1" ).json()
+				assertAll( [
+					() => expect( parsed.empty ).toBe( "" ),
+					() => expect( parsed.bare ).toBe( "" ),
+					() => expect( parsed.expr ).toBe( "a&b=c" ),
+					() => expect( parsed.name ).toBe( "Ada Lovelace" ),
+					() => expect( parsed.plus ).toBe( "1+1" )
+				] )
+			} )
+
+			it( "treats brackets as part of the key name", function() {
+				expect( form( "tag[]=a&tag[]=b" ).json()[ "tag[]" ] ).toBe( [ "a", "b" ] )
+			} )
+
+			it( "still answers 400 for a malformed escape", function() {
+				expect( form( "rate=50%" ).statusCode ).toBe( 400 )
 			} )
 
 		} )

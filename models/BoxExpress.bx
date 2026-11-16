@@ -304,6 +304,9 @@ class {
 		if ( lCase( name ) == "log" && !( isCustomFunction( value ) || isClosure( value ) || ( isSimpleValue( value ) && ( isBoolean( value ) || listFindNoCase( "access,json", value ) ) ) ) ) {
 			throw( type = "BoxExpress.InvalidArgument", message = "app.set( ""log"" ) takes true, false, ""access"", ""json"" or a function" )
 		}
+		if ( lCase( name ) == "etag" && !( isCustomFunction( value ) || isClosure( value ) || ( isSimpleValue( value ) && ( isBoolean( value ) || listFindNoCase( "weak,strong", value ) ) ) ) ) {
+			throw( type = "BoxExpress.InvalidArgument", message = "app.set( ""etag"" ) takes false, true, ""weak"", ""strong"" or a function" )
+		}
 		this.settings[ name ] = value
 		if ( lCase( name ) == "cookie secret" ) {
 			this.settings[ "cookie signer" ] = new CookieSigner( value )
@@ -600,7 +603,9 @@ class {
 		var method = uCase( options.method ?: "GET" )
 		var rawUrl = options.url ?: "/"
 		var queryPos = find( "?", rawUrl )
-		var pathPart = queryPos ? left( rawUrl, queryPos - 1 ) : rawUrl
+		// mid(), not left(): left() throws on a zero count, which a URL that
+		// starts with "?" would ask for.
+		var pathPart = queryPos ? mid( rawUrl, 1, queryPos - 1 ) : rawUrl
 		var queryString = queryPos ? mid( rawUrl, queryPos + 1, len( rawUrl ) - queryPos ) : ""
 
 		if ( structKeyExists( options, "query" ) ) {

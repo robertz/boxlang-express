@@ -1,5 +1,75 @@
 # Changelog
 
+**0.2.28**
+- **Breaking: a key repeated in a query string or urlencoded body is now
+  an array** (`?tag=a&tag=b` → `{ tag: [ "a", "b" ] }`), as in Express 5.
+  Before, the last value silently replaced the others, which lost data
+  from multi-select forms and filter UIs. **A handler that treats
+  `req.query.x` or a form field as a string will throw if a client
+  repeats the key** — declare the field with `boxExpressValidate()` or
+  check `isArray()`.
+  - Both parsers now share `models/QueryString.bx`, with the semantics of
+    Node's `querystring` (Express 5's default "simple" parser). A key
+    that appears once is still a string. Brackets are not parsed:
+    `tag[]` and `user[name]` stay literal keys. There is no `query
+    parser` setting.
+  - Keys that differ only in case are one key, because a BoxLang struct's
+    keys are case-insensitive: `?Tag=a&tag=b` is `{ Tag: [ "a", "b" ] }`.
+    Express would give two keys.
+  - Unchanged: `+` is a space in both; a malformed `%` escape is kept as
+    raw text in a query string and answered with `400` in a body.
+  - `app.inject( { query: { tag: [ "a", "b" ] } } )` already sent both
+    values; the handler now receives both.
+  - **`boxExpressUpload()` does the same for a repeated non-file field**
+    in a multipart body (`models/middleware/Multipart.bx`); it also kept
+    only the last value.
+  - `boxExpressCsrf()` ignores a token field sent more than once and
+    falls back to the header, so such a request is rejected as before.
+- **`boxExpressValidate()` and arrays** (`models/middleware/Validate.bx`):
+  - `type: "array"` accepts a single simple value as a one-item array, so
+    `?tag=a` and `?tag=a&tag=b` both validate. **This also applies to
+    JSON bodies: `"tags": "a"` is now accepted as `[ "a" ]`, where it was
+    a `400`.**
+  - **An untyped field with `oneOf`, `pattern`, `minLength` or
+    `maxLength` now rejects an array or object ("must be a single
+    value").** Those rules were skipped for a non-simple value, so
+    `{ "role": [ "root" ] }` passed a `oneOf` check — and with repeated
+    keys, `?role=root&role=x` would have too.
+  - Scalar types already rejected arrays; that's unchanged.
+- **ETags for buffered responses** (`models/Response.bx`,
+  `models/ConditionalGet.bx`): `app.set( "etag", "weak" | "strong" |
+  true | false | ( bodyBytes, encoding ) => tag )`. Off by default —
+  Express turns weak tags on, but a new header and a SHA-1 pass per
+  response shouldn't arrive with an upgrade. An invalid value throws at
+  `app.set()`. The weak format is the `etag` package's
+  (`W/"<length in hex>-<27 characters of base64 SHA-1>"`). A response is
+  tagged only for `GET`/`HEAD`, a 2xx status, a non-empty body and no
+  `ETag` set by the handler.
+- **`req.fresh` / `req.stale`** (`models/Request.bx`), with the `fresh`
+  package's rules as in Express 5: `If-None-Match` (`*`, a list, weak
+  comparison) decides when present, otherwise `If-Modified-Since`
+  against `Last-Modified`; `Cache-Control: no-cache` on the request is
+  always stale. They are read like properties and computed on each read.
+- **Buffered `GET`/`HEAD` responses now answer `304` when the request is
+  fresh**, with no body and without `Content-Type` or `Content-Length`;
+  `res.getBytesWritten()` reports `0`. **This applies with `etag` off
+  too: a handler that already sets its own `ETag` or `Last-Modified`
+  before `res.send()`/`res.json()` will start answering matching
+  conditional requests with `304`,** as Express does. `sendFile()`,
+  static files and `res.sse()` are unchanged.
+  - **`sendFile()` and static files now send the file in full when the
+    request says `Cache-Control: no-cache`** (a hard reload), matching
+    the rule above; they answered `304` before.
+  - The exchange adapters gained `removeHeader()`. **A hand-written
+    exchange adapter needs one.**
+  - `Request.bx` is now declared with `accessors=true
+    invokeImplicitAccessor=true` so `req.fresh` can be computed when
+    read; `req` gains `getFresh()`/`getStale()` and unused generated
+    `setFresh()`/`setStale()` methods.
+
+- **Fix:** `app.inject()` threw "Count cannot be zero" for a URL that is
+  only a query string (`"?page=2"`) (`models/BoxExpress.bx`).
+
 **0.2.27**
 - **Request helpers** (`models/Request.bx`, new `models/Negotiator.bx`):
   the parts of Express's `req` that a ported handler reaches for first
@@ -17,8 +87,6 @@
     path-scoped middleware handling the request. A mounted router had no
     way to learn where it was mounted, so it couldn't build a link to
     itself without the prefix hard-coded.
-  - No `req.fresh`/`req.stale` yet — they only mean something once
-    `res.send()`/`res.json()` set an `ETag`, which they don't.
 - **Response helpers** (`models/Response.bx`):
   - `res.clearCookie()`, plus `domain` and `expires` options on
     `res.cookie()` — without `domain` a cookie scoped to a parent domain

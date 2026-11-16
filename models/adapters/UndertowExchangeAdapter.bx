@@ -3,7 +3,7 @@
  * exchange-adapter contract that Request.bx/Response.bx are built against:
  * getRawExchange(), getMethod(), getPath(), getQueryString(),
  * getRequestHeaders(), getRequestHeader(), getRemoteAddress(),
- * getRequestBodyStream(), setHeader()/addHeader()/getHeader(),
+ * getRequestBodyStream(), setHeader()/addHeader()/getHeader()/removeHeader(),
  * sendBody()/sendHeadersOnly(), setStatusCode()/getResponseOutputStream()
  * (for a streaming response — res.sse() — that writes incrementally
  * instead of through sendBody()'s single buffered call).
@@ -97,6 +97,10 @@ class {
 
 	function getHeader( name ) {
 		return variables.exchange.getResponseHeaders().getFirst( _httpString( name ) ) ?: javacast( "null", "" )
+	}
+
+	function removeHeader( name ) {
+		variables.exchange.getResponseHeaders().remove( _httpString( name ) )
 	}
 
 	function sendBody( statusCode, bodyBytes ) {

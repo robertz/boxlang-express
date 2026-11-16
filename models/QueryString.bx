@@ -1,0 +1,51 @@
+/**
+ * The one parser behind req.query and boxExpressUrlencoded() bodies, with
+ * the semantics of Node's `querystring` module (Express 5's default
+ * "simple" query parser): a key that appears once is a string, a key that
+ * repeats is an array in order of appearance. Brackets mean nothing —
+ * "tag[]" and "a[b]" are literal key names.
+ *
+ * Keys land in a BoxLang struct, so two that differ only in case are one
+ * key: "?Tag=a&tag=b" is { Tag: [ "a", "b" ] }.
+ */
+class {
+
+	/**
+	 * strict: throw on a malformed percent-escape ("50%") instead of
+	 * keeping the raw text.
+	 */
+	function parse( raw, boolean strict = false ) {
+		var result = {}
+		if ( isNull( raw ) || !len( raw ) ) {
+			return result
+		}
+		for ( var pair in raw.listToArray( "&" ) ) {
+			var eqPos = pair.find( "=" )
+			// mid() rather than left()/right(): those throw on a zero count
+			// (an empty key or value, as in "key=").
+			var key = _decode( eqPos ? pair.mid( 1, eqPos - 1 ) : pair, strict )
+			var value = eqPos ? _decode( pair.mid( eqPos + 1, pair.len() ), strict ) : ""
+
+			if ( !structKeyExists( result, key ) ) {
+				result[ key ] = value
+			} else if ( isArray( result[ key ] ) ) {
+				result[ key ].append( value )
+			} else {
+				result[ key ] = [ result[ key ], value ]
+			}
+		}
+		return result
+	}
+
+	private function _decode( value, strict ) {
+		if ( strict ) {
+			return urlDecode( value )
+		}
+		try {
+			return urlDecode( value )
+		} catch ( any e ) {
+			return value
+		}
+	}
+
+}

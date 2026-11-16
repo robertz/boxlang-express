@@ -97,8 +97,8 @@ Core:
 
 - [App](docs/app.md) — routes, settings, `listen()` / `close()`
 - [Router](docs/routing.md) — mountable sub-apps, route params, chainable routes
-- [Request](docs/request.md) — including content negotiation (`req.accepts()`, `req.is()`)
-- [Response](docs/response.md) — header helpers, `res.format()`, cookies and signed cookies, range requests
+- [Request](docs/request.md) — query strings and repeated keys, content negotiation (`req.accepts()`, `req.is()`), `req.fresh`
+- [Response](docs/response.md) — header helpers, `res.format()`, cookies and signed cookies, ETags and `304`s, range requests
 - [Views](docs/views.md) — `res.render()`, layouts and partials, `app.locals` / `res.locals`
 - [Error handling](docs/error-handling.md) — default `404`/`500` responses
 - [Timeouts and size limits](docs/limits.md) — `requestTimeoutMs`, `maxBodySize`, `req.setTimeout()`

@@ -90,7 +90,7 @@ class {
 				res.set( "Cache-Control", "public, max-age=" & maxAge )
 			}
 
-			if ( conditional.isNotModified( req.headers[ "If-None-Match" ] ?: "", req.headers[ "If-Modified-Since" ] ?: "", etag, fileObj ) ) {
+			if ( conditional.isNotModified( req.headers[ "If-None-Match" ] ?: "", req.headers[ "If-Modified-Since" ] ?: "", etag, fileObj, req.headers[ "Cache-Control" ] ?: "" ) ) {
 				return res.status( 304 ).end()
 			}
 

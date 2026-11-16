@@ -144,7 +144,11 @@ class {
 		var typed = converted.value
 		var problem = ""
 
-		if ( type == "integer" || type == "number" ) {
+		if ( type == "any" && !isSimpleValue( typed ) && ( structKeyExists( rule, "oneOf" ) || structKeyExists( rule, "pattern" ) || structKeyExists( rule, "minLength" ) || structKeyExists( rule, "maxLength" ) ) ) {
+			// These rules check one value. A repeated key or a JSON array
+			// would otherwise skip them.
+			problem = "must be a single value"
+		} else if ( type == "integer" || type == "number" ) {
 			if ( structKeyExists( rule, "min" ) && typed < rule.min ) {
 				problem = "must be at least #rule.min#"
 			} else if ( structKeyExists( rule, "max" ) && typed > rule.max ) {
@@ -276,7 +280,12 @@ class {
 				}
 				return { ok: false, message: "must be an ISO 8601 date (2026-11-15 or 2026-11-15T09:30:00Z)" }
 			case "array":
-				return isArray( value ) ? { ok: true, value: value } : { ok: false, message: "must be an array" }
+				if ( isArray( value ) ) {
+					return { ok: true, value: value }
+				}
+				// "?tag=a" is a string and "?tag=a&tag=b" an array; a field
+				// declared as an array takes both.
+				return isSimpleValue( value ) ? { ok: true, value: [ value ] } : { ok: false, message: "must be an array" }
 			case "struct":
 				return ( isStruct( value ) && !isArray( value ) ) ? { ok: true, value: value } : { ok: false, message: "must be an object" }
 		}

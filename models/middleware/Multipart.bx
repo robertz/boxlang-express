@@ -151,7 +151,16 @@ class {
 				}
 				files[ fieldName ].append( fileStruct )
 			} else {
-				fields[ fieldName ] = createObject( "java", "java.lang.String" ).init( bodyBytes, javacast( "int", bodyStart ), javacast( "int", partEnd - bodyStart ), "UTF-8" )
+				var fieldValue = createObject( "java", "java.lang.String" ).init( bodyBytes, javacast( "int", bodyStart ), javacast( "int", partEnd - bodyStart ), "UTF-8" )
+				// A repeated field becomes an array, as in req.query and
+				// urlencoded bodies.
+				if ( !structKeyExists( fields, fieldName ) ) {
+					fields[ fieldName ] = fieldValue
+				} else if ( isArray( fields[ fieldName ] ) ) {
+					fields[ fieldName ].append( fieldValue )
+				} else {
+					fields[ fieldName ] = [ fields[ fieldName ], fieldValue ]
+				}
 			}
 		}
 
