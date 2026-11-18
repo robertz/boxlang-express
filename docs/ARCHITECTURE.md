@@ -255,7 +255,7 @@ WebSocket handshake handler or straight through to the unchanged HTTP
 chain — see [websockets.md](websockets.md) for the request-flow
 details; this is the architectural "why," not a repeat of the "what."
 
-`models/middleware/Stomp.bx` is STOMP 1.2 pub/sub built entirely as a
+`models/middleware/Stomp.bx` is STOMP 1.0/1.1/1.2 pub/sub built entirely as a
 consumer of `app.ws()` — no changes to the shim or the router needed.
 `StompFrameCodec.bx` handles the wire format, including escaping header
 values (backslash/newline/colon) rather than just stripping them, the

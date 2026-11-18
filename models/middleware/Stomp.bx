@@ -1,5 +1,5 @@
 /**
- * STOMP 1.2 broker on top of app.ws() — destination-based pub/sub
+ * STOMP 1.0/1.1/1.2 broker on top of app.ws() — destination-based pub/sub
  * (SUBSCRIBE/SEND/MESSAGE), receipts, ack/nack, transactions, bidirectional
  * heartbeat negotiation, exchanges/bindings, a live connection registry,
  * and server-side listeners. Mirrors SocketBox's WebSocketSTOMP feature

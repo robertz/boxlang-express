@@ -1,8 +1,8 @@
 /**
- * Backs app.schedule() — fixed-interval recurring jobs, the setInterval
- * equivalent. Deliberately no cron-expression parsing: that's a real,
- * separable feature (a parser, timezone handling, calendar edge cases)
- * this pass isn't building, not an oversight.
+ * Backs app.schedule() — fixed-interval recurring jobs (the setInterval
+ * equivalent) or cron schedules ("0 2 * * *", parsed by
+ * CronExpression.bx). A cron job runs on a one-shot timer re-armed after
+ * each run, since the gap between fire times isn't constant.
  *
  * One java.util.concurrent.ScheduledExecutorService (single-threaded)
  * drives ticks for every job on this instance; each tick's actual
@@ -13,14 +13,12 @@
  * does the (cheap) work of deciding whether to submit, not the job
  * itself.
  *
- * No persistence across restarts (in-memory only, single process), no
- * missed-run catch-up after downtime, and no clustering/distributed
- * coordination — every process instance runs every job independently,
- * the same boundary Stomp.bx's docblock draws around multi-node
- * clustering for itself. An app running multiple instances behind a
- * load balancer will get the same job firing once per instance, not
- * once total; that's a real, known limitation of an in-process
- * scheduler, not something to work around here.
+ * No persistence across restarts (in-memory only) and no missed-run
+ * catch-up after downtime. By default every process instance runs every
+ * job independently, so an app running multiple instances behind a load
+ * balancer gets the same job firing once per instance. Pass
+ * options.clustered: true to run a job only on the instance the
+ * ClusterManager elects (see plans/cluster-support.md).
  */
 class {
 

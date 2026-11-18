@@ -1,7 +1,8 @@
 /**
- * Parses/serializes STOMP 1.2 frames: "COMMAND\nheader:value\n\n<body>\0".
+ * Parses/serializes STOMP 1.0/1.1/1.2 frames: "COMMAND\nheader:value\n\n<body>\0".
  *
- * Header names/values are escaped per spec — backslash, newline, and colon
+ * Header names/values are escaped per spec for the connection's version
+ * (parse() lists the rules) — backslash, newline, and colon in 1.1/1.2
  * (STOMP reserves ":" as the header name/value separator, so a literal
  * colon in a value has to be escaped or it'd be misread as the start of a
  * new header). This is the actual protocol-correct fix for the same class
