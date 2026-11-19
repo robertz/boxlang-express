@@ -78,6 +78,14 @@ class {
 		var usesMemoryStore = !structKeyExists( options, "store" ) && !len( options.cache ?: "" )
 		var resave = options.resave ?: true
 		var saveUninitialized = options.saveUninitialized ?: true
+		// "auto" (the default): Secure whenever the request itself arrived over
+		// HTTPS (req.secure, which honors "trust proxy"), so the id is never
+		// sent back over plain HTTP from a site served over TLS. true/false
+		// force it either way.
+		var secureOption = options.secure ?: "auto"
+		if ( !isBoolean( secureOption ) && !( isSimpleValue( secureOption ) && secureOption == "auto" ) ) {
+			throw( type = "BoxExpress.InvalidOption", message = "boxExpressSession secure must be true, false or ""auto""" )
+		}
 		// Only bounds the built-in in-memory store: once this many sessions are
 		// held, NEW ones aren't stored (existing sessions keep working), so a
 		// flood of cookieless requests can't grow memory without limit.
@@ -154,7 +162,7 @@ class {
 					path: cookiePath,
 					maxAge: maxAge,
 					httpOnly: options.httpOnly ?: true,
-					secure: options.secure ?: false,
+					secure: isBoolean( secureOption ) ? secureOption : ( req.secure ?: false ),
 					sameSite: options.sameSite ?: "Lax"
 				} )
 			} )

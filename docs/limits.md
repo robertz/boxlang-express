@@ -1,6 +1,6 @@
 # Timeouts and size limits
 
-Five settings bound what one client can cost the server. Set them with
+Six settings bound what one client can cost the server. Set them with
 `app.set()` before `listen()`; `0` turns any of them off.
 
 | Setting | Default | What it bounds |
@@ -10,6 +10,7 @@ Five settings bound what one client can cost the server. Set them with
 | `"headerTimeoutMs"` | `60000` | How long a client has to finish sending its request headers |
 | `"keepAliveTimeoutMs"` | `60000` | How long an idle keep-alive connection is held open |
 | `"maxHeaderSize"` | `65536` | Total size of the request line and headers, in bytes |
+| `"parameterLimit"` | `1000` | Number of `key=value` pairs in a query string |
 
 ```js
 app.set( "requestTimeoutMs", 30000 )   // 30s
@@ -121,6 +122,27 @@ large chunked uploads to disk through `req.bodyStream()`, leave
 
 It's off by default so that upgrading can't start rejecting uploads an
 app already accepts.
+
+## Parameter count
+
+A byte limit doesn't bound how many *things* a request holds: 64 KB of
+query string is over 20,000 one-character keys, each of which becomes a
+struct entry. Three limits count them instead:
+
+| Where | Setting | Default | Over the limit |
+|---|---|---|---|
+| Query string | `app.set( "parameterLimit", n )` | `1000` | `400` |
+| Urlencoded body | `boxExpressUrlencoded( { parameterLimit: n } )` | `1000` | `413` |
+| Multipart body | `boxExpressUpload( { maxFields: n, maxFiles: n } )` | `1000` fields, `100` files | `413` |
+
+A repeated key counts once per appearance, and `0` turns a limit off. The
+request is refused outright, never truncated — an app that silently saw
+only the first 1000 parameters could be made to disagree with a proxy or
+validator in front of it that saw them all. `app.set( "parameterLimit" )`
+covers `req.query` only; each body parser has its own option because a
+form with thousands of fields is sometimes legitimate on one route and
+not on the rest. See [Request](request.md#query-strings),
+[Middleware](middleware.md) and [File uploads](uploads.md).
 
 ## Connection limits
 

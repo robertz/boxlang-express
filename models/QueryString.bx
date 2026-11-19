@@ -13,13 +13,19 @@ class {
 	/**
 	 * strict: throw on a malformed percent-escape ("50%") instead of
 	 * keeping the raw text.
+	 * parameterLimit: throw BoxExpress.TooManyParameters when there are more
+	 * key=value pairs than this, before decoding any of them. 0 for no limit.
 	 */
-	function parse( raw, boolean strict = false ) {
+	function parse( raw, boolean strict = false, numeric parameterLimit = 0 ) {
 		var result = {}
 		if ( isNull( raw ) || !len( raw ) ) {
 			return result
 		}
-		for ( var pair in raw.listToArray( "&" ) ) {
+		var pairs = raw.listToArray( "&" )
+		if ( parameterLimit > 0 && pairs.len() > parameterLimit ) {
+			throw( type = "BoxExpress.TooManyParameters", message = "More than #parameterLimit# parameters" )
+		}
+		for ( var pair in pairs ) {
 			var eqPos = pair.find( "=" )
 			// mid() rather than left()/right(): those throw on a zero count
 			// (an empty key or value, as in "key=").

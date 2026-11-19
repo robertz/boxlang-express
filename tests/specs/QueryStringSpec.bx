@@ -107,6 +107,52 @@ class extends="testbox.system.BaseSpec" {
 
 		} )
 
+		describe( "parameterLimit", function() {
+
+			var manyParams = ( count ) => {
+				var pairs = []
+				for ( var i = 1; i <= count; i++ ) {
+					pairs.append( "k#i#=v" )
+				}
+				return pairs.toList( "&" )
+			}
+
+			it( "accepts 1000 parameters by default and answers 400 for one more, before any handler", function() {
+				var app = new "../../models/BoxExpress"()
+				var reached = 0
+				app.get( "/q", ( req, res ) => { reached++; res.json( { count: req.query.count() } ) } )
+				var atLimit = app.inject( "/q?" & manyParams( 1000 ) )
+				var over = app.inject( "/q?" & manyParams( 1001 ) )
+				assertAll( [
+					() => expect( atLimit.json().count ).toBe( 1000 ),
+					() => expect( over.statusCode ).toBe( 400 ),
+					() => expect( over.json().message ).toBe( "Query string has more than 1000 parameters" ),
+					() => expect( reached ).toBe( 1 )
+				] )
+			} )
+
+			it( "counts a repeated key once per appearance", function() {
+				var app = new "../../models/BoxExpress"()
+				app.set( "parameterLimit", 3 )
+				app.get( "/q", ( req, res ) => res.json( req.query ) )
+				assertAll( [
+					() => expect( app.inject( "/q?tag=a&tag=b&tag=c" ).json().tag ).toBe( [ "a", "b", "c" ] ),
+					() => expect( app.inject( "/q?tag=a&tag=b&tag=c&tag=d" ).statusCode ).toBe( 400 )
+				] )
+			} )
+
+			it( "0 turns it off, and a value that isn't a whole number throws at app.set()", function() {
+				var app = new "../../models/BoxExpress"()
+				app.set( "parameterLimit", 0 )
+				app.get( "/q", ( req, res ) => res.json( { count: req.query.count() } ) )
+				assertAll( [
+					() => expect( app.inject( "/q?" & manyParams( 1500 ) ).json().count ).toBe( 1500 ),
+					() => expect( () => app.set( "parameterLimit", "many" ) ).toThrow( "BoxExpress.InvalidArgument" )
+				] )
+			} )
+
+		} )
+
 		describe( "req.query against a live server", function() {
 
 			it( "parses the same way as inject()", function() {

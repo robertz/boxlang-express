@@ -29,9 +29,7 @@
  * (options.headerName) for non-form (JSON/AJAX) clients that can't rely on
  * a hidden form field.
  *
- * The comparison itself is a plain string check, not constant-time — same
- * simplification as the session-ID lookup this token strategy already sits
- * on top of, not a new trade-off introduced here.
+ * The submitted token is compared in constant time, and case-sensitively.
  */
 class {
 

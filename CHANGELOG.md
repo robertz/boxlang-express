@@ -1,5 +1,60 @@
 # Changelog
 
+**0.2.29**
+- **`boxExpressRateLimit( { handler } )`** (`models/middleware/RateLimit.bx`):
+  `handler: ( req, res, next, info ) => ...` answers a limited request in
+  place of the JSON `message`, as in `express-rate-limit` — so a route
+  that serves HTML can render a page instead of handing a reader a JSON
+  blob. The status and, with `standardHeaders` on, `Retry-After` are set
+  before it runs, so `res.render( ... )` goes out as a 429. `info` is
+  `{ limit, remaining, resetSeconds, key }`; `resetSeconds` is the value
+  sent in `Retry-After`. It works the same with the in-memory store,
+  `cache` and a custom `store`. Without `handler` the response is
+  unchanged. A `handler` that isn't a function throws when the
+  middleware is created.
+- **The session cookie is `Secure` over HTTPS by default**
+  (`models/middleware/Session.bx`): `boxExpressSession()`'s `secure`
+  option now defaults to `"auto"` instead of `false` — the cookie gets
+  the `Secure` flag whenever `req.secure` is true, so a site behind a
+  TLS-terminating proxy (with `"trust proxy"` set) no longer sends its
+  session id back over plain HTTP unless told to. Plain-HTTP requests
+  are unchanged, and `secure: true` / `secure: false` still force it
+  either way; anything else throws `BoxExpress.InvalidOption`. An app
+  that is deliberately served over both HTTP and HTTPS and shares one
+  session between them needs `secure: false`.
+- **Changed default: `res.cookie()` sends `SameSite=Lax`**
+  (`models/Response.bx`). Until now a cookie got no `SameSite` attribute
+  unless `sameSite` was passed, leaving it to each browser's default.
+  A cookie that must be sent on cross-site requests — an embedded widget,
+  a login flow that posts back from another origin — now needs
+  `{ sameSite: "None", secure: true }`. `sameSite: false` restores the old
+  behaviour (no attribute) and `true` means `"Strict"`.
+  `res.clearCookie()` follows the same default. The session cookie was
+  already `Lax`.
+- **Changed default: at most 1000 parameters in a query string or
+  urlencoded body** (`models/QueryString.bx`). The byte limits alone
+  allowed tens of thousands of keys per request. A query string over the
+  limit is answered `400` before any middleware runs; set it with
+  `app.set( "parameterLimit", n )`. A urlencoded body over it is answered
+  `413`; set it with `boxExpressUrlencoded( { parameterLimit: n } )`. `0`
+  turns either off. A repeated key counts once per appearance, and the
+  request is refused, not truncated.
+- **Changed default: `boxExpressUpload()` takes at most 100 files and
+  1000 fields** (`models/middleware/Multipart.bx`), with new `maxFiles`
+  and `maxFields` options; over either is a `413` and nothing is written
+  to `dest`. `0` turns a limit off.
+- **`boxExpressRateLimit( { maxKeys } )`** (`models/middleware/RateLimit.bx`):
+  the in-memory store counts at most `maxKeys` keys (default `100000`)
+  separately. Past that, a key not already being counted goes into one
+  shared bucket until others expire, so a flood of distinct keys can
+  neither grow memory without limit nor get through uncounted. A warning
+  is logged at most once a minute while it's full. `0` removes the cap;
+  `cache` and `store` are unaffected.
+- **`SECURITY.md`**: how to report a vulnerability privately, which
+  versions get fixes, and what's in scope.
+- `models/middleware/Csrf.bx`'s header comment said the token comparison
+  wasn't constant-time; it has been since 0.2.20. Comment only.
+
 **0.2.28**
 - **Breaking: a key repeated in a query string or urlencoded body is now
   an array** (`?tag=a&tag=b` → `{ tag: [ "a", "b" ] }`), as in Express 5.

@@ -298,7 +298,7 @@ class {
 	}
 
 	function set( name, value ) {
-		if ( listFindNoCase( "headerTimeoutMs,keepAliveTimeoutMs,requestTimeoutMs,maxHeaderSize,maxBodySize", name ) ) {
+		if ( listFindNoCase( "headerTimeoutMs,keepAliveTimeoutMs,requestTimeoutMs,maxHeaderSize,maxBodySize,parameterLimit", name ) ) {
 			_checkLimit( name, value )
 		}
 		if ( lCase( name ) == "log" && !( isCustomFunction( value ) || isClosure( value ) || ( isSimpleValue( value ) && ( isBoolean( value ) || listFindNoCase( "access,json", value ) ) ) ) ) {

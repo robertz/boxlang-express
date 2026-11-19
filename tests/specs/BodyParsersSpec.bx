@@ -329,6 +329,28 @@ class extends="testbox.system.BaseSpec" {
 				expect( form( "rate=50%" ).statusCode ).toBe( 400 )
 			} )
 
+			it( "answers 413 for more parameters than parameterLimit (1000 by default)", function() {
+				var formWith = ( options, count ) => {
+					var pairs = []
+					for ( var i = 1; i <= count; i++ ) {
+						pairs.append( "k#i#=v" )
+					}
+					var app = new "../../models/BoxExpress"()
+					app.use( new "../../models/middleware/BodyParsers"().urlencoded( options ) )
+					app.post( "/form", ( req, res ) => res.json( { count: req.body.count() } ) )
+					return app.inject( { method: "POST", url: "/form", headers: { "Content-Type": "application/x-www-form-urlencoded" }, body: pairs.toList( "&" ) } )
+				}
+				var over = formWith( {}, 1001 )
+				assertAll( [
+					() => expect( formWith( {}, 1000 ).json().count ).toBe( 1000 ),
+					() => expect( over.statusCode ).toBe( 413 ),
+					() => expect( over.json().message ).toBe( "Request body has more than 1000 parameters" ),
+					() => expect( formWith( { parameterLimit: 2 }, 3 ).statusCode ).toBe( 413 ),
+					() => expect( formWith( { parameterLimit: 0 }, 1500 ).json().count ).toBe( 1500 ),
+					() => expect( () => new "../../models/middleware/BodyParsers"().urlencoded( { parameterLimit: "many" } ) ).toThrow( "BoxExpress.InvalidArgument" )
+				] )
+			} )
+
 		} )
 
 		describe( "parsers against a live server", function() {

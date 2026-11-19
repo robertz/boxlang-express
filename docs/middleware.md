@@ -75,6 +75,10 @@ are not parsed: `tag[]` and `user[name]` are literal keys. See [Query
 strings](request.md#query-strings), including why a field you expect to
 be a string should be validated.
 
+A urlencoded body may hold at most 1000 `key=value` pairs (a repeated key
+counts once per appearance); one with more gets a `413`. Change it with
+`boxExpressUrlencoded( { parameterLimit: n } )`, `0` for no limit.
+
 A body over the limit gets a `413` response and never reaches your route
 handler. A JSON body that doesn't parse gets a `400`
 (`{ error: true, message: "Malformed JSON body" }`), answered directly like

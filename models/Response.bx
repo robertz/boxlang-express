@@ -243,7 +243,8 @@ class {
 
 	/**
 	 * options: path ("/"), domain, maxAge (seconds), expires (a date),
-	 * httpOnly (true), secure (false), sameSite, signed (false — needs
+	 * httpOnly (true), secure (false), sameSite ("Lax"; false sends no
+	 * SameSite attribute, true means "Strict"), signed (false — needs
 	 * app.set( "cookie secret" ); read it back from req.signedCookies).
 	 */
 	function cookie( name, value, options = {} ) {
@@ -275,8 +276,12 @@ class {
 		if ( options.secure ?: false ) {
 			parts.append( "Secure" )
 		}
-		if ( !isNull( options.sameSite ) ) {
-			parts.append( "SameSite=" & options.sameSite )
+		var sameSite = options.sameSite ?: "Lax"
+		if ( isBoolean( sameSite ) ) {
+			sameSite = sameSite ? "Strict" : ""
+		}
+		if ( len( sameSite ) ) {
+			parts.append( "SameSite=" & sameSite )
 		}
 		variables.exchangeAdapter.addHeader( "Set-Cookie", parts.toList( "; " ) )
 		return this

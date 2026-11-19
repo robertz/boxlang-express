@@ -132,6 +132,30 @@ class extends="testbox.system.BaseSpec" {
 				expect( _hitThrough( limiter ).passed ).toBeFalse()
 			} )
 
+			it( "calls a handler for a limited request counted in the cache", function() {
+				var name = "rlSpec" & createUUID().replace( "-", "", "all" )
+				var dir = expandPath( "./tmp-ratelimit-spec-" & createUUID() )
+				cacheService().createCache( name, "BoxCacheProvider", { objectStore: "FileSystemStore", directory: dir } )
+
+				try {
+					var seen = []
+					var limiter = new "../../models/middleware/RateLimit"().limit( { max: 1, windowMs: 60000, cache: name, handler: ( req, res, next, info ) => { seen.append( info ) } } )
+					_hitThrough( limiter, "4.4.4.4" )
+					var limited = _hitThrough( limiter, "4.4.4.4" )
+					assertAll( [
+						() => expect( seen.len() ).toBe( 1 ),
+						() => expect( seen[ 1 ].key ).toBe( "4.4.4.4" ),
+						() => expect( seen[ 1 ].limit ).toBe( 1 ),
+						() => expect( limited.statusCode ).toBe( 429 ),
+						() => expect( limited.headers[ "Retry-After" ] ).toBe( toString( seen[ 1 ].resetSeconds ) ),
+						() => expect( limited.passed ).toBeFalse()
+					] )
+				} finally {
+					cacheService().shutdownCache( name )
+					directoryDelete( dir, true )
+				}
+			} )
+
 			it( "accepts a custom store object", function() {
 				var calls = []
 				var store = { hit: ( key, windowMs ) => { calls.append( key ); return { count: 99, resetAt: getTickCount() + 1000 } } }

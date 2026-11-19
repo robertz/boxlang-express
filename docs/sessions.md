@@ -47,6 +47,31 @@ working — and a warning is logged, so a flood of cookieless requests can't
 exhaust memory. With the default `saveUninitialized: true` every new
 visitor counts, so set it to `false` if you can.
 
+## The session cookie
+
+| Option | Default | |
+|---|---|---|
+| `name` | `"connect.sid"` | Cookie name |
+| `maxAge` | `86400` | Lifetime in seconds, reset on every request |
+| `path` | `"/"` | |
+| `httpOnly` | `true` | Hidden from page scripts |
+| `sameSite` | `"Lax"` | |
+| `secure` | `"auto"` | `"auto"`, `true` or `false` |
+
+`secure: "auto"` marks the cookie `Secure` when the request arrived over
+HTTPS (`req.secure`), so a site served over TLS never gets its session id
+sent back over plain HTTP, and local development over `http://` keeps
+working. BoxExpress doesn't terminate TLS itself, so `req.secure` is only
+true behind a proxy the app trusts — set
+[`"trust proxy"`](request.md) to match your deployment, or the cookie
+stays non-`Secure`. `secure: true` always sets the flag (a browser then
+drops the cookie on a plain-HTTP site); `secure: false` never does. Any
+other value throws `BoxExpress.InvalidOption`.
+
+Before 0.2.29 the default was `false`.
+
+## Stores
+
 The default store is in-memory on the `Session` instance (so it doesn't
 survive a restart and isn't shared across processes) — swap in something
 durable by passing `{ store: myStore }`, an object exposing

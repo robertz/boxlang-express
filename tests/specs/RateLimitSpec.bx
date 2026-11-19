@@ -83,6 +83,170 @@ class extends="testbox.system.BaseSpec" {
 				expect( res.getHeaders().keyExists( "RateLimit-Remaining" ) ).toBeFalse()
 			} )
 
+			describe( "the maxKeys option", function() {
+
+				it( "counts keys past the cap in one shared bucket, leaving tracked keys alone", function() {
+					var handler = new "../../models/middleware/RateLimit"().limit( { windowMs: 60000, max: 2, maxKeys: 2 } )
+					var remaining = function( ip ) {
+						var res = _fakeRes()
+						handler( _fakeReq( ip ), res, function() {} )
+						return res.getHeaders()[ "RateLimit-Remaining" ]
+					}
+					assertAll( [
+						() => expect( remaining( "10.0.0.1" ) ).toBe( "1" ),
+						() => expect( remaining( "10.0.0.2" ) ).toBe( "1" ),
+						() => expect( remaining( "10.0.0.3" ) ).withContext( "first key past the cap" ).toBe( "1" ),
+						() => expect( remaining( "10.0.0.4" ) ).withContext( "shares the bucket with .3" ).toBe( "0" ),
+						() => expect( remaining( "10.0.0.1" ) ).withContext( "an already-tracked key keeps its own count" ).toBe( "0" )
+					] )
+				} )
+
+				it( "blocks a new key once the shared bucket is over max", function() {
+					var handler = new "../../models/middleware/RateLimit"().limit( { windowMs: 60000, max: 1, maxKeys: 1 } )
+					handler( _fakeReq( "10.0.0.1" ), _fakeRes(), function() {} )
+					handler( _fakeReq( "10.0.0.2" ), _fakeRes(), function() {} )
+					var blocked = _fakeRes()
+					var nextCalled = false
+					handler( _fakeReq( "10.0.0.3" ), blocked, function() { nextCalled = true } )
+					assertAll( [
+						() => expect( nextCalled ).toBeFalse(),
+						() => expect( blocked.isSent() ).toBeTrue()
+					] )
+				} )
+
+				it( "makes room again once tracked keys expire", function() {
+					var handler = new "../../models/middleware/RateLimit"().limit( { windowMs: 50, max: 1, maxKeys: 1 } )
+					handler( _fakeReq( "10.0.0.1" ), _fakeRes(), function() {} )
+					sleep( 120 )
+					var res = _fakeRes()
+					handler( _fakeReq( "10.0.0.2" ), res, function() {} )
+					var again = _fakeRes()
+					handler( _fakeReq( "10.0.0.2" ), again, function() {} )
+					assertAll( [
+						() => expect( res.isSent() ).toBeFalse(),
+						() => expect( again.isSent() ).withContext( "tracked under its own key, so its second hit is over max" ).toBeTrue()
+					] )
+				} )
+
+				it( "0 turns the cap off, and anything but a whole number throws", function() {
+					var handler = new "../../models/middleware/RateLimit"().limit( { windowMs: 60000, max: 1, maxKeys: 0 } )
+					var res = _fakeRes()
+					for ( var i = 1; i <= 5; i++ ) {
+						res = _fakeRes()
+						handler( _fakeReq( "10.0.1.#i#" ), res, function() {} )
+					}
+					assertAll( [
+						() => expect( res.isSent() ).toBeFalse(),
+						() => expect( () => new "../../models/middleware/RateLimit"().limit( { maxKeys: "lots" } ) ).toThrow( "BoxExpress.InvalidArgument" ),
+						() => expect( () => new "../../models/middleware/RateLimit"().limit( { maxKeys: -1 } ) ).toThrow( "BoxExpress.InvalidArgument" )
+					] )
+				} )
+
+			} )
+
+			describe( "the handler option", function() {
+
+				it( "is called with info once a key is over the limit, and next() is not", function() {
+					var calls = []
+					var limiter = new "../../models/middleware/RateLimit"().limit( {
+						windowMs: 60000,
+						max: 2,
+						handler: ( req, res, next, info ) => {
+							calls.append( { info: info, ip: req.ip, status: res.getStatusCode(), retryAfter: res.getHeaders()[ "Retry-After" ] ?: "" } )
+							res.json( { custom: true } )
+						}
+					} )
+					var req = _fakeReq( "7.7.7.7" )
+					var nextCalls = 0
+					var next = function() { nextCalls++ }
+
+					limiter( req, _fakeRes(), next )
+					limiter( req, _fakeRes(), next )
+					var underLimitCalls = calls.len()
+					var limited = _fakeRes()
+					limiter( req, limited, next )
+
+					assertAll( [
+						() => expect( underLimitCalls ).withContext( "not called while under the limit" ).toBe( 0 ),
+						() => expect( nextCalls ).toBe( 2 ),
+						() => expect( calls.len() ).toBe( 1 ),
+						() => expect( calls[ 1 ].ip ).toBe( "7.7.7.7" ),
+						() => expect( calls[ 1 ].info.limit ).toBe( 2 ),
+						() => expect( calls[ 1 ].info.remaining ).toBe( 0 ),
+						() => expect( calls[ 1 ].info.key ).toBe( "7.7.7.7" ),
+						() => expect( calls[ 1 ].info.resetSeconds ).toBeBetween( 58, 60 ),
+						() => expect( calls[ 1 ].status ).withContext( "status set before the handler runs" ).toBe( 429 ),
+						() => expect( calls[ 1 ].retryAfter ).withContext( "Retry-After set before the handler runs" ).toBe( toString( calls[ 1 ].info.resetSeconds ) ),
+						() => expect( limited.getBody() ).toBe( { custom: true } ),
+						() => expect( limited.getStatusCode() ).toBe( 429 )
+					] )
+				} )
+
+				it( "uses statusCode, and sets no Retry-After when standardHeaders is off", function() {
+					var seen = {}
+					var limiter = new "../../models/middleware/RateLimit"().limit( {
+						max: 0,
+						statusCode: 503,
+						standardHeaders: false,
+						handler: ( req, res, next, info ) => {
+							seen = { status: res.getStatusCode(), hasRetryAfter: res.getHeaders().keyExists( "Retry-After" ), resetSeconds: info.resetSeconds }
+						}
+					} )
+					limiter( _fakeReq( "8.8.8.8" ), _fakeRes(), function() {} )
+					assertAll( [
+						() => expect( seen.status ).toBe( 503 ),
+						() => expect( seen.hasRetryAfter ).toBeFalse(),
+						() => expect( seen.resetSeconds ).toBeBetween( 58, 60 )
+					] )
+				} )
+
+				it( "lets the handler pass the request on with next()", function() {
+					var limiter = new "../../models/middleware/RateLimit"().limit( { max: 0, handler: ( req, res, next, info ) => next() } )
+					var nextCalled = false
+					limiter( _fakeReq( "8.8.4.4" ), _fakeRes(), function() { nextCalled = true } )
+					expect( nextCalled ).toBeTrue()
+				} )
+
+				it( "works with a custom store", function() {
+					var seen = {}
+					var store = { hit: ( key, windowMs ) => { return { count: 99, resetAt: createObject( "java", "java.lang.System" ).currentTimeMillis() + 30000 } } }
+					var limiter = new "../../models/middleware/RateLimit"().limit( {
+						max: 5,
+						store: store,
+						keyGenerator: ( req ) => "user-42",
+						handler: ( req, res, next, info ) => { seen = info }
+					} )
+					limiter( _fakeReq( "8.8.8.1" ), _fakeRes(), function() {} )
+					assertAll( [
+						() => expect( seen.key ).toBe( "user-42" ),
+						() => expect( seen.limit ).toBe( 5 ),
+						() => expect( seen.remaining ).toBe( 0 ),
+						() => expect( seen.resetSeconds ).toBeBetween( 28, 30 )
+					] )
+				} )
+
+				it( "leaves the default JSON response unchanged without a handler", function() {
+					var limiter = new "../../models/middleware/RateLimit"().limit( { max: 0 } )
+					var custom = new "../../models/middleware/RateLimit"().limit( { max: 0, message: { slow: "down" } } )
+					var res = _fakeRes()
+					var customRes = _fakeRes()
+					limiter( _fakeReq( "6.6.6.6" ), res, function() {} )
+					custom( _fakeReq( "6.6.6.6" ), customRes, function() {} )
+					assertAll( [
+						() => expect( res.getStatusCode() ).toBe( 429 ),
+						() => expect( res.getBody() ).toBe( { error: true, message: "Too many requests, please try again later." } ),
+						() => expect( res.getHeaders().keyExists( "Retry-After" ) ).toBeTrue(),
+						() => expect( res.getHeaders()[ "RateLimit-Remaining" ] ).toBe( "0" ),
+						() => expect( customRes.getBody() ).toBe( { slow: "down" } )
+					] )
+				} )
+
+				it( "rejects a handler that isn't a function", function() {
+					expect( () => new "../../models/middleware/RateLimit"().limit( { handler: "nope" } ) ).toThrow( "BoxExpress.InvalidArgument" )
+				} )
+
+			} )
+
 		} )
 	}
 
@@ -98,7 +262,9 @@ class extends="testbox.system.BaseSpec" {
 		res.isSent = function() { return sent }
 		res.status = function( code ) { statusCode = code; return res }
 		res.set = function( name, value ) { headers[ name ] = value; return res }
-		res.json = function( data ) { sent = true; return res }
+		var body = ""
+		res.json = function( data ) { sent = true; body = data; return res }
+		res.getBody = function() { return body }
 		res.getStatusCode = function() { return statusCode }
 		res.getHeaders = function() { return headers }
 		return res

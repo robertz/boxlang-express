@@ -270,6 +270,64 @@ class extends="testbox.system.BaseSpec" {
 
 		} )
 
+		describe( "Multipart part counts", function() {
+
+			var uploadApp = ( options ) => {
+				var app = new "../../models/BoxExpress"()
+				app.post( "/u", new "../../models/middleware/Multipart"().upload( options ), ( req, res ) => {
+					var fileCount = 0
+					for ( var key in req.files ) {
+						fileCount += req.files[ key ].len()
+					}
+					res.json( { fields: req.body.count(), files: fileCount } )
+				} )
+				return app
+			}
+			var body = ( fileCount, fieldCount ) => {
+				var crlf = variables.CR & variables.NL
+				var out = ""
+				for ( var i = 1; i <= fileCount; i++ ) {
+					out &= "--B" & crlf & 'Content-Disposition: form-data; name="doc"; filename="f#i#.txt"' & crlf & crlf & "x" & crlf
+				}
+				for ( var j = 1; j <= fieldCount; j++ ) {
+					out &= "--B" & crlf & 'Content-Disposition: form-data; name="field#j#"' & crlf & crlf & "v" & crlf
+				}
+				return out & "--B--" & crlf
+			}
+
+			it( "answers 413 for more files than maxFiles, counting files that share a field name", function() {
+				var app = uploadApp( { maxFiles: 2 } )
+				var over = _multipart( app, body( 3, 0 ) )
+				assertAll( [
+					() => expect( _multipart( app, body( 2, 5 ) ).json() ).toBe( { fields: 5, files: 2 } ),
+					() => expect( over.statusCode ).toBe( 413 ),
+					() => expect( over.json().message ).toBe( "Upload has more than 2 files" )
+				] )
+			} )
+
+			it( "answers 413 for more fields than maxFields", function() {
+				var app = uploadApp( { maxFields: 2 } )
+				var over = _multipart( app, body( 0, 3 ) )
+				assertAll( [
+					() => expect( _multipart( app, body( 1, 2 ) ).json() ).toBe( { fields: 2, files: 1 } ),
+					() => expect( over.statusCode ).toBe( 413 ),
+					() => expect( over.json().message ).toBe( "Upload has more than 2 fields" )
+				] )
+			} )
+
+			it( "defaults to 100 files and 1000 fields, and 0 turns either off", function() {
+				assertAll( [
+					() => expect( _multipart( uploadApp( {} ), body( 100, 1000 ) ).json() ).toBe( { fields: 1000, files: 100 } ),
+					() => expect( _multipart( uploadApp( {} ), body( 101, 0 ) ).statusCode ).toBe( 413 ),
+					() => expect( _multipart( uploadApp( {} ), body( 0, 1001 ) ).statusCode ).toBe( 413 ),
+					() => expect( _multipart( uploadApp( { maxFiles: 0, maxFields: 0 } ), body( 101, 1001 ) ).json() ).toBe( { fields: 1001, files: 101 } ),
+					() => expect( () => uploadApp( { maxFiles: "many" } ) ).toThrow( "BoxExpress.InvalidArgument" ),
+					() => expect( () => uploadApp( { maxFields: -1 } ) ).toThrow( "BoxExpress.InvalidArgument" )
+				] )
+			} )
+
+		} )
+
 		describe( "STOMP matching", function() {
 
 			it( "keeps destinations that differ only by case apart", function() {

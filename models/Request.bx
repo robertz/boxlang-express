@@ -15,6 +15,10 @@ class accessors=true invokeImplicitAccessor=true {
 	property name="fresh";
 	property name="stale";
 
+	function _hasTooManyParameters() {
+		return variables.tooManyParameters
+	}
+
 	function init( exchangeAdapter, settings = {} ) {
 		variables.exchangeAdapter = exchangeAdapter
 
@@ -23,7 +27,15 @@ class accessors=true invokeImplicitAccessor=true {
 		this.method = exchangeAdapter.getMethod()
 		this.path = exchangeAdapter.getPath()
 		this.originalUrl = this.path & ( len( queryString ) ? "?" & queryString : "" )
-		this.query = new QueryString().parse( queryString )
+		// Over app.set( "parameterLimit" ), HttpBridge answers 400 before any
+		// handler runs; throwing here would make it a 500.
+		this.query = {}
+		variables.tooManyParameters = false
+		try {
+			this.query = new QueryString().parse( queryString, false, settings[ "parameterLimit" ] ?: 1000 )
+		} catch ( "BoxExpress.TooManyParameters" e ) {
+			variables.tooManyParameters = true
+		}
 		this.params = {}
 		this.body = {}
 		this.files = {}

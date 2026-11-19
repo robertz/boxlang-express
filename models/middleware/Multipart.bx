@@ -17,6 +17,17 @@ class {
 	function upload( options = {} ) {
 		var limit = options.limit ?: 10485760
 		var dest = options.dest ?: javacast( "null", "" )
+		// Most file parts and most non-file fields one request may carry; 0
+		// for no limit. The byte limit alone still allows a body of tens of
+		// thousands of tiny parts, each costing a struct — or, with dest, a
+		// file on disk.
+		var maxFiles = options.maxFiles ?: 100
+		var maxFields = options.maxFields ?: 1000
+		for ( var bound in [ { name: "maxFiles", value: maxFiles }, { name: "maxFields", value: maxFields } ] ) {
+			if ( !isSimpleValue( bound.value ) || !isNumeric( bound.value ) || bound.value < 0 || bound.value != int( bound.value ) ) {
+				throw( type = "BoxExpress.InvalidArgument", message = "boxExpressUpload: #bound.name# must be a whole number, 0 or more" )
+			}
+		}
 
 		return function( req, res, next ) {
 			var contentType = req.headers[ "Content-Type" ] ?: ""
@@ -37,7 +48,9 @@ class {
 
 			var parsed = ""
 			try {
-				parsed = _parseMultipart( bodyBytes, boundary )
+				parsed = _parseMultipart( bodyBytes, boundary, maxFiles, maxFields )
+			} catch ( "BoxExpress.MultipartTooManyParts" e ) {
+				return res.status( 413 ).json( { error: true, message: e.message } )
 			} catch ( "BoxExpress.MultipartMalformed" e ) {
 				return res.status( 400 ).json( { error: true, message: "Malformed multipart body" } )
 			} catch ( any e ) {
@@ -80,7 +93,7 @@ class {
 	 * work to one search view plus the parts themselves, rather than the
 	 * several whole-body copies a split() and per-part substrings made.
 	 */
-	private function _parseMultipart( bodyBytes, boundary ) {
+	private function _parseMultipart( bodyBytes, boundary, maxFiles = 0, maxFields = 0 ) {
 		// RFC 2046 caps a boundary at 70 characters; an empty one can't delimit
 		// anything. Either way there's nothing to parse — same lenient outcome
 		// as a body with no parts.
@@ -95,6 +108,8 @@ class {
 
 		var fields = {}
 		var files = {}
+		var fileCount = 0
+		var fieldCount = 0
 
 		// regionMatches(), not startsWith( prefix, offset ): the latter doesn't
 		// reach Java's two-argument overload from BoxLang and always compares
@@ -138,6 +153,10 @@ class {
 				if ( !len( filename ) ) {
 					continue
 				}
+				fileCount++
+				if ( maxFiles > 0 && fileCount > maxFiles ) {
+					throw( type = "BoxExpress.MultipartTooManyParts", message = "Upload has more than #maxFiles# files" )
+				}
 				var fileBytes = arrays.copyOfRange( bodyBytes, javacast( "int", bodyStart ), javacast( "int", partEnd ) )
 				var fileStruct = {
 					fieldName: fieldName,
@@ -151,6 +170,10 @@ class {
 				}
 				files[ fieldName ].append( fileStruct )
 			} else {
+				fieldCount++
+				if ( maxFields > 0 && fieldCount > maxFields ) {
+					throw( type = "BoxExpress.MultipartTooManyParts", message = "Upload has more than #maxFields# fields" )
+				}
 				var fieldValue = createObject( "java", "java.lang.String" ).init( bodyBytes, javacast( "int", bodyStart ), javacast( "int", partEnd - bodyStart ), "UTF-8" )
 				// A repeated field becomes an array, as in req.query and
 				// urlencoded bodies.

@@ -245,7 +245,19 @@ order you wrote them. Selection follows the same rules as
 
 `res.cookie( name, value, options )` options: `path` (default `"/"`),
 `domain`, `maxAge` (seconds), `expires` (a date), `httpOnly` (default
-`true`), `secure`, `sameSite`, `signed`.
+`true`), `secure`, `sameSite` (default `"Lax"`), `signed`.
+
+`sameSite` takes `"Lax"`, `"Strict"` or `"None"`. With the default, the
+browser sends the cookie on requests from your own pages and when a user
+follows a link to your site, but not on a cross-site form post, `fetch()`
+or embedded request — which is what stops another site acting as your
+logged-in visitor. A cookie that has to travel cross-site (an embedded
+widget, a third-party login flow that posts back) needs
+`{ sameSite: "None", secure: true }`; browsers reject `None` without
+`Secure`. `sameSite: false` sends no `SameSite` attribute at all, leaving
+the choice to the browser, and `true` means `"Strict"`.
+
+Before 0.2.29 no `SameSite` attribute was sent unless you passed one.
 
 `res.clearCookie( name, options )` tells the browser to drop a cookie, by
 sending it back empty and already expired:

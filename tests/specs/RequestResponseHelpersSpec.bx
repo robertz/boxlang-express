@@ -86,6 +86,14 @@ class extends="testbox.system.BaseSpec" {
 			res.clearCookie( "scopedGone", { domain: "example.com", path: "/admin", secure: true, sameSite: "None", maxAge: 3600 } )
 			res.send( "ok" )
 		} )
+		app.get( "/samesite", ( req, res ) => {
+			res.cookie( "plain", "1" )
+			res.cookie( "strict", "1", { sameSite: "Strict" } )
+			res.cookie( "strictBool", "1", { sameSite: true } )
+			res.cookie( "none", "1", { sameSite: "None", secure: true } )
+			res.cookie( "off", "1", { sameSite: false } )
+			res.send( "ok" )
+		} )
 		app.get( "/inject-header", ( req, res ) => res.links( { next: "/x" & char( 13 ) & char( 10 ) & "Injected: 1" } ).send( "ok" ) )
 
 		return app
@@ -357,14 +365,25 @@ class extends="testbox.system.BaseSpec" {
 
 			it( "writes Domain and an HTTP-date Expires", function() {
 				var cookies = _app().inject( "/cookies" ).setCookies
-				expect( cookies ).toInclude( "scoped=v; Path=/admin; Domain=example.com; Expires=Wed, 02 Jan 2030 03:04:05 GMT; HttpOnly" )
+				expect( cookies ).toInclude( "scoped=v; Path=/admin; Domain=example.com; Expires=Wed, 02 Jan 2030 03:04:05 GMT; HttpOnly; SameSite=Lax" )
 			} )
 
 			it( "expires a cookie, keeping the attributes it was set with", function() {
 				var cookies = _app().inject( "/cookies" ).setCookies
 				assertAll( [
-					() => expect( cookies ).toInclude( "gone=; Path=/; Max-Age=0; Expires=Thu, 01 Jan 1970 00:00:00 GMT; HttpOnly" ),
+					() => expect( cookies ).toInclude( "gone=; Path=/; Max-Age=0; Expires=Thu, 01 Jan 1970 00:00:00 GMT; HttpOnly; SameSite=Lax" ),
 					() => expect( cookies ).withContext( "a maxAge passed to clearCookie() is overridden" ).toInclude( "scopedGone=; Path=/admin; Domain=example.com; Max-Age=0; Expires=Thu, 01 Jan 1970 00:00:00 GMT; HttpOnly; Secure; SameSite=None" )
+				] )
+			} )
+
+			it( "sends SameSite=Lax unless sameSite says otherwise, and nothing for sameSite: false", function() {
+				var cookies = _app().inject( "/samesite" ).setCookies
+				assertAll( [
+					() => expect( cookies[ 1 ] ).toBe( "plain=1; Path=/; HttpOnly; SameSite=Lax" ),
+					() => expect( cookies[ 2 ] ).toBe( "strict=1; Path=/; HttpOnly; SameSite=Strict" ),
+					() => expect( cookies[ 3 ] ).toBe( "strictBool=1; Path=/; HttpOnly; SameSite=Strict" ),
+					() => expect( cookies[ 4 ] ).toBe( "none=1; Path=/; HttpOnly; Secure; SameSite=None" ),
+					() => expect( cookies[ 5 ] ).toBe( "off=1; Path=/; HttpOnly" )
 				] )
 			} )
 
@@ -431,7 +450,7 @@ class extends="testbox.system.BaseSpec" {
 				var lines = variables.client.get( variables.baseUrl & "/cookies" ).setCookie.listToArray( char( 10 ) )
 				assertAll( [
 					() => expect( lines.len() ).toBe( 4 ),
-					() => expect( lines ).toInclude( "gone=; Path=/; Max-Age=0; Expires=Thu, 01 Jan 1970 00:00:00 GMT; HttpOnly" )
+					() => expect( lines ).toInclude( "gone=; Path=/; Max-Age=0; Expires=Thu, 01 Jan 1970 00:00:00 GMT; HttpOnly; SameSite=Lax" )
 				] )
 			} )
 

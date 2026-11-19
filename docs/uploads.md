@@ -44,3 +44,18 @@ directory `boxExpressStatic()` serves: an uploaded `.html` or `.svg` would
 then be served back as a page on your origin. Like the other parsers, the whole body is capped at 10MB by
 default — override with `{ limit: bytes }`; an oversized upload gets a `413`
 before your handler runs.
+
+The number of parts is capped too, since 10MB is room for tens of
+thousands of tiny ones — each a struct in memory and, with `dest`, a file
+on disk:
+
+| Option | Default | |
+|---|---|---|
+| `limit` | `10485760` | Size of the whole body, in bytes |
+| `maxFiles` | `100` | File parts in one request, across every field |
+| `maxFields` | `1000` | Non-file fields in one request |
+
+A request over either count gets a `413`
+(`{ error: true, message: "Upload has more than 100 files" }`) and nothing
+is written to `dest`. A file input left empty isn't counted. Set a route
+that takes one avatar to `maxFiles: 1`; `0` turns either limit off.

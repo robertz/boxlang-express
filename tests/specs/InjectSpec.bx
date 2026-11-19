@@ -225,6 +225,25 @@ class extends="testbox.system.BaseSpec" {
 					] )
 				} )
 
+				it( "marks the session cookie Secure only when the request arrived over HTTPS, unless secure is set", function() {
+					var sessionApp = function( options ) {
+						var app = _app()
+						app.set( "trust proxy", true )
+						app.use( new "../../models/middleware/Session"().session( options ) )
+						app.get( "/login", ( req, res ) => { req.session.user = "ada"; res.send( "in" ) } )
+						return app
+					}
+					var overHttps = { url: "/login", headers: { "X-Forwarded-Proto": "https" } }
+					assertAll( [
+						() => expect( sessionApp( {} ).inject( "/login" ).setCookies[ 1 ] ).withContext( "auto, http" ).notToInclude( "Secure" ),
+						() => expect( sessionApp( {} ).inject( overHttps ).setCookies[ 1 ] ).withContext( "auto, https" ).toInclude( "; Secure" ),
+						() => expect( sessionApp( { secure: "auto" } ).inject( overHttps ).setCookies[ 1 ] ).withContext( "explicit auto, https" ).toInclude( "; Secure" ),
+						() => expect( sessionApp( { secure: false } ).inject( overHttps ).setCookies[ 1 ] ).withContext( "false, https" ).notToInclude( "Secure" ),
+						() => expect( sessionApp( { secure: true } ).inject( "/login" ).setCookies[ 1 ] ).withContext( "true, http" ).toInclude( "; Secure" ),
+						() => expect( () => sessionApp( { secure: "sometimes" } ) ).toThrow( "BoxExpress.InvalidOption" )
+					] )
+				} )
+
 				it( "keeps every Set-Cookie when a response sets several", function() {
 					var app = _app()
 					app.get( "/two", ( req, res ) => { res.cookie( "a", "1" ); res.cookie( "b", "2" ); res.send( "ok" ) } )

@@ -18,6 +18,10 @@
  * => ... }` to key on something else (an API key, `req.session.userId`,
  * etc).
  *
+ * A limited request gets `message` as JSON. Pass `{ handler: ( req, res,
+ * next, info ) => ... }` to answer it yourself — the status and
+ * Retry-After are already set — e.g. to render an HTML page.
+ *
 * The default store is in-memory on this instance (so it doesn't survive a
 * restart and isn't shared across processes) — same trade-off as
 * Session.bx's default MemoryStore, for the same reason: fine for a
@@ -29,8 +33,11 @@
 class {
 
 	function init() {
+		variables.OVERFLOW_KEY = "boxexpress:overflow"
 		variables.entries = createObject( "java", "java.util.concurrent.ConcurrentHashMap" ).init()
 		variables.hitsSinceSweep = 0
+		variables.lastFullSweepMs = 0
+		variables.lastFullWarningMs = 0
 		return this
 	}
 
@@ -41,6 +48,21 @@ class {
 		var message = options.message ?: { error: true, message: "Too many requests, please try again later." }
 		var standardHeaders = options.standardHeaders ?: true
 		var keyGenerator = options.keyGenerator ?: ( ( req ) => req.ip )
+		// Only bounds the built-in in-memory store: once this many keys are
+		// being counted, a key not already among them is counted in one shared
+		// bucket, so a flood of distinct keys can't grow memory without limit
+		// and can't dodge the limit either. 0 turns the cap off.
+		var maxKeys = options.maxKeys ?: 100000
+		if ( !isSimpleValue( maxKeys ) || !isNumeric( maxKeys ) || maxKeys < 0 || maxKeys != int( maxKeys ) ) {
+			throw( type = "BoxExpress.InvalidArgument", message = "boxExpressRateLimit: maxKeys must be a whole number, 0 or more" )
+		}
+		// ( req, res, next, info ) => ... answers a limited request in place
+		// of the JSON `message`. "" for "none" — see StompMessage.bx's init().
+		var limitHandler = options.handler ?: ""
+		var useHandler = structKeyExists( options, "handler" ) && !isNull( options.handler )
+		if ( useHandler && !( isCustomFunction( limitHandler ) || isClosure( limitHandler ) ) ) {
+			throw( type = "BoxExpress.InvalidArgument", message = "boxExpressRateLimit: handler must be a function ( req, res, next, info )" )
+		}
 
 		// options.store (anything with hit( key, windowMs ) -> { count, resetAt })
 		// or options.cache (a named BoxLang cache) share the count across
@@ -57,7 +79,7 @@ class {
 
 		return function( req, res, next ) {
 			var key = keyGenerator( req )
-			var entry = useSharedStore ? sharedStore.hit( key, windowMs ) : _hit( key, windowMs )
+			var entry = useSharedStore ? sharedStore.hit( key, windowMs ) : _hit( key, windowMs, maxKeys )
 			var remaining = max( 0, maxRequests - entry.count )
 			var resetSeconds = int( ( entry.resetAt - _now() ) / 1000 )
 
@@ -71,15 +93,34 @@ class {
 				if ( standardHeaders ) {
 					res.set( "Retry-After", toString( resetSeconds ) )
 				}
-				return res.status( statusCode ).json( message )
+				res.status( statusCode )
+				if ( useHandler ) {
+					return limitHandler( req, res, next, { limit: maxRequests, remaining: remaining, resetSeconds: resetSeconds, key: key } )
+				}
+				return res.json( message )
 			}
 
 			next()
 		}
 	}
 
-	private function _hit( key, windowMs ) {
+	private function _hit( key, windowMs, maxKeys = 0 ) {
 		var now = _now()
+		if ( maxKeys > 0 && variables.entries.size() >= maxKeys && !variables.entries.containsKey( key ) ) {
+			// Expired keys may be all that's filling it — but don't rescan
+			// more than once a second while it stays full.
+			if ( now - variables.lastFullSweepMs >= 1000 ) {
+				variables.lastFullSweepMs = now
+				_sweep( now )
+			}
+			if ( variables.entries.size() >= maxKeys ) {
+				if ( now - variables.lastFullWarningMs > 60000 ) {
+					variables.lastFullWarningMs = now
+					println( "[BoxExpress] rate limiter is tracking its maximum of #maxKeys# keys — new keys share one counter until some expire. Raise maxKeys, or use a cache-backed store." )
+				}
+				key = variables.OVERFLOW_KEY
+			}
+		}
 		// compute() runs atomically per key — a separate get() and put() let
 		// concurrent requests read the same count and each write back count + 1.
 		var entry = variables.entries.compute( key, ( mapKey, current ) => {

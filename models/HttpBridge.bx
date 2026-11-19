@@ -69,7 +69,9 @@ class {
 			if ( requestTimeoutMs > 0 ) {
 				req.setTimeout( requestTimeoutMs )
 			}
-			if ( !_rejectOversizedBody( req, res ) ) {
+			if ( req._hasTooManyParameters() ) {
+				res.status( 400 ).json( { error: true, message: "Query string has more than #variables.settings[ "parameterLimit" ] ?: 1000# parameters" } )
+			} else if ( !_rejectOversizedBody( req, res ) ) {
 				variables.router.dispatch( req, res )
 			}
 		} catch ( any e ) {

@@ -61,6 +61,12 @@ class {
 		var limit = options.limit ?: 102400
 		var matcher = options.type ?: ""
 		var verify = options.verify ?: ""
+		// Most key=value pairs one body may hold; 0 for no limit. The byte
+		// limit alone still allows tens of thousands of one-character keys.
+		var parameterLimit = options.parameterLimit ?: 1000
+		if ( !isSimpleValue( parameterLimit ) || !isNumeric( parameterLimit ) || parameterLimit < 0 || parameterLimit != int( parameterLimit ) ) {
+			throw( type = "BoxExpress.InvalidArgument", message = "boxExpressUrlencoded: parameterLimit must be a whole number, 0 or more" )
+		}
 
 		return function( req, res, next ) {
 			var contentType = req.headers[ "Content-Type" ] ?: ""
@@ -79,7 +85,9 @@ class {
 
 			var formData = {}
 			try {
-				formData = new "../QueryString"().parse( rawBody, true )
+				formData = new "../QueryString"().parse( rawBody, true, parameterLimit )
+			} catch ( "BoxExpress.TooManyParameters" e ) {
+				return res.status( 413 ).json( { error: true, message: "Request body has more than #parameterLimit# parameters" } )
 			} catch ( any e ) {
 				return res.status( 400 ).json( { error: true, message: "Malformed urlencoded body" } )
 			}

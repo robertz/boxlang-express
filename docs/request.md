@@ -52,6 +52,14 @@ if ( !isArray( tags ) ) {
 }
 ```
 
+A query string may hold at most 1000 `key=value` pairs — a repeated key
+counts once per appearance. One with more is answered with a `400`
+(`{ error: true, message: "Query string has more than 1000 parameters" }`)
+before any middleware or handler runs, rather than being cut short and
+handled as if the rest weren't there. Change the limit with
+`app.set( "parameterLimit", n )`; `0` turns it off. See [Timeouts and size
+limits](limits.md#parameter-count).
+
 One difference from Express: a BoxLang struct's keys are
 case-insensitive, so `?Tag=a&tag=b` is one key, `{ Tag: [ "a", "b" ] }`,
 where Express would give two.
