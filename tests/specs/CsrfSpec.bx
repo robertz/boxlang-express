@@ -102,6 +102,39 @@ class extends="testbox.system.BaseSpec" {
 				expect( res.getStatusCode() ).toBe( 403 )
 			} )
 
+			it( "leaves the session untouched until req.csrfToken() is called", function() {
+				var handler = new "../../models/middleware/Csrf"().protect()
+				var req = _fakeReq( "GET" )
+				handler( req, _fakeRes(), function() {} )
+
+				expect( req.session ).toBeEmpty()
+				req.csrfToken()
+				expect( req.session ).toHaveKey( "csrfToken" )
+			} )
+
+			it( "rejects a POST when the session has no token, without minting one", function() {
+				var handler = new "../../models/middleware/Csrf"().protect()
+				var req = _fakeReq( "POST", {}, { "_csrf": "" } )
+				var res = _fakeRes()
+				var nextCalled = false
+				handler( req, res, function() { nextCalled = true } )
+
+				expect( nextCalled ).toBeFalse()
+				expect( res.getStatusCode() ).toBe( 403 )
+				expect( req.session ).toBeEmpty()
+			} )
+
+			it( "creates no session for a request that never asks for a token (saveUninitialized: false)", function() {
+				var app = new "../../models/BoxExpress"()
+				app.use( new "../../models/middleware/Session"().session( { saveUninitialized: false } ) )
+				app.use( new "../../models/middleware/Csrf"().protect() )
+				app.get( "/ping", ( req, res ) => res.send( "pong" ) )
+				app.get( "/form", ( req, res ) => res.send( req.csrfToken() ) )
+
+				expect( app.inject( "/ping" ).setCookies.len() ).toBe( 0 )
+				expect( app.inject( "/form" ).setCookies.len() ).toBe( 1 )
+			} )
+
 			it( "throws a clear error when req.session doesn't exist", function() {
 				var handler = new "../../models/middleware/Csrf"().protect()
 				expect( function() {

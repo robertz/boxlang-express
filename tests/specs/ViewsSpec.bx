@@ -106,6 +106,35 @@ class extends="testbox.system.BaseSpec" {
 
 		} )
 
+		describe( "renderToString()", function() {
+
+			it( "returns what render() would send, layout included, and sends nothing", function() {
+				var app = _app( "layouts/main" )
+				app.get( "/string", ( req, res ) => {
+					var html = res.renderToString( "greeting", { name: "Ada" } )
+					res.json( { sent: res.isSent(), html: html } )
+				} )
+				var payload = JSONDeserialize( app.inject( "/string" ).body )
+
+				expect( payload.sent ).toBeFalse()
+				expect( _flat( payload.html ) ).toBe( _flat( app.inject( "/plain" ).body ) )
+			} )
+
+			it( "honors layout: false and merges app.locals and res.locals", function() {
+				var app = _app( "layouts/main" )
+				app.get( "/string", ( req, res ) => {
+					res.locals.name = "Grace"
+					res.send( res.renderToString( "with-partial", { layout: false } ) )
+				} )
+				var body = _flat( app.inject( "/string" ).body )
+
+				expect( body ).toInclude( 'site="Site"' )
+				expect( body ).toInclude( "after name=Grace" )
+				expect( body ).notToInclude( "<html" )
+			} )
+
+		} )
+
 		describe( "partial()", function() {
 
 			it( "renders another view inline, seeing the caller's data plus its own", function() {

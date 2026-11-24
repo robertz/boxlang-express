@@ -21,10 +21,10 @@
  *     res.send( "ok" )
  *   } )
  *
- * "Safe" methods (GET/HEAD/OPTIONS by default) never validate — a token is
- * only minted and exposed via req.csrfToken() for those, since that's how
- * a token gets into a form in the first place before any state-changing
- * request happens. Every other method must submit a matching token: read
+ * "Safe" methods (GET/HEAD/OPTIONS by default) never validate. The token is
+ * minted the first time req.csrfToken() is called, so a request that never
+ * asks for one leaves the session untouched (and, with saveUninitialized:
+ * false, creates no session at all). Every other method must submit a matching token: read
  * from req.body[fieldName] first, falling back to a request header
  * (options.headerName) for non-form (JSON/AJAX) clients that can't rely on
  * a hidden form field.
@@ -46,15 +46,22 @@ class {
 				)
 			}
 
-			if ( !len( req.session.csrfToken ?: "" ) ) {
-				req.session.csrfToken = _generateToken()
+			// Minted on the first call, not on every request: writing to the
+			// session here would give every anonymous request a stored session.
+			req.csrfToken = function() {
+				if ( !len( req.session.csrfToken ?: "" ) ) {
+					req.session.csrfToken = _generateToken()
+				}
+				return req.session.csrfToken
 			}
-
-			var token = req.session.csrfToken
-			req.csrfToken = function() { return token }
 
 			if ( ignoreMethods.findNoCase( req.method ) > 0 ) {
 				return next()
+			}
+
+			var token = req.session.csrfToken ?: ""
+			if ( !isSimpleValue( token ) || !len( token ) ) {
+				return res.status( 403 ).json( { error: true, message: "Invalid or missing CSRF token" } )
 			}
 
 			var submitted = ( isStruct( req.body ) && isSimpleValue( req.body[ fieldName ] ?: "" ) ) ? ( req.body[ fieldName ] ?: "" ) : ""

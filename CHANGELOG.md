@@ -1,5 +1,32 @@
 # Changelog
 
+**0.2.30**
+- **An error after the response is sent is logged** (`models/Router.bx`,
+  [#8](https://github.com/robertz/boxlang-express/issues/8)). A handler
+  that threw, or called `next( err )`, after `res.send()` had its error
+  dropped: error handlers are skipped because nothing more can be sent,
+  and nothing was printed either. It now writes one line to stdout —
+  `Error after the response was sent, GET /path: message` — with the
+  request id when `requestId` is on. The response is unchanged and error
+  handlers are still skipped. A client that disconnects in the middle of
+  a download or an SSE stream now produces this line too.
+- **Changed behaviour: `boxExpressCsrf()` mints its token on the first
+  `req.csrfToken()` call** (`models/middleware/Csrf.bx`,
+  [#9](https://github.com/robertz/boxlang-express/issues/9)). It used to
+  write `req.session.csrfToken` on every request, so with the session and
+  CSRF middleware mounted app-wide every anonymous request became a
+  stored session and `saveUninitialized: false` did nothing. A request
+  that never asks for a token now leaves the session alone. An unsafe
+  request whose session has no token gets the same `403` as before, and
+  no token is minted for it. Code that read `req.session.csrfToken`
+  directly, without calling `req.csrfToken()`, will find it unset.
+- **`res.renderToString( view, data )`** (`models/Response.bx`,
+  [#10](https://github.com/robertz/boxlang-express/issues/10)) returns
+  what `res.render()` would send without sending it: the same
+  `app.locals` / `res.locals` / `data` merge and the same layout rules,
+  including `layout: false`. `render()` is now `renderToString()` plus
+  the send.
+
 **0.2.29**
 - **`boxExpressRateLimit( { handler } )`** (`models/middleware/RateLimit.bx`):
   `handler: ( req, res, next, info ) => ...` answers a limited request in

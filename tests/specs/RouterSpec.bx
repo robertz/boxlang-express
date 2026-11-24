@@ -348,6 +348,46 @@ class extends="testbox.system.BaseSpec" {
 				expect( res.getBody().message ).toBe( "Internal Server Error" )
 			} )
 
+			it( "logs an error thrown after the response was sent, and skips the error handlers", function() {
+				var router = new "../../models/Router"()
+				var res = _fakeRes()
+				var handlerRan = false
+				router.get( "/late", ( req, res ) => {
+					res.send( "ok" )
+					throw( message = "thrown after the response was sent", type = "TestError" )
+				} )
+				router.use( ( err, req, res, next ) => { handlerRan = true } )
+				router.dispatch( _fakeReq( "GET", "/late" ), res )
+
+				expect( router._lateErrorCount() ).toBe( 1 )
+				expect( handlerRan ).toBeFalse()
+				expect( res.getBody() ).toBe( "ok" )
+			} )
+
+			it( "logs a late error once when it is thrown inside a mounted router", function() {
+				var router = new "../../models/Router"()
+				var child = new "../../models/Router"()
+				child.get( "/late", ( req, res ) => {
+					res.send( "ok" )
+					throw( message = "late in a child router", type = "TestError" )
+				} )
+				router.use( "/sub", child )
+				router.dispatch( _fakeReq( "GET", "/sub/late" ), _fakeRes() )
+
+				expect( router._lateErrorCount() + child._lateErrorCount() ).toBe( 1 )
+			} )
+
+			it( "does not count next() without an error after the response was sent", function() {
+				var router = new "../../models/Router"()
+				router.get( "/fine", ( req, res, next ) => {
+					res.send( "ok" )
+					next()
+				} )
+				router.dispatch( _fakeReq( "GET", "/fine" ), _fakeRes() )
+
+				expect( router._lateErrorCount() ).toBe( 0 )
+			} )
+
 			it( "exposes the real error message from the default 500 body when app.set('env','development') was used", function() {
 				var router = new "../../models/Router"( { env: "development" } )
 				var res = _fakeRes()

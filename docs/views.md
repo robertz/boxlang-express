@@ -137,6 +137,26 @@ rest of the page. It resolves against the views directory with the same
 containment check as `render()`, and a partial can call `partial()`
 itself.
 
+## Rendering to a string
+
+`res.renderToString( view, data )` returns what `res.render()` would send
+and sends nothing: an HTML email body, a fragment inside a JSON response,
+output to cache.
+
+```js
+app.post( "/orders", ( req, res ) => {
+	var order = orders.create( req.body )
+	mailer.send( order.email, "Your order", res.renderToString( "emails/receipt", { order: order, layout: "layouts/email" } ) )
+	res.json( { id: order.id, summary: res.renderToString( "partials/order-row", { order: order, layout: false } ) } )
+} )
+```
+
+It merges `app.locals`, `res.locals` and `data` exactly as `render()` does
+and follows the same layout rules, so with a `"view layout"` set pass
+`layout: false` for a bare fragment. It can be called any number of times
+and does not count as a terminal method. `partial()` is still the one to
+use inside a view.
+
 `<bx:include template="partials/nav.bxm">` also works, as it always has —
 it's plain BoxLang. The differences: an include's path is relative to the
 file it's written in rather than to the views directory, and it can't be

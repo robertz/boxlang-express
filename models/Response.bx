@@ -527,6 +527,16 @@ class {
 	 * have to be threaded through every render() call.
 	 */
 	function render( view, data = {} ) {
+		var output = renderToString( view, data )
+		type( "text/html; charset=utf-8" )
+		return _end( output.getBytes( "UTF-8" ) )
+	}
+
+	/**
+	 * What render() would send, returned as a string and with nothing sent:
+	 * the same app.locals / res.locals / data merge and the same layout rules.
+	 */
+	function renderToString( view, data = {} ) {
 		// app.locals < res.locals < the data passed here, each overriding the last —
 		// same precedence as Express.
 		var mergedData = {}
@@ -554,8 +564,7 @@ class {
 			output = _renderToString( layout, mergedData )
 		}
 
-		type( "text/html; charset=utf-8" )
-		return _end( output.getBytes( "UTF-8" ) )
+		return output
 	}
 
 	/**

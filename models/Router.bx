@@ -12,6 +12,7 @@ class {
 		variables.stack = []
 		variables.settings = settings
 		variables.paramHandlers = {}
+		variables.lateErrorCount = 0
 		return this
 	}
 
@@ -148,6 +149,11 @@ class {
 
 		next = function( err ) {
 			if ( res.isSent() ) {
+				// Nothing can be sent any more, so error handlers are skipped,
+				// but the error itself must not vanish.
+				if ( !isNull( err ) && !( req.timedOut ?: false ) ) {
+					self._logLateError( err, req )
+				}
 				return
 			}
 
@@ -328,6 +334,20 @@ class {
 		} else {
 			res.status( 404 ).json( { error: true, message: "Cannot #req.method# #req.path#" } )
 		}
+	}
+
+	function _logLateError( err, req ) {
+		variables.lateErrorCount++
+		try {
+			var requestId = req.id ?: ""
+			var safePath = reReplace( toString( req.originalUrl ?: req.path ).listFirst( "?" ), "[\x00-\x1F\x7F-\x9F\u2028\u2029]", "?", "all" )
+			println( "[#dateTimeFormat( now(), 'yyyy-MM-dd HH:mm:ss' )#]" & ( len( requestId ) ? " [#requestId#]" : "" ) & " Error after the response was sent, #req.method# #safePath#: #_errorMessage( err )#" )
+		} catch ( any ignore ) {
+		}
+	}
+
+	function _lateErrorCount() {
+		return variables.lateErrorCount
 	}
 
 	private function _errorMessage( err ) {

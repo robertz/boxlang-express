@@ -10,6 +10,8 @@
 `res.redirect(url, code=302)`, `res.cookie(name,val,options)`,
 `res.sendBytes(bytes, contentType)`, `res.sendFile(path, options)`,
 `res.download(path, filename)`, `res.end(data)`, `res.render(view, data)`,
+`res.renderToString(view, data)` (returns the HTML and sends nothing — see
+[Views](views.md#rendering-to-a-string)),
 `res.dump(data)` (sends BoxLang's rich, collapsible `dump()` HTML view of a
 variable as the response — a quick debugging escape hatch; see the note
 below), `res.getStatusCode()`/`res.getBytesWritten()` (the eventual status
